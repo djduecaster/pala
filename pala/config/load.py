@@ -22,6 +22,15 @@ class LoggingConfig:
 
 
 @dataclass
+class CameraConfig:
+    device: str
+    width: int
+    height: int
+    fps: int
+    pipeline: Optional[str]
+
+
+@dataclass
 class RobotConfig:
     mode: str
     loop_rates: LoopRates
@@ -30,6 +39,7 @@ class RobotConfig:
     joint_limits_rad: List[List[float]]
     servo_calibration: Dict[str, Any]
     logging: LoggingConfig
+    camera: CameraConfig
 
 
 def _fail(path: str, msg: str) -> None:
@@ -115,6 +125,17 @@ def load_config(path: str) -> RobotConfig:
         actions_jsonl=logging_raw.get("actions_jsonl"),
     )
 
+    camera_raw = data.get("camera", {})
+    if not isinstance(camera_raw, dict):
+        _fail("camera", "expected mapping")
+    camera = CameraConfig(
+        device=str(camera_raw.get("device", "/dev/video0")),
+        width=_as_int(camera_raw.get("width", 640), "camera.width"),
+        height=_as_int(camera_raw.get("height", 480), "camera.height"),
+        fps=_as_int(camera_raw.get("fps", 30), "camera.fps"),
+        pipeline=camera_raw.get("pipeline"),
+    )
+
     return RobotConfig(
         mode=mode,
         loop_rates=loop_rates,
@@ -123,4 +144,5 @@ def load_config(path: str) -> RobotConfig:
         joint_limits_rad=joint_limits,
         servo_calibration=servo_cal,
         logging=logging,
+        camera=camera,
     )

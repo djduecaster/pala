@@ -8,6 +8,7 @@ from typing import Optional
 import math
 import time
 
+from ..hardware.camera import CameraInterface
 
 class FrameSource:
     def get_timestamp(self) -> float:
@@ -34,3 +35,21 @@ class DummyFrameSource(FrameSource):
 
     def shutdown(self) -> None:
         pass
+
+
+class CameraFrameSource(FrameSource):
+    def __init__(self, camera: CameraInterface):
+        self._camera = camera
+        self.last_frame = None
+        self.last_pts_ns = None
+        self.last_mono_ns = None
+
+    def get_timestamp(self) -> float:
+        frame, pts_ns, mono_ns = self._camera.get_frame()
+        self.last_frame = frame
+        self.last_pts_ns = pts_ns
+        self.last_mono_ns = mono_ns
+        return mono_ns / 1_000_000_000.0
+
+    def shutdown(self) -> None:
+        self._camera.shutdown()

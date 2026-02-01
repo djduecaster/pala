@@ -40,3 +40,10 @@ logging:
   enabled: false
   perception_jsonl: logs/perception.jsonl
   actions_jsonl: logs/actions.jsonl
+
+camera:
+  device: /dev/video0
+  width: 640
+  height: 480
+  fps: 30
+  pipeline: null

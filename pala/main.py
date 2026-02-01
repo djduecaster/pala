@@ -3,11 +3,13 @@ from __future__ import annotations
 import signal
 import threading
 import time
+import os
 from typing import Optional
 
 from .config import load_config
 from .types import PerceptionState, ActionPlan, HardwareCommand
 from .perception import PerceptionNode
+from .perception.frame_source import DummyFrameSource, CameraFrameSource
 from .planner import HeuristicPlanner
 from .behavior import BehaviorPolicy
 from .control import TrajectoryExecutor
@@ -17,6 +19,7 @@ from .utils import RateLimiter, LatestValue, maybe_logger
 
 def main() -> int:
     cfg = load_config("config/robot.yaml")
+    max_runtime_s = _parse_max_runtime_s()
 
     stop = threading.Event()
 
@@ -26,7 +29,7 @@ def main() -> int:
     latest_command = LatestValue[HardwareCommand]()
 
     # Nodes
-    perception = PerceptionNode()
+    perception = PerceptionNode(source=_build_frame_source(cfg))
     planner = HeuristicPlanner()
     behavior = BehaviorPolicy(planner=planner, dwell_s=2.0, cooldown_s=1.0)
     executor = TrajectoryExecutor(cfg.joint_limits_rad)
@@ -128,8 +131,12 @@ def main() -> int:
     for t in threads:
         t.start()
 
+    start_time = time.monotonic()
     try:
         while not stop.is_set():
+            if max_runtime_s is not None and (time.monotonic() - start_time) >= max_runtime_s:
+                stop.set()
+                break
             time.sleep(0.1)
     finally:
         stop.set()
@@ -190,6 +197,32 @@ def _build_servo(cfg) -> DummyServo:
         reverses=reverses,
     )
     return PCA9685Servo(calibration)
+
+
+def _build_frame_source(cfg):
+    if cfg.mode != "jetson_full":
+        return DummyFrameSource()
+
+    from .hardware.camera_gst import GStreamerCamera
+
+    camera = GStreamerCamera(
+        device=cfg.camera.device,
+        width=cfg.camera.width,
+        height=cfg.camera.height,
+        fps=cfg.camera.fps,
+        pipeline=cfg.camera.pipeline,
+    )
+    return CameraFrameSource(camera)
+
+
+def _parse_max_runtime_s() -> Optional[float]:
+    raw = os.getenv("PALA_MAX_RUNTIME_S")
+    if raw is None or raw == "":
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        raise ValueError("PALA_MAX_RUNTIME_S must be a number") from None
 
 
 if __name__ == "__main__":

@@ -38,3 +38,23 @@ Mode selection will also be supported via `config/robot.yaml` (single source of 
 - `uv` installed (e.g. `~/.local/bin/uv`)
 - Python 3.x available (JetPack default is fine)
 - Network connectivity and SSH access
+
+### Jetson Camera Setup (GStreamer)
+For the Jetson camera backend and FPS tool, install GStreamer Python bindings:
+```
+sudo apt update
+sudo apt install -y python3-gi gir1.2-gstreamer-1.0 gstreamer1.0-plugins-base gstreamer1.0-plugins-good
+```
+
+If you want the venv to access system packages (recommended on Jetson for `gi`):
+```
+rm -rf .venv
+uv venv --system-site-packages
+uv sync
+uv pip install -e .
+```
+
+Quick camera probe:
+```
+uv run python tools/test_camera_fps.py --seconds 5 --mode jetson_full
+```
