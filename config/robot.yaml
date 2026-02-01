@@ -1,0 +1,42 @@
+mode: dev # dev | jetson_perception | jetson_full
+
+loop_rates:
+  perception_hz: 20
+  behavior_hz: 3
+  control_hz: 80
+  hardware_hz: 120
+
+deadman_timeout_ms: 250
+
+joint_names:
+  - yaw
+  - pitch1
+  - pitch2
+  - roll
+  - pitch3
+
+# radians
+joint_limits_rad:
+  - [-1.57, 1.57]
+  - [-1.57, 1.57]
+  - [-1.57, 1.57]
+  - [-1.57, 1.57]
+  - [-1.57, 1.57]
+
+# Placeholder calibration to be filled when porting PCA9685 driver
+servo_calibration:
+  bus_number: 7
+  address: 0x40
+  frequency: 50
+  channels: [0, 1, 2, 3, 4]
+  per_joint:
+    yaw: {min_pulse: 500, max_pulse: 2500, angle_scale: 0.8333, angle_offset: 90, reverse: true}
+    pitch1: {min_pulse: 500, max_pulse: 2500, angle_scale: 1.0, angle_offset: 80, reverse: false}
+    pitch2: {min_pulse: 500, max_pulse: 2500, angle_scale: 2.0, angle_offset: 50, reverse: false}
+    roll: {min_pulse: 500, max_pulse: 2500, angle_scale: 1.0, angle_offset: 100, reverse: false}
+    pitch3: {min_pulse: 500, max_pulse: 2500, angle_scale: 1.0, angle_offset: 80, reverse: true}
+
+logging:
+  enabled: false
+  perception_jsonl: logs/perception.jsonl
+  actions_jsonl: logs/actions.jsonl
