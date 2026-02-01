@@ -1,8 +1,4 @@
-"""Camera interfaces.
-
-TODO: Port legacy GStreamer camera from ../pala_old/pala_project/src/hardware/camera.py
-      into pala/hardware/camera_gst.py
-"""
+"""Camera interfaces."""
 from __future__ import annotations
 from typing import Tuple, Optional
 import time

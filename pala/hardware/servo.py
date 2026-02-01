@@ -6,9 +6,11 @@ TODO: Port legacy PCA9685 driver from ../pala_old/pala_project/src/hardware/serv
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, List
+import logging
 import time
 import math
 
+logger = logging.getLogger(__name__)
 
 class ServoInterface:
     def set_angles(self, joint_angles_rad: Iterable[float]) -> None:
@@ -45,13 +47,13 @@ class DummyServo(ServoInterface):
         self._last = list(joint_angles_rad)
         self._counter += 1
         if self._counter % self._log_every == 0:
-            print(f"[hardware] dummy servo angles(rad)={self._last}")
+            logger.info("dummy servo angles(rad)=%s", self._last)
 
     def enable(self, on: bool) -> None:
         if self._enabled != on:
             self._enabled = on
             state = "enabled" if on else "disabled"
-            print(f"[hardware] dummy servo {state}")
+            logger.info("dummy servo %s", state)
 
     def shutdown(self) -> None:
         self.enable(False)

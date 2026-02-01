@@ -4,6 +4,7 @@ import signal
 import threading
 import time
 import os
+import logging
 from typing import Optional
 
 from .config import load_config
@@ -16,6 +17,7 @@ from .control import TrajectoryExecutor
 from .hardware import DummyServo, PCA9685Servo, ServoCalibration
 from .utils import RateLimiter, LatestValue, maybe_logger
 
+logger = logging.getLogger(__name__)
 
 def main() -> int:
     cfg = load_config("config/robot.yaml")
@@ -53,10 +55,13 @@ def main() -> int:
             st = perception.step()
             latest_perception.set(st, st.timestamp_monotonic_s)
 
+            if perception_log:
+                perception_log.write(st)
+
             now = time.monotonic()
             if now - last_print >= 2.0:
                 zone = st.debug.get("zone_hint") if st.debug else None
-                print(f"[perception] fps={st.fps or 0:.1f} zone={zone}")
+                logger.info("perception fps=%.1f zone=%s", st.fps or 0.0, zone)
                 last_print = now
 
             rl.sleep()
@@ -70,8 +75,6 @@ def main() -> int:
             ts = time.monotonic()
             latest_action.set(action, ts)
 
-            if perception_log and st is not None:
-                perception_log.write(st)
             if action_log:
                 action_log.write(action)
 
@@ -109,14 +112,19 @@ def main() -> int:
                     servo.enable(False)
                     enabled = False
             else:
-                if not enabled:
-                    servo.enable(True)
-                    enabled = True
-                servo.set_angles(cmd.joint_angles_rad)
+                if cmd.enable is False:
+                    if enabled:
+                        servo.enable(False)
+                        enabled = False
+                else:
+                    if not enabled:
+                        servo.enable(True)
+                        enabled = True
+                    servo.set_angles(cmd.joint_angles_rad)
 
             if now - last_print >= 2.0:
                 state = "enabled" if enabled else "deadman"
-                print(f"[hardware] state={state}")
+                logger.info("hardware state=%s", state)
                 last_print = now
 
             rl.sleep()
@@ -150,11 +158,12 @@ def main() -> int:
     for t in threads:
         t.join(timeout=1.0)
 
-    print("[main] clean shutdown")
+    logger.info("clean shutdown")
     return 0
 
 
 def _build_servo(cfg) -> DummyServo:
+    # TODO: Add a jetson_perception mode that uses DummyServo but real camera.
     if cfg.mode != "jetson_full":
         return DummyServo(log_every=20)
 
@@ -200,6 +209,7 @@ def _build_servo(cfg) -> DummyServo:
 
 
 def _build_frame_source(cfg):
+    # TODO: Allow jetson_perception to use GStreamer camera with dummy control/servo.
     if cfg.mode != "jetson_full":
         return DummyFrameSource()
 

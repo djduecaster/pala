@@ -35,6 +35,8 @@ class GStreamerCamera:
                 "videoconvert ! video/x-raw,format=RGB ! "
                 "appsink name=appsink emit-signals=true max-buffers=2 drop=true sync=false"
             )
+        elif "v4l2src" not in pipeline:
+            pipeline = f"v4l2src device={self._device} do-timestamp=true ! {pipeline}"
 
         Gst.init(None)
         self._pipeline = Gst.parse_launch(pipeline)
