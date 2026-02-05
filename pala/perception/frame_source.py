@@ -11,9 +11,11 @@ import threading
 import time
 
 import numpy as np
+import logging
 
 from ..hardware.camera import CameraInterface
 
+logger = logging.getLogger(__name__)
 class FrameSource:
     def get_timestamp(self) -> float:
         """Return a monotonic timestamp for the latest frame."""
@@ -167,4 +169,4 @@ class ThreadedFrameSource:
         self._inner.shutdown()
         self._thread.join(timeout=1.0)
         if self._thread.is_alive():
-            print("[perception] warning: ThreadedFrameSource thread did not exit")
+            logger.warning("ThreadedFrameSource thread did not exit")

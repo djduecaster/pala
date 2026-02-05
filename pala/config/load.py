@@ -31,8 +31,16 @@ class CameraConfig:
 
 
 @dataclass
+class DeepStreamConfig:
+    config_path: Optional[str]
+    person_class_id: int
+    conf_threshold: Optional[float]
+
+
+@dataclass
 class RobotConfig:
     mode: str
+    detector: str
     loop_rates: LoopRates
     deadman_timeout_ms: int
     joint_names: List[str]
@@ -40,6 +48,7 @@ class RobotConfig:
     servo_calibration: Dict[str, Any]
     logging: LoggingConfig
     camera: CameraConfig
+    deepstream: DeepStreamConfig
 
 
 def _fail(path: str, msg: str) -> None:
@@ -85,6 +94,8 @@ def load_config(path: str) -> RobotConfig:
         _fail("root", "expected mapping at root")
 
     mode = str(data.get("mode", "dev"))
+
+    detector = str(data.get("detector", ""))
 
     loop_rates_raw = _req(data, "loop_rates", "root")
     if not isinstance(loop_rates_raw, dict):
@@ -136,8 +147,19 @@ def load_config(path: str) -> RobotConfig:
         pipeline=camera_raw.get("pipeline"),
     )
 
+    ds_raw = data.get("deepstream", {})
+    if not isinstance(ds_raw, dict):
+        _fail("deepstream", "expected mapping")
+    ds_conf_threshold = ds_raw.get("conf_threshold")
+    deepstream = DeepStreamConfig(
+        config_path=ds_raw.get("config_path"),
+        person_class_id=_as_int(ds_raw.get("person_class_id", 0), "deepstream.person_class_id"),
+        conf_threshold=None if ds_conf_threshold is None else _as_float(ds_conf_threshold, "deepstream.conf_threshold"),
+    )
+
     return RobotConfig(
         mode=mode,
+        detector=detector,
         loop_rates=loop_rates,
         deadman_timeout_ms=deadman_timeout_ms,
         joint_names=joint_names,
@@ -145,4 +167,5 @@ def load_config(path: str) -> RobotConfig:
         servo_calibration=servo_cal,
         logging=logging,
         camera=camera,
+        deepstream=deepstream,
     )

@@ -58,3 +58,15 @@ Quick camera probe:
 ```
 uv run python tools/test_camera_fps.py --seconds 5 --mode jetson_full
 ```
+
+### Jetson DeepStream Setup (JetPack 6.x)
+DeepStream is a system-level install on Jetson. For JetPack 6.4.x, use the
+DeepStream 7.1 arm64 package from NVIDIA NGC:
+```
+sudo apt-get install ./deepstream-7.1_7.1.0-1_arm64.deb
+```
+
+Verify:
+```
+deepstream-app --version
+```

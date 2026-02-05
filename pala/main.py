@@ -10,6 +10,7 @@ from typing import Optional
 from .config import load_config
 from .types import PerceptionState, ActionPlan, HardwareCommand
 from .perception import PerceptionNode
+from .perception.detector import DummyDetector, JetsonDetector, DeepStreamDetector
 from .perception.frame_source import DummyFrameSource, CameraFrameSource
 from .planner import HeuristicPlanner
 from .behavior import BehaviorPolicy
@@ -31,7 +32,7 @@ def main() -> int:
     latest_command = LatestValue[HardwareCommand]()
 
     # Nodes
-    perception = PerceptionNode(source=_build_frame_source(cfg))
+    perception = PerceptionNode(source=_build_frame_source(cfg), detector=_build_detector(cfg))
     planner = HeuristicPlanner()
     behavior = BehaviorPolicy(planner=planner, dwell_s=2.0, cooldown_s=1.0)
     executor = TrajectoryExecutor(cfg.joint_limits_rad)
@@ -107,23 +108,26 @@ def main() -> int:
         while not stop.is_set():
             cmd, ts = latest_command.get()
             now = time.monotonic()
+            state = "enabled"
             if cmd is None or ts is None or (now - ts) > deadman_s:
                 if enabled:
                     servo.enable(False)
                     enabled = False
+                state = "deadman"
             else:
                 if cmd.enable is False:
                     if enabled:
                         servo.enable(False)
                         enabled = False
+                    state = "commanded_disable"
                 else:
                     if not enabled:
                         servo.enable(True)
                         enabled = True
                     servo.set_angles(cmd.joint_angles_rad)
+                    state = "enabled"
 
             if now - last_print >= 2.0:
-                state = "enabled" if enabled else "deadman"
                 logger.info("hardware state=%s", state)
                 last_print = now
 
@@ -223,6 +227,24 @@ def _build_frame_source(cfg):
         pipeline=cfg.camera.pipeline,
     )
     return CameraFrameSource(camera)
+
+
+def _build_detector(cfg):
+    if cfg.detector:
+        if cfg.detector == "deepstream":
+            return DeepStreamDetector(
+                config_path=cfg.deepstream.config_path,
+                person_class_id=cfg.deepstream.person_class_id,
+                conf_threshold=cfg.deepstream.conf_threshold,
+            )
+        if cfg.detector == "jetson":
+            return JetsonDetector()
+        if cfg.detector == "dummy":
+            return DummyDetector()
+        raise ValueError(f"Unknown detector backend: {cfg.detector}")
+    if cfg.mode == "jetson_full":
+        return JetsonDetector()
+    return DummyDetector()
 
 
 def _parse_max_runtime_s() -> Optional[float]:

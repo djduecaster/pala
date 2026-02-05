@@ -63,6 +63,13 @@ Migrate capabilities, not folders. Suggested order:
 - Sync/run Jetson: `make go`
 - Add dependency: `uv add <pkg>`
 
+## Lessons Learned (2-1-26)
+- GStreamer PTS uses a different clock; use PTS deltas or monotonic deltas, not cross-clock subtraction.
+- Camera FPS depends heavily on auto-exposure/lighting; use `v4l2-ctl` to inspect modes and note lighting impact.
+- Keep perception capture “latest-only” to avoid stale frames when inference stalls.
+- Dev-mode dummy sources should emit real frames/packets so CI and local runs are meaningful.
+- Jetson system packages (e.g., `python3-gi`) require `uv venv --system-site-packages` or an editable install for imports.
+
 # Repository Guidelines
 
 ## Project Structure & Module Organization

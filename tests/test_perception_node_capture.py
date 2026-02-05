@@ -3,6 +3,7 @@ import numpy as np
 
 from pala.perception.node import PerceptionNode
 from pala.perception.frame_source import FramePacket
+from pala.perception.detector.interface import Detection
 
 
 class _NoFrameSource:
@@ -76,3 +77,25 @@ def test_perception_fps_from_two_frames():
     second = node.step()
     assert second.fps is not None
     assert abs(second.fps - 20.0) < 1.0
+
+
+def test_perception_zone_changes_in_dev(monkeypatch):
+    class _Det:
+        def __init__(self):
+            self._calls = 0
+
+        def detect(self, frame):
+            h, w = frame.shape[:2]
+            if self._calls == 0:
+                self._calls += 1
+                return [Detection(bbox_xyxy_px=(0, 0, w * 0.2, h * 0.4), conf=0.9, cls=0)]
+            self._calls += 1
+            return [Detection(bbox_xyxy_px=(w * 0.8, 0, w * 1.0, h * 0.4), conf=0.9, cls=0)]
+
+    node = PerceptionNode(detector=_Det())
+    first = node.step()
+    second = node.step()
+
+    assert first.primary_person is not None
+    assert second.primary_person is not None
+    assert first.debug.get("zone_hint") != second.debug.get("zone_hint")
