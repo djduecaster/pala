@@ -21,6 +21,7 @@ from .utils import RateLimiter, LatestValue, maybe_logger
 logger = logging.getLogger(__name__)
 
 def main() -> int:
+    _configure_logging()
     cfg = load_config("config/robot.yaml")
     max_runtime_s = _parse_max_runtime_s()
 
@@ -255,6 +256,15 @@ def _parse_max_runtime_s() -> Optional[float]:
         return float(raw)
     except ValueError:
         raise ValueError("PALA_MAX_RUNTIME_S must be a number") from None
+
+
+def _configure_logging() -> None:
+    level_name = os.getenv("PALA_LOG_LEVEL", "INFO").upper()
+    level = getattr(logging, level_name, logging.INFO)
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
 
 
 if __name__ == "__main__":

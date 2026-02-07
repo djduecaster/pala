@@ -70,3 +70,59 @@ Verify:
 ```
 deepstream-app --version
 ```
+
+## DeepStream PeopleNet Bring-Up (Validated)
+
+This is the currently working process for `detector: deepstream` in `jetson_full`.
+
+1) Prepare Jetson Python + uv environment:
+```
+sudo apt-get update
+sudo apt-get install -y python3-gi python3-gst-1.0 gir1.2-gstreamer-1.0
+cd ~/pala
+rm -rf .venv
+uv venv --system-site-packages
+uv sync
+```
+
+2) Install DeepStream Python bindings (`pyds`) for DS 7.1 / cp310:
+```
+WHEEL_URL=$(python3 -c "import json,urllib.request; d=json.load(urllib.request.urlopen('https://api.github.com/repos/NVIDIA-AI-IOT/deepstream_python_apps/releases/tags/v1.2.0')); print(next(a['browser_download_url'] for a in d['assets'] if a['name'].endswith('linux_aarch64.whl')))")
+wget -O /tmp/pyds.whl "$WHEEL_URL"
+mv /tmp/pyds.whl /tmp/pyds-1.2.0-cp310-cp310-linux_aarch64.whl
+uv pip install /tmp/pyds-1.2.0-cp310-cp310-linux_aarch64.whl
+uv run python -c "import gi, pyds; print('gi ok, pyds ok')"
+```
+
+3) Build DeepStream custom parser library once (if missing):
+```
+cd /opt/nvidia/deepstream/deepstream-7.1/sources/libs/nvdsinfer_customparser
+sudo make CUDA_VER=12.6
+```
+
+4) Use the repo config:
+- `config/robot.yaml`
+  - `mode: jetson_full`
+  - `detector: deepstream`
+- `config/deepstream/peoplenet_int8.txt` (key settings)
+  - `parse-bbox-func-name=NvDsInferParseCustomResnet`
+  - `output-blob-names=output_bbox/BiasAdd:0;output_cov/Sigmoid:0`
+  - `model-engine-file=../../../.cache/pala/engines/resnet34_peoplenet_int8.engine`
+
+5) Keep engine cache outside repo (important with `make deploy`):
+```
+mkdir -p ~/.cache/pala/engines
+cp -v ~/pala/models/peoplenet/resnet34_peoplenet_int8.onnx_b1_gpu0_int8.engine ~/.cache/pala/engines/resnet34_peoplenet_int8.engine
+```
+
+6) Run:
+```
+PALA_DS_INFER_TIMEOUT_S=10 PALA_LOG_LEVEL=INFO uv run python -m pala.main
+```
+
+### DeepStream Lessons Learned
+- First engine build can take several minutes; short runtime limits can exit before serialization completes.
+- `make deploy` uses `rsync --delete`; Jetson-side config edits and in-repo engine files are overwritten/deleted unless committed on Mac or stored outside `~/pala`.
+- `zone=center` alone is not proof of detector output; perception falls back to a center dummy bbox when detections are empty.
+- `Deserialize engine failed ...` is expected on first run before the engine exists.
+- Keep NumPy pinned below 2 for current `pyds` compatibility on this stack.

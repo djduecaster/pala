@@ -1,5 +1,5 @@
-mode: dev # dev | jetson_perception | jetson_full
-detector: dummy # dummy | jetson | deepstream
+mode: jetson_full # dev | jetson_perception | jetson_full
+detector: deepstream # dummy | jetson | deepstream
 
 loop_rates:
   perception_hz: 20
@@ -55,6 +55,6 @@ camera:
     appsink name=appsink emit-signals=true max-buffers=2 drop=true sync=false
 
 deepstream:
-  config_path: null
+  config_path: "config/deepstream/peoplenet_int8.txt"
   person_class_id: 0
   conf_threshold: null

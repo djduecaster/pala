@@ -29,3 +29,6 @@
 - Keep dummy implementations as defaults for Mac.
 - Preserve clean data contracts (`PerceptionState`, `ActionPlan`, `HardwareCommand`).
 - Add tests or scripts per module before integrating into the runtime.
+
+## Working Notes
+- Ongoing bring-up details and troubleshooting notes live in `docs/daily_log.md`.
