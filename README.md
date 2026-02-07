@@ -120,6 +120,11 @@ cp -v ~/pala/models/peoplenet/resnet34_peoplenet_int8.onnx_b1_gpu0_int8.engine ~
 PALA_DS_INFER_TIMEOUT_S=10 PALA_LOG_LEVEL=INFO uv run python -m pala.main
 ```
 
+Quick detector-only sanity check (no control loop dependencies):
+```
+uv run python tools/test_detector_stats.py --seconds 20 --mode jetson_full --detector deepstream
+```
+
 ### DeepStream Lessons Learned
 - First engine build can take several minutes; short runtime limits can exit before serialization completes.
 - `make deploy` uses `rsync --delete`; Jetson-side config edits and in-repo engine files are overwritten/deleted unless committed on Mac or stored outside `~/pala`.

@@ -38,7 +38,7 @@ servo_calibration:
     pitch3: {min_pulse: 500, max_pulse: 2500, angle_scale: 1.0, angle_offset: 80, reverse: true}
 
 logging:
-  enabled: false
+  enabled: true
   perception_jsonl: logs/perception.jsonl
   actions_jsonl: logs/actions.jsonl
 
@@ -58,3 +58,12 @@ deepstream:
   config_path: "config/deepstream/peoplenet_int8.txt"
   person_class_id: 0
   conf_threshold: null
+
+cosmos:
+  enabled: true
+  provider: "brev"
+  max_hz: 1.0
+  max_frame_age_ms: 500
+  request_timeout_ms: 5000
+  response_ttl_ms: 1500
+  mock_latency_ms: 150

@@ -34,7 +34,12 @@ class PerceptionNode:
                 primary_person_conf=None,
                 pointing_target=None,
                 pointing_conf=None,
-                debug={"no_frame": True},
+                debug={
+                    "no_frame": True,
+                    "num_detections": 0,
+                    "detector_alive": True,
+                    "used_fallback_bbox": False,
+                },
             )
 
         ts_mono = packet.mono_ns / 1_000_000_000.0
@@ -42,12 +47,23 @@ class PerceptionNode:
             self._frame_times.append(packet.mono_ns)
             self._fps = _fps_from_window(self._frame_times)
 
+        detector_alive = True
+        detector_error = None
+        detections = []
+        try:
+            detections = self._detect(packet)
+        except Exception as exc:
+            detector_alive = False
+            detector_error = repr(exc)
+
+        num_detections = len(detections)
         primary_bbox = None
         primary_conf = None
-        primary = self._detect_primary(packet)
+        primary = self._to_primary(packet, detections)
         if primary is not None:
             primary_bbox, primary_conf = primary
 
+        used_fallback_bbox = primary_bbox is None
         if primary_bbox is None:
             if isinstance(self.source, DummyFrameSource):
                 cx = self.source.dummy_position()
@@ -64,7 +80,14 @@ class PerceptionNode:
             pointing = PointNorm(x=0.85, y=0.2)
             pointing_conf = 0.6
 
-        debug = {"zone_hint": _zone_from_cx(cx)}
+        debug = {
+            "zone_hint": _zone_from_cx(cx),
+            "num_detections": num_detections,
+            "detector_alive": detector_alive,
+            "used_fallback_bbox": used_fallback_bbox,
+        }
+        if detector_error is not None:
+            debug["detector_error"] = detector_error
         if not is_new:
             debug["stale_frame"] = True
             debug["frame_age_ms"] = (time.monotonic_ns() - packet.mono_ns) / 1_000_000.0
@@ -84,6 +107,9 @@ class PerceptionNode:
     def shutdown(self) -> None:
         self.source.shutdown()
 
+    def latest_packet(self) -> Optional[FramePacket]:
+        return self._last_packet
+
     def _acquire_packet(self) -> tuple[Optional[FramePacket], bool]:
         packet = None
         if hasattr(self.source, "get_latest"):
@@ -99,16 +125,19 @@ class PerceptionNode:
         self._last_packet = packet
         return packet, True
 
-    def _detect_primary(self, packet: FramePacket) -> Optional[tuple[BBoxNorm, float]]:
+    def _detect(self, packet: FramePacket) -> list[Detection]:
         frame = packet.frame
         if frame is None:
-            return None
-        detections = self.detector.detect(frame)
+            return []
+        return self.detector.detect(frame)
+
+    def _to_primary(self, packet: FramePacket, detections: list[Detection]) -> Optional[tuple[BBoxNorm, float]]:
         if not detections:
             return None
         best = _pick_primary_detection(detections)
         if best is None:
             return None
+        frame = packet.frame
         h, w = frame.shape[:2]
         if w <= 0 or h <= 0:
             return None

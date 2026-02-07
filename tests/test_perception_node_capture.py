@@ -38,15 +38,24 @@ def test_perception_no_frame_returns_quickly():
     elapsed = time.monotonic() - start
     assert elapsed < 0.05
     assert st.debug.get("no_frame") is True
+    assert st.debug.get("num_detections") == 0
+    assert st.debug.get("detector_alive") is True
+    assert st.debug.get("used_fallback_bbox") is False
 
 
 def test_perception_stale_frame_fallback():
     node = PerceptionNode(source=_OneFrameSource())
     first = node.step()
     assert first.debug.get("no_frame") is None
+    assert first.debug.get("num_detections") == 1
+    assert first.debug.get("detector_alive") is True
+    assert first.debug.get("used_fallback_bbox") is False
 
     second = node.step()
     assert second.debug.get("stale_frame") is True
+    assert second.debug.get("num_detections") == 1
+    assert second.debug.get("detector_alive") is True
+    assert second.debug.get("used_fallback_bbox") is False
 
 
 class _TwoFrameSource:
@@ -99,3 +108,16 @@ def test_perception_zone_changes_in_dev(monkeypatch):
     assert first.primary_person is not None
     assert second.primary_person is not None
     assert first.debug.get("zone_hint") != second.debug.get("zone_hint")
+
+
+def test_perception_detector_error_sets_debug_and_uses_fallback():
+    class _ErrDet:
+        def detect(self, _frame):
+            raise RuntimeError("detector down")
+
+    node = PerceptionNode(detector=_ErrDet())
+    st = node.step()
+    assert st.debug.get("detector_alive") is False
+    assert st.debug.get("num_detections") == 0
+    assert st.debug.get("used_fallback_bbox") is True
+    assert "detector_error" in st.debug

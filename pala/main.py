@@ -9,10 +9,10 @@ from typing import Optional
 
 from .config import load_config
 from .types import PerceptionState, ActionPlan, HardwareCommand
-from .perception import PerceptionNode
+from .perception import PerceptionNode, LatestFrameCache
 from .perception.detector import DummyDetector, JetsonDetector, DeepStreamDetector
 from .perception.frame_source import DummyFrameSource, CameraFrameSource
-from .planner import HeuristicPlanner
+from .planner import HeuristicPlanner, AsyncCosmosPlanner
 from .behavior import BehaviorPolicy
 from .control import TrajectoryExecutor
 from .hardware import DummyServo, PCA9685Servo, ServoCalibration
@@ -31,10 +31,11 @@ def main() -> int:
     latest_perception = LatestValue[PerceptionState]()
     latest_action = LatestValue[ActionPlan]()
     latest_command = LatestValue[HardwareCommand]()
+    latest_frame = LatestFrameCache()
 
     # Nodes
     perception = PerceptionNode(source=_build_frame_source(cfg), detector=_build_detector(cfg))
-    planner = HeuristicPlanner()
+    planner = _build_planner(cfg, latest_frame)
     behavior = BehaviorPolicy(planner=planner, dwell_s=2.0, cooldown_s=1.0)
     executor = TrajectoryExecutor(cfg.joint_limits_rad)
     servo = _build_servo(cfg)
@@ -56,6 +57,9 @@ def main() -> int:
         while not stop.is_set():
             st = perception.step()
             latest_perception.set(st, st.timestamp_monotonic_s)
+            packet = perception.latest_packet()
+            if packet is not None:
+                latest_frame.set(packet.frame, mono_ns=packet.mono_ns, pts_ns=packet.pts_ns)
 
             if perception_log:
                 perception_log.write(st)
@@ -154,6 +158,8 @@ def main() -> int:
     finally:
         stop.set()
         perception.shutdown()
+        if hasattr(planner, "shutdown"):
+            planner.shutdown()
         servo.shutdown()
         if perception_log:
             perception_log.close()
@@ -246,6 +252,19 @@ def _build_detector(cfg):
     if cfg.mode == "jetson_full":
         return JetsonDetector()
     return DummyDetector()
+
+
+def _build_planner(cfg, latest_frame: LatestFrameCache):
+    if getattr(cfg, "cosmos", None) and cfg.cosmos.enabled:
+        return AsyncCosmosPlanner(
+            frame_cache=latest_frame,
+            fallback=HeuristicPlanner(),
+            max_hz=cfg.cosmos.max_hz,
+            max_frame_age_ms=cfg.cosmos.max_frame_age_ms,
+            mock_latency_ms=cfg.cosmos.mock_latency_ms,
+            response_ttl_ms=cfg.cosmos.response_ttl_ms,
+        )
+    return HeuristicPlanner()
 
 
 def _parse_max_runtime_s() -> Optional[float]:

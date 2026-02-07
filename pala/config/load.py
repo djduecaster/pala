@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 import os
 import yaml
@@ -38,6 +38,17 @@ class DeepStreamConfig:
 
 
 @dataclass
+class CosmosConfig:
+    enabled: bool = False
+    provider: str = "brev"
+    max_hz: float = 1.0
+    max_frame_age_ms: int = 500
+    request_timeout_ms: int = 5000
+    response_ttl_ms: int = 1500
+    mock_latency_ms: int = 150
+
+
+@dataclass
 class RobotConfig:
     mode: str
     detector: str
@@ -49,6 +60,7 @@ class RobotConfig:
     logging: LoggingConfig
     camera: CameraConfig
     deepstream: DeepStreamConfig
+    cosmos: CosmosConfig = field(default_factory=CosmosConfig)
 
 
 def _fail(path: str, msg: str) -> None:
@@ -157,6 +169,19 @@ def load_config(path: str) -> RobotConfig:
         conf_threshold=None if ds_conf_threshold is None else _as_float(ds_conf_threshold, "deepstream.conf_threshold"),
     )
 
+    cosmos_raw = data.get("cosmos", {})
+    if not isinstance(cosmos_raw, dict):
+        _fail("cosmos", "expected mapping")
+    cosmos = CosmosConfig(
+        enabled=bool(cosmos_raw.get("enabled", False)),
+        provider=str(cosmos_raw.get("provider", "brev")),
+        max_hz=_as_float(cosmos_raw.get("max_hz", 1.0), "cosmos.max_hz"),
+        max_frame_age_ms=_as_int(cosmos_raw.get("max_frame_age_ms", 500), "cosmos.max_frame_age_ms"),
+        request_timeout_ms=_as_int(cosmos_raw.get("request_timeout_ms", 5000), "cosmos.request_timeout_ms"),
+        response_ttl_ms=_as_int(cosmos_raw.get("response_ttl_ms", 1500), "cosmos.response_ttl_ms"),
+        mock_latency_ms=_as_int(cosmos_raw.get("mock_latency_ms", 150), "cosmos.mock_latency_ms"),
+    )
+
     return RobotConfig(
         mode=mode,
         detector=detector,
@@ -168,4 +193,5 @@ def load_config(path: str) -> RobotConfig:
         logging=logging,
         camera=camera,
         deepstream=deepstream,
+        cosmos=cosmos,
     )

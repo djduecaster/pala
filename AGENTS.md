@@ -23,7 +23,9 @@ Goal: a reproducible, contest-ready demo with clean architecture and clear evalu
 3) Data contracts are stable and must be used everywhere:
    - PerceptionState -> ActionPlan -> HardwareCommand
 4) Must run on Mac without Jetson hardware using dummy backends by default.
-5) No MJPEG/preview server for now (file-based logs only).
+5) Live preview/telemetry streaming is allowed when scoped for debugging or demos.
+   - Prefer a sidecar/tooling implementation (for example under `tools/`) rather than core loop wiring.
+   - Keep it optional and failure-isolated (core control/safety logic must run without it).
 
 ## Key files
 - `pala/main.py` — 4-loop runtime wiring

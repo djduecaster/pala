@@ -1,3 +1,3 @@
-from .load import RobotConfig, LoopRates, LoggingConfig, load_config
+from .load import RobotConfig, LoopRates, LoggingConfig, CosmosConfig, load_config
 
-__all__ = ["RobotConfig", "LoopRates", "LoggingConfig", "load_config"]
+__all__ = ["RobotConfig", "LoopRates", "LoggingConfig", "CosmosConfig", "load_config"]

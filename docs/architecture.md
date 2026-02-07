@@ -34,6 +34,6 @@
 - **Steps**: run a mode, capture logs, and (optionally) replay or compare action outputs between runs.
 
 ## Notes
-- MJPEG / preview streaming intentionally omitted.
+- Live preview/telemetry streaming is optional and may be enabled for debugging/demos, ideally as sidecar tooling.
 - Default runtime uses dummy hardware and perception, safe for Mac.
 - Jetson compatibility maintained via TODO stubs in hardware/perception.
