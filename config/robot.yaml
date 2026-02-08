@@ -42,6 +42,15 @@ logging:
   perception_jsonl: logs/perception.jsonl
   actions_jsonl: logs/actions.jsonl
 
+telemetry_preview:
+  enabled: true
+  jpeg_path: logs/telemetry/preview/latest.jpg
+  meta_path: logs/telemetry/preview/latest.json
+  max_hz: 4.0
+  max_width: 640
+  max_height: 360
+  jpeg_quality: 65
+
 camera:
   device: "/dev/video0"
   width: 640

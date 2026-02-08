@@ -121,3 +121,19 @@ def test_perception_detector_error_sets_debug_and_uses_fallback():
     assert st.debug.get("num_detections") == 0
     assert st.debug.get("used_fallback_bbox") is True
     assert "detector_error" in st.debug
+
+
+def test_perception_source_error_is_reported_without_crashing():
+    class _ErrSource:
+        def get_packet(self):
+            raise RuntimeError("camera unavailable")
+
+        def shutdown(self) -> None:
+            return None
+
+    node = PerceptionNode(source=_ErrSource())
+    st = node.step()
+    assert st.debug.get("no_frame") is True
+    assert st.debug.get("source_alive") is False
+    assert "source_error" in st.debug
+    assert "camera unavailable" in str(st.debug.get("source_error"))

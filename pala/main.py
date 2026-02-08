@@ -10,6 +10,7 @@ from typing import Optional
 from .config import load_config
 from .types import PerceptionState, ActionPlan, HardwareCommand
 from .perception import PerceptionNode, LatestFrameCache
+from .perception.preview_tap import PreviewTapWriter
 from .perception.detector import DummyDetector, JetsonDetector, DeepStreamDetector
 from .perception.frame_source import DummyFrameSource, CameraFrameSource
 from .planner import HeuristicPlanner, AsyncCosmosPlanner
@@ -39,6 +40,7 @@ def main() -> int:
     behavior = BehaviorPolicy(planner=planner, dwell_s=2.0, cooldown_s=1.0)
     executor = TrajectoryExecutor(cfg.joint_limits_rad)
     servo = _build_servo(cfg)
+    preview_tap = _build_preview_tap(cfg)
 
     # Optional logging
     perception_log = maybe_logger(cfg.logging.perception_jsonl if cfg.logging.enabled else None)
@@ -60,6 +62,7 @@ def main() -> int:
             packet = perception.latest_packet()
             if packet is not None:
                 latest_frame.set(packet.frame, mono_ns=packet.mono_ns, pts_ns=packet.pts_ns)
+                preview_tap.write(packet.frame, mono_ns=packet.mono_ns, pts_ns=packet.pts_ns)
 
             if perception_log:
                 perception_log.write(st)
@@ -161,6 +164,7 @@ def main() -> int:
         if hasattr(planner, "shutdown"):
             planner.shutdown()
         servo.shutdown()
+        preview_tap.close()
         if perception_log:
             perception_log.close()
         if action_log:
@@ -265,6 +269,30 @@ def _build_planner(cfg, latest_frame: LatestFrameCache):
             response_ttl_ms=cfg.cosmos.response_ttl_ms,
         )
     return HeuristicPlanner()
+
+
+def _build_preview_tap(cfg) -> PreviewTapWriter:
+    tap_cfg = getattr(cfg, "telemetry_preview", None)
+    if tap_cfg is None:
+        return PreviewTapWriter(
+            enabled=False,
+            jpeg_path="logs/telemetry/preview/latest.jpg",
+            meta_path="logs/telemetry/preview/latest.json",
+            max_hz=4.0,
+            max_width=640,
+            max_height=360,
+            jpeg_quality=65,
+        )
+
+    return PreviewTapWriter(
+        enabled=bool(tap_cfg.enabled),
+        jpeg_path=str(tap_cfg.jpeg_path),
+        meta_path=str(tap_cfg.meta_path),
+        max_hz=float(tap_cfg.max_hz),
+        max_width=int(tap_cfg.max_width),
+        max_height=int(tap_cfg.max_height),
+        jpeg_quality=int(tap_cfg.jpeg_quality),
+    )
 
 
 def _parse_max_runtime_s() -> Optional[float]:

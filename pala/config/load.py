@@ -22,6 +22,17 @@ class LoggingConfig:
 
 
 @dataclass
+class TelemetryPreviewConfig:
+    enabled: bool = False
+    jpeg_path: str = "logs/telemetry/preview/latest.jpg"
+    meta_path: str = "logs/telemetry/preview/latest.json"
+    max_hz: float = 4.0
+    max_width: int = 640
+    max_height: int = 360
+    jpeg_quality: int = 65
+
+
+@dataclass
 class CameraConfig:
     device: str
     width: int
@@ -60,6 +71,7 @@ class RobotConfig:
     logging: LoggingConfig
     camera: CameraConfig
     deepstream: DeepStreamConfig
+    telemetry_preview: TelemetryPreviewConfig = field(default_factory=TelemetryPreviewConfig)
     cosmos: CosmosConfig = field(default_factory=CosmosConfig)
 
 
@@ -148,6 +160,19 @@ def load_config(path: str) -> RobotConfig:
         actions_jsonl=logging_raw.get("actions_jsonl"),
     )
 
+    telemetry_preview_raw = data.get("telemetry_preview", {})
+    if not isinstance(telemetry_preview_raw, dict):
+        _fail("telemetry_preview", "expected mapping")
+    telemetry_preview = TelemetryPreviewConfig(
+        enabled=bool(telemetry_preview_raw.get("enabled", False)),
+        jpeg_path=str(telemetry_preview_raw.get("jpeg_path", "logs/telemetry/preview/latest.jpg")),
+        meta_path=str(telemetry_preview_raw.get("meta_path", "logs/telemetry/preview/latest.json")),
+        max_hz=_as_float(telemetry_preview_raw.get("max_hz", 4.0), "telemetry_preview.max_hz"),
+        max_width=_as_int(telemetry_preview_raw.get("max_width", 640), "telemetry_preview.max_width"),
+        max_height=_as_int(telemetry_preview_raw.get("max_height", 360), "telemetry_preview.max_height"),
+        jpeg_quality=_as_int(telemetry_preview_raw.get("jpeg_quality", 65), "telemetry_preview.jpeg_quality"),
+    )
+
     camera_raw = data.get("camera", {})
     if not isinstance(camera_raw, dict):
         _fail("camera", "expected mapping")
@@ -191,6 +216,7 @@ def load_config(path: str) -> RobotConfig:
         joint_limits_rad=joint_limits,
         servo_calibration=servo_cal,
         logging=logging,
+        telemetry_preview=telemetry_preview,
         camera=camera,
         deepstream=deepstream,
         cosmos=cosmos,

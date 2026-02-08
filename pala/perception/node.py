@@ -3,10 +3,13 @@ from __future__ import annotations
 import time
 from collections import deque
 from typing import Optional
+import logging
 
 from ..types import PerceptionState, BBoxNorm, PointNorm
 from .frame_source import FrameSource, DummyFrameSource, FramePacket
 from .detector import DetectorInterface, DummyDetector, Detection
+
+logger = logging.getLogger(__name__)
 
 
 class PerceptionNode:
@@ -19,12 +22,23 @@ class PerceptionNode:
         self._fps = None
         self._last_packet: Optional[FramePacket] = None
         self._frame_times = deque(maxlen=30)
+        self._last_source_error: Optional[str] = None
+        self._last_source_warn_s = 0.0
 
     def step(self) -> PerceptionState:
         packet, is_new = self._acquire_packet()
         ts_wall = time.time()
 
         if packet is None:
+            debug = {
+                "no_frame": True,
+                "num_detections": 0,
+                "detector_alive": True,
+                "used_fallback_bbox": False,
+                "source_alive": self._last_source_error is None,
+            }
+            if self._last_source_error is not None:
+                debug["source_error"] = self._last_source_error
             return PerceptionState(
                 timestamp_monotonic_s=time.monotonic(),
                 timestamp_wall_s=ts_wall,
@@ -34,12 +48,7 @@ class PerceptionNode:
                 primary_person_conf=None,
                 pointing_target=None,
                 pointing_conf=None,
-                debug={
-                    "no_frame": True,
-                    "num_detections": 0,
-                    "detector_alive": True,
-                    "used_fallback_bbox": False,
-                },
+                debug=debug,
             )
 
         ts_mono = packet.mono_ns / 1_000_000_000.0
@@ -85,9 +94,12 @@ class PerceptionNode:
             "num_detections": num_detections,
             "detector_alive": detector_alive,
             "used_fallback_bbox": used_fallback_bbox,
+            "source_alive": self._last_source_error is None,
         }
         if detector_error is not None:
             debug["detector_error"] = detector_error
+        if self._last_source_error is not None:
+            debug["source_error"] = self._last_source_error
         if not is_new:
             debug["stale_frame"] = True
             debug["frame_age_ms"] = (time.monotonic_ns() - packet.mono_ns) / 1_000_000.0
@@ -112,16 +124,27 @@ class PerceptionNode:
 
     def _acquire_packet(self) -> tuple[Optional[FramePacket], bool]:
         packet = None
-        if hasattr(self.source, "get_latest"):
-            packet = self.source.get_latest(timeout_s=0.01)
-        if packet is None and hasattr(self.source, "get_packet"):
-            packet = self.source.get_packet()
+        try:
+            if hasattr(self.source, "get_latest"):
+                packet = self.source.get_latest(timeout_s=0.01)
+            if packet is None and hasattr(self.source, "get_packet"):
+                packet = self.source.get_packet()
+        except Exception as exc:
+            self._last_source_error = repr(exc)
+            now = time.monotonic()
+            if (now - self._last_source_warn_s) >= 2.0:
+                logger.warning("frame source read failed: %s", self._last_source_error)
+                self._last_source_warn_s = now
+            if self._last_packet is None:
+                return None, False
+            return self._last_packet, False
 
         if packet is None:
             if self._last_packet is None:
                 return None, False
             return self._last_packet, False
 
+        self._last_source_error = None
         self._last_packet = packet
         return packet, True
 
