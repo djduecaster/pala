@@ -5,6 +5,7 @@ It is intentionally separate from core runtime control/safety logic.
 
 ## What Phase 1 Provides
 - Mac-run live text dashboard plus optional live video window with overlays.
+- In-window 2D lamp command visualizer panel (joint angles + simplified lamp sketch).
 - Jetson streamed telemetry via SSH sidecar agent.
 - Inputs:
   - `logs/perception.jsonl`
@@ -79,6 +80,7 @@ Use this sequence for a clean demo with video:
    - `connected=True`
    - `Video` section with `frame_id=...` and increasing `received=...`
    - `Event Counts` includes `video_frame` increasing over time.
+   - `Command` section with joint angles.
 4. Resize video window as needed by dragging edges/corners.
 5. If windowed mode is not available, switch to `--no-video-window` and continue terminal telemetry.
 
@@ -132,6 +134,12 @@ uv run python -m tools.telemetry.mac_viewer --video-source gst
 uv run python -m tools.telemetry.mac_viewer --video-max-width 480 --video-max-height 270 --video-window-scale 1.2
 
 # The window is also mouse-resizable (drag edges/corners)
+
+# Disable the 2D lamp panel if needed
+uv run python -m tools.telemetry.mac_viewer --no-lamp-panel
+
+# Set lamp panel width (pixels)
+uv run python -m tools.telemetry.mac_viewer --lamp-panel-width 300
 ```
 
 ## Tk/Tcl Video Window Troubleshooting (macOS)
@@ -166,6 +174,9 @@ Then re-run telemetry viewer without `--no-video-window`.
 - `video_capture_failed` with `--video-source gst`:
   - Camera is likely already in use by runtime.
   - Use `--video-source tap` for normal runtime+telemetry operation.
+- `Command` section shows `no data yet`:
+  - Use `--video-source tap` (joint command metadata is attached to tap frames).
+  - Wait a few seconds after runtime starts for first preview frame update.
 - `video_window unavailable ... init.tcl`:
   - Recreate `.venv` with Homebrew Python and export `UV_PYTHON` as above.
 

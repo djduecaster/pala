@@ -26,6 +26,7 @@ except Exception:  # pragma: no cover - depends on Tk availability.
     tk = None
 
 from tools.telemetry.protocol import decode_message
+from tools.telemetry.lamp_viz import draw_lamp_panel
 
 
 def _resample_filter() -> int:
@@ -73,6 +74,7 @@ class DashboardState:
     event_counts: Dict[str, int] = field(default_factory=dict)
     perception: Optional[Dict[str, Any]] = None
     action: Optional[Dict[str, Any]] = None
+    command: Optional[Dict[str, Any]] = None
     tegrastats: Optional[Dict[str, Any]] = None
     agent: Optional[Dict[str, Any]] = None
     logs: Deque[str] = field(default_factory=lambda: collections.deque(maxlen=12))
@@ -104,6 +106,12 @@ class DashboardState:
             data = payload.get("data")
             if isinstance(data, dict):
                 self.action = data
+            return
+
+        if source == "command_log":
+            data = payload.get("data")
+            if isinstance(data, dict):
+                self.command = data
             return
 
         if source == "tegrastats":
@@ -139,6 +147,11 @@ class DashboardState:
                 return
             meta = dict(payload)
             meta.pop("bytes_b64", None)
+            tap_extra = payload.get("tap_extra")
+            if isinstance(tap_extra, dict):
+                cmd = tap_extra.get("command")
+                if isinstance(cmd, dict):
+                    self.command = cmd
             self.video_frame_bytes = frame_bytes
             self.video_frame_meta = meta
             self.video_frames_received += 1
@@ -399,6 +412,19 @@ def _overlay_image(image: Image.Image, state: DashboardState) -> Image.Image:
     return image
 
 
+def _compose_video_and_lamp_panel(
+    image: Image.Image,
+    state: DashboardState,
+    *,
+    panel_width: int,
+) -> Image.Image:
+    panel = draw_lamp_panel(height=image.height, width=panel_width, command=state.command)
+    canvas = Image.new("RGB", (image.width + panel.width, image.height), (0, 0, 0))
+    canvas.paste(image, (0, 0))
+    canvas.paste(panel, (image.width, 0))
+    return canvas
+
+
 def _fit_image_to_window(image: Image.Image, *, target_w: int, target_h: int) -> Image.Image:
     if target_w <= 1 or target_h <= 1:
         return image
@@ -451,6 +477,12 @@ def _pump_video_window(
         return window
 
     image = _overlay_image(image, state)
+    if not args.no_lamp_panel:
+        image = _compose_video_and_lamp_panel(
+            image,
+            state,
+            panel_width=max(180, int(args.lamp_panel_width)),
+        )
 
     scale = max(0.2, float(args.video_window_scale))
     if abs(scale - 1.0) > 1e-3:
@@ -536,6 +568,25 @@ def _render(state: DashboardState, *, now_wall_s: float, args: argparse.Namespac
         lines.append(f"  explanation={_shorten(str(explanation), 120)}")
 
     lines.append("")
+    lines.append("Command")
+    if state.command is None:
+        lines.append("  no data yet")
+    else:
+        enabled = state.command.get("enable")
+        angles = state.command.get("joint_angles_rad")
+        names = state.command.get("joint_names")
+        if isinstance(angles, list) and isinstance(names, list) and names:
+            pairs = []
+            for i in range(min(len(names), len(angles))):
+                try:
+                    pairs.append(f"{names[i]}={float(angles[i]):+.2f}")
+                except (TypeError, ValueError):
+                    continue
+            lines.append(f"  enable={enabled} angles=[{', '.join(pairs[:6])}]")
+        else:
+            lines.append(f"  enable={enabled} angles={angles}")
+
+    lines.append("")
     lines.append("System (tegrastats)")
     if state.tegrastats is None:
         lines.append("  no data yet")
@@ -609,6 +660,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--video-pipeline", default="")
     parser.add_argument("--no-video-window", action="store_true")
     parser.add_argument("--video-window-scale", type=float, default=1.0)
+    parser.add_argument("--no-lamp-panel", action="store_true")
+    parser.add_argument("--lamp-panel-width", type=int, default=260)
 
     parser.add_argument("--refresh-hz", type=float, default=4.0)
     parser.add_argument("--reconnect-delay-s", type=float, default=2.0)

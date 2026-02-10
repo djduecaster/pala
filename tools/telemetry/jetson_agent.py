@@ -98,6 +98,7 @@ class _TapVideoSource:
         self._meta_path = str(meta_path)
         self._cached: Optional[tuple[np.ndarray, Optional[int], int]] = None
         self._last_sig: Optional[tuple[int, int]] = None
+        self.last_meta: Dict[str, Any] = {}
 
     def _read_meta(self) -> Dict[str, Any]:
         if not os.path.exists(self._meta_path):
@@ -128,6 +129,7 @@ class _TapVideoSource:
             return self._cached
 
         meta = self._read_meta()
+        self.last_meta = meta
         try:
             with open(self._jpeg_path, "rb") as fh:
                 data = fh.read()
@@ -523,6 +525,10 @@ def _run_video_stream(
                 "pts_ns": pts_ns,
                 "bytes_b64": base64.b64encode(jpeg).decode("ascii"),
             }
+            if args.video_source == "tap" and isinstance(source, _TapVideoSource):
+                tap_extra = source.last_meta.get("extra")
+                if isinstance(tap_extra, dict):
+                    payload["tap_extra"] = tap_extra
             _emit(
                 out_q,
                 drops,
