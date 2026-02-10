@@ -4,7 +4,7 @@ import json
 import logging
 import os
 import time
-from typing import Optional
+from typing import Any, Dict, Optional
 
 import numpy as np
 from PIL import Image
@@ -50,6 +50,16 @@ class PreviewTapWriter:
                     os.makedirs(parent, exist_ok=True)
 
     def write(self, frame: object, *, mono_ns: int, pts_ns: Optional[int]) -> None:
+        self.write_with_extra(frame, mono_ns=mono_ns, pts_ns=pts_ns, extra=None)
+
+    def write_with_extra(
+        self,
+        frame: object,
+        *,
+        mono_ns: int,
+        pts_ns: Optional[int],
+        extra: Optional[Dict[str, Any]],
+    ) -> None:
         if not self._enabled:
             return
         mono_ns = int(mono_ns)
@@ -78,6 +88,8 @@ class PreviewTapWriter:
                 "pts_ns": None if pts_ns is None else int(pts_ns),
                 "ts_wall_s": time.time(),
             }
+            if isinstance(extra, dict) and extra:
+                payload["extra"] = extra
             with open(tmp_meta, "w", encoding="utf-8") as fh:
                 json.dump(payload, fh, ensure_ascii=True, separators=(",", ":"))
 

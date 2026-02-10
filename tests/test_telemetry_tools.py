@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import pathlib
 import sys
+import base64
 
 import numpy as np
 from PIL import Image
@@ -12,9 +13,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from pala.perception.preview_tap import PreviewTapWriter
+from tools.telemetry.lamp_viz import draw_lamp_panel
 from tools.telemetry.protocol import decode_message, encode_message, event
 from tools.telemetry.jetson_agent import _TapVideoSource, _encode_jpeg_frame, _parse_tegrastats
 from tools.telemetry.mac_viewer import (
+    DashboardState,
     _build_parser,
     _build_remote_agent_command,
     _fit_image_to_window,
@@ -133,6 +136,16 @@ def test_preview_tap_writer_emits_files_and_throttles(tmp_path):
     assert third_meta["frame_id"] == 1
     assert third_meta["pts_ns"] == 125
 
+    writer.write_with_extra(
+        frame,
+        mono_ns=2_300_000_000,
+        pts_ns=126,
+        extra={"command": {"joint_names": ["yaw"], "joint_angles_rad": [0.25], "enable": True}},
+    )
+    fourth_meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert fourth_meta["frame_id"] == 2
+    assert fourth_meta.get("extra", {}).get("command", {}).get("joint_names") == ["yaw"]
+
 
 def test_tap_video_source_reads_written_preview(tmp_path):
     jpeg_path = tmp_path / "latest.jpg"
@@ -157,3 +170,38 @@ def test_fit_image_to_window_returns_target_size():
     image = Image.new("RGB", (320, 180), (5, 10, 15))
     fitted = _fit_image_to_window(image, target_w=200, target_h=200)
     assert fitted.size == (200, 200)
+
+
+def test_dashboard_state_updates_command_from_video_tap_extra():
+    state = DashboardState(host="jetson")
+    state.apply(
+        {
+            "source": "video_frame",
+            "payload": {
+                "bytes_b64": base64.b64encode(b"\xff\xd8\xff\xd9").decode("ascii"),
+                "frame_id": 1,
+                "tap_extra": {
+                    "command": {
+                        "joint_names": ["yaw", "pitch1"],
+                        "joint_angles_rad": [0.1, -0.2],
+                        "enable": True,
+                    }
+                },
+            },
+        }
+    )
+    assert state.command is not None
+    assert state.command["joint_names"] == ["yaw", "pitch1"]
+
+
+def test_draw_lamp_panel_with_command_data():
+    panel = draw_lamp_panel(
+        height=240,
+        width=260,
+        command={
+            "joint_names": ["yaw", "pitch1", "pitch2", "roll", "pitch3"],
+            "joint_angles_rad": [0.2, -0.4, 0.3, 0.1, -0.2],
+            "enable": True,
+        },
+    )
+    assert panel.size == (260, 240)

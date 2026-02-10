@@ -125,6 +125,14 @@ Quick detector-only sanity check (no control loop dependencies):
 uv run python tools/test_detector_stats.py --seconds 20 --mode jetson_full --detector deepstream
 ```
 
+Manual servo calibration (safe, explicit enable required):
+```
+uv run python tools/hw_calibrate.py --list-joints
+uv run python tools/hw_calibrate.py --enable --neutral --hold-s 1.0
+uv run python tools/hw_calibrate.py --enable --joint yaw --deg 5 --hold-s 1.0
+uv run python tools/hw_calibrate.py --enable --repl
+```
+
 ### DeepStream Lessons Learned
 - First engine build can take several minutes; short runtime limits can exit before serialization completes.
 - `make deploy` uses `rsync --delete`; Jetson-side config edits and in-repo engine files are overwritten/deleted unless committed on Mac or stored outside `~/pala`.

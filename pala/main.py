@@ -5,7 +5,7 @@ import threading
 import time
 import os
 import logging
-from typing import Optional
+from typing import Dict, Optional
 
 from .config import load_config
 from .types import PerceptionState, ActionPlan, HardwareCommand
@@ -62,7 +62,14 @@ def main() -> int:
             packet = perception.latest_packet()
             if packet is not None:
                 latest_frame.set(packet.frame, mono_ns=packet.mono_ns, pts_ns=packet.pts_ns)
-                preview_tap.write(packet.frame, mono_ns=packet.mono_ns, pts_ns=packet.pts_ns)
+                cmd, _ = latest_command.get()
+                preview_extra = _build_preview_extra(cfg, cmd)
+                preview_tap.write_with_extra(
+                    packet.frame,
+                    mono_ns=packet.mono_ns,
+                    pts_ns=packet.pts_ns,
+                    extra=preview_extra,
+                )
 
             if perception_log:
                 perception_log.write(st)
@@ -293,6 +300,24 @@ def _build_preview_tap(cfg) -> PreviewTapWriter:
         max_height=int(tap_cfg.max_height),
         jpeg_quality=int(tap_cfg.jpeg_quality),
     )
+
+
+def _build_preview_extra(cfg, cmd: Optional[HardwareCommand]) -> Optional[Dict[str, object]]:
+    if cmd is None:
+        return None
+    angles = [float(v) for v in cmd.joint_angles_rad]
+    names = [str(v) for v in getattr(cfg, "joint_names", [])]
+    if len(names) != len(angles):
+        names = [f"joint_{i}" for i in range(len(angles))]
+
+    return {
+        "command": {
+            "joint_names": names,
+            "joint_angles_rad": angles,
+            "enable": bool(cmd.enable),
+            "timestamp_monotonic_s": float(cmd.timestamp_monotonic_s),
+        }
+    }
 
 
 def _parse_max_runtime_s() -> Optional[float]:
