@@ -52,6 +52,12 @@ class DeepStreamConfig:
 class CosmosConfig:
     enabled: bool = False
     provider: str = "brev"
+    base_url: Optional[str] = None
+    model: str = "nvidia/cosmos-reason2-2b"
+    planner_prompt: str = (
+        "Prioritize calm, safe, desk-companion behavior with minimal sudden motion. "
+        "Prefer hold or gentle breath unless confidence is high."
+    )
     max_hz: float = 1.0
     max_frame_age_ms: int = 500
     request_timeout_ms: int = 5000
@@ -200,6 +206,17 @@ def load_config(path: str) -> RobotConfig:
     cosmos = CosmosConfig(
         enabled=bool(cosmos_raw.get("enabled", False)),
         provider=str(cosmos_raw.get("provider", "brev")),
+        base_url=None if cosmos_raw.get("base_url") in (None, "") else str(cosmos_raw.get("base_url")),
+        model=str(cosmos_raw.get("model", "nvidia/cosmos-reason2-2b")),
+        planner_prompt=str(
+            cosmos_raw.get(
+                "planner_prompt",
+                (
+                    "Prioritize calm, safe, desk-companion behavior with minimal sudden motion. "
+                    "Prefer hold or gentle breath unless confidence is high."
+                ),
+            )
+        ),
         max_hz=_as_float(cosmos_raw.get("max_hz", 1.0), "cosmos.max_hz"),
         max_frame_age_ms=_as_int(cosmos_raw.get("max_frame_age_ms", 500), "cosmos.max_frame_age_ms"),
         request_timeout_ms=_as_int(cosmos_raw.get("request_timeout_ms", 5000), "cosmos.request_timeout_ms"),

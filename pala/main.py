@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import argparse
 import signal
 import threading
 import time
 import os
 import logging
+import sys
 from typing import Dict, Optional
 
 from .config import load_config
@@ -21,9 +23,12 @@ from .utils import RateLimiter, LatestValue, maybe_logger
 
 logger = logging.getLogger(__name__)
 
-def main() -> int:
+def main(argv: Optional[list[str]] = None) -> int:
     _configure_logging()
-    cfg = load_config("config/robot.yaml")
+    args = _parse_cli_args([] if argv is None else argv)
+    cfg = load_config(args.config)
+    if args.mode:
+        cfg.mode = args.mode
     max_runtime_s = _parse_max_runtime_s()
 
     stop = threading.Event()
@@ -267,11 +272,21 @@ def _build_detector(cfg):
 
 def _build_planner(cfg, latest_frame: LatestFrameCache):
     if getattr(cfg, "cosmos", None) and cfg.cosmos.enabled:
+        base_url = os.getenv("PALA_COSMOS_BASE_URL") or cfg.cosmos.base_url
+        api_key = os.getenv("PALA_COSMOS_API_KEY")
+        model = os.getenv("PALA_COSMOS_MODEL") or cfg.cosmos.model
+        planner_prompt = os.getenv("PALA_COSMOS_PROMPT") or cfg.cosmos.planner_prompt
         return AsyncCosmosPlanner(
             frame_cache=latest_frame,
             fallback=HeuristicPlanner(),
+            provider=cfg.cosmos.provider,
+            base_url=base_url,
+            api_key=api_key,
+            model=model,
+            planner_prompt=planner_prompt,
             max_hz=cfg.cosmos.max_hz,
             max_frame_age_ms=cfg.cosmos.max_frame_age_ms,
+            request_timeout_ms=cfg.cosmos.request_timeout_ms,
             mock_latency_ms=cfg.cosmos.mock_latency_ms,
             response_ttl_ms=cfg.cosmos.response_ttl_ms,
         )
@@ -339,5 +354,20 @@ def _configure_logging() -> None:
     )
 
 
+def _parse_cli_args(argv: Optional[list[str]]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="PALA runtime")
+    parser.add_argument(
+        "--config",
+        default="config/robot.yaml",
+        help="Path to runtime config YAML",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=["dev", "jetson_perception", "jetson_full"],
+        help="Override mode from config",
+    )
+    return parser.parse_args(argv)
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))

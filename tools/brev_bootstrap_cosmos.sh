@@ -6,6 +6,9 @@ NAME="cosmos"
 PORT="8000"
 CACHE_DIR="${HOME}/.cache/nim"
 REPLACE="0"
+WAIT_READY="1"
+WAIT_TIMEOUT_S="900"
+WAIT_POLL_S="5"
 
 usage() {
   cat <<'EOF'
@@ -17,6 +20,9 @@ Options:
   --port <port>           Host port for NIM (default: 8000)
   --cache-dir <path>      Cache mount path (default: ~/.cache/nim)
   --replace               Remove existing container with same name
+  --no-wait-ready         Return immediately after container start
+  --wait-timeout-s <sec>  Wait timeout for /v1/health/ready (default: 900)
+  --wait-poll-s <sec>     Poll interval while waiting (default: 5)
   -h, --help              Show this help
 
 Required env:
@@ -46,6 +52,18 @@ while [[ $# -gt 0 ]]; do
       REPLACE="1"
       shift
       ;;
+    --no-wait-ready)
+      WAIT_READY="0"
+      shift
+      ;;
+    --wait-timeout-s)
+      WAIT_TIMEOUT_S="${2:?missing value for --wait-timeout-s}"
+      shift 2
+      ;;
+    --wait-poll-s)
+      WAIT_POLL_S="${2:?missing value for --wait-poll-s}"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -71,6 +89,11 @@ fi
 if [[ -z "${NGC_API_KEY:-}" ]]; then
   echo "NGC_API_KEY is not set in this shell." >&2
   echo "Example: export NGC_API_KEY='...'" >&2
+  exit 1
+fi
+
+if ! command -v curl >/dev/null 2>&1; then
+  echo "curl is required but not found" >&2
   exit 1
 fi
 
@@ -104,8 +127,37 @@ docker run -d --name "$NAME" \
   "$IMAGE" >/dev/null
 
 echo "Container started."
+
+if [[ "$WAIT_READY" == "1" ]]; then
+  echo "Waiting for readiness: http://127.0.0.1:${PORT}/v1/health/ready"
+  start_s="$(date +%s)"
+  while true; do
+    if curl -fsS --max-time 3 "http://127.0.0.1:${PORT}/v1/health/ready" >/dev/null 2>&1; then
+      break
+    fi
+
+    if ! docker ps --format '{{.Names}}' | grep -Fxq "$NAME"; then
+      echo "Container '$NAME' is not running while waiting for readiness." >&2
+      docker ps -a --filter "name=^/${NAME}$" >&2 || true
+      docker logs --tail 80 "$NAME" >&2 || true
+      exit 1
+    fi
+
+    now_s="$(date +%s)"
+    if (( now_s - start_s >= WAIT_TIMEOUT_S )); then
+      echo "Timed out waiting for Cosmos readiness after ${WAIT_TIMEOUT_S}s." >&2
+      docker logs --tail 120 "$NAME" >&2 || true
+      exit 1
+    fi
+    sleep "$WAIT_POLL_S"
+  done
+
+  echo "Cosmos is ready."
+fi
+
 echo
 echo "Next commands:"
 echo "  docker ps --filter name=^/${NAME}$"
 echo "  docker logs -f ${NAME}"
 echo "  curl -sS http://127.0.0.1:${PORT}/v1/health/ready"
+echo "  curl -sS http://127.0.0.1:${PORT}/v1/models"

@@ -139,3 +139,41 @@ uv run python tools/hw_calibrate.py --enable --repl
 - `zone=center` alone is not proof of detector output; perception falls back to a center dummy bbox when detections are empty.
 - `Deserialize engine failed ...` is expected on first run before the engine exists.
 - Keep NumPy pinned below 2 for current `pyds` compatibility on this stack.
+
+## Cosmos (Brev) One-Command Bring-Up
+
+On a fresh Brev VM:
+```
+cd ~/pala
+export NGC_API_KEY='...'
+./tools/brev_bootstrap_cosmos.sh --replace
+```
+
+This script:
+- validates GPU/docker prereqs,
+- logs into `nvcr.io`,
+- starts Cosmos NIM container,
+- waits for `http://127.0.0.1:8000/v1/health/ready`.
+
+On Jetson (or Mac in `--mode dev`) verify planner integration:
+```
+cd ~/pala
+export PALA_COSMOS_PROMPT="Prioritize calm, safe desk-companion behavior."
+./tools/cosmos_planner_smoke.sh --base-url "http://<BREV_PUBLIC_IP>:8000" --mode dev --seconds 25
+```
+
+Characterize image round-trip latency (live capture, 1 Hz default):
+```
+cd ~/pala
+uv run python tools/cosmos_image_probe.py --base-url "http://<BREV_PUBLIC_IP>:8000" --mode jetson_full --count 20
+```
+
+Ask Cosmos to describe what is happening in the camera image:
+```
+cd ~/pala
+uv run python tools/cosmos_image_probe.py --base-url "http://<BREV_PUBLIC_IP>:8000" --mode jetson_full --task describe --question "What is happening in this image?" --count 10
+```
+
+Pass criteria:
+- runtime logs include `cosmos stats requests=... successes=...`,
+- new `logs/actions.jsonl` entries include `explanation` prefixed with `cosmos_remote:`.

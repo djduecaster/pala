@@ -1,0 +1,293 @@
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.1,"period_s":6.0,"rate_rad_s":1.1},"confidence":0.45,"explanation":"cosmos_mock:presence frame=True"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{},"confidence":0.99,"explanation":"cosmos_remote:Breathing is a subconscious physiological process that occurs involuntarily. It serves to regulate breathing rate and depth, ensuring adequate oxygenation of the blood. Breathing typically follows a rhythmic pattern, involving inhalation and exhalation cycles. In this context, the breath may reflect a momentary pause or adjustment in the robot's internal state, possibly related to sensing or processing information. The breather's action is subtle and involuntary, aligning with typical biological responses."}
+{"primitive":"breath","params":{},"confidence":0.99,"explanation":"cosmos_remote:Breathing is a subconscious physiological process that occurs involuntarily. It serves to regulate breathing rate and depth, ensuring adequate oxygenation of the blood. Breathing typically follows a rhythmic pattern, involving inhalation and exhalation cycles. In this context, the breath may reflect a momentary pause or adjustment in the robot's internal state, possibly related to sensing or processing information. The breather's action is subtle and involuntary, aligning with typical biological responses."}
+{"primitive":"breath","params":{},"confidence":0.99,"explanation":"cosmos_remote:Breathing is a subconscious physiological process that occurs involuntarily. It serves to regulate breathing rate and depth, ensuring adequate oxygenation of the blood. Breathing typically follows a rhythmic pattern, involving inhalation and exhalation cycles. In this context, the breath may reflect a momentary pause or adjustment in the robot's internal state, possibly related to sensing or processing information. The breather's action is subtle and involuntary, aligning with typical biological responses."}
+{"primitive":"glance_right","params":{"duration":0.5},"confidence":0.8,"explanation":"cosmos_remote:The robot is performing a brief glance to the right, likely to assess the environment or locate an object of interest in that direction."}
+{"primitive":"glance_right","params":{"duration":0.5},"confidence":0.8,"explanation":"cosmos_remote:The robot is performing a brief glance to the right, likely to assess the environment or locate an object of interest in that direction."}
+{"primitive":"glance_right","params":{"duration":0.5},"confidence":0.8,"explanation":"cosmos_remote:The robot is performing a brief glance to the right, likely to assess the environment or locate an object of interest in that direction."}
+{"primitive":"glance_right","params":{"duration":0.5},"confidence":0.8,"explanation":"cosmos_remote:The robot is performing a brief glance to the right, likely to assess the environment or locate an object of interest in that direction."}
+{"primitive":"glance_right","params":{"duration":0.5},"confidence":0.8,"explanation":"cosmos_remote:The robot is performing a brief glance to the right, likely to assess the environment or locate an object of interest in that direction."}
+{"primitive":"glance_left","params":{"duration":2.0,"velocity":"medium"},"confidence":0.8,"explanation":"cosmos_remote:The robot is performing a glance to the left, likely to assess the environment or locate an object of interest. The glance is brief and directed toward the left side of the frame, suggesting a reactive or exploratory behavior."}
+{"primitive":"glance_left","params":{"duration":2.0,"velocity":"medium"},"confidence":0.8,"explanation":"cosmos_remote:The robot is performing a glance to the left, likely to assess the environment or locate an object of interest. The glance is brief and directed toward the left side of the frame, suggesting a reactive or exploratory behavior."}
+{"primitive":"glance_left","params":{"duration":2.0,"velocity":"medium"},"confidence":0.8,"explanation":"cosmos_remote:The robot is performing a glance to the left, likely to assess the environment or locate an object of interest. The glance is brief and directed toward the left side of the frame, suggesting a reactive or exploratory behavior."}
+{"primitive":"glance_left","params":{"duration":2.0,"velocity":"medium"},"confidence":0.8,"explanation":"cosmos_remote:The robot is performing a glance to the left, likely to assess the environment or locate an object of interest. The glance is brief and directed toward the left side of the frame, suggesting a reactive or exploratory behavior."}
+{"primitive":"glance_left","params":{"duration":2.0,"velocity":"medium"},"confidence":0.8,"explanation":"cosmos_remote:The robot is performing a glance to the left, likely to assess the environment or locate an object of interest. The glance is brief and directed toward the left side of the frame, suggesting a reactive or exploratory behavior."}
+{"primitive":"glance_left","params":{"duration":0.5},"confidence":0.8,"explanation":"cosmos_remote:The robot is likely orienting its sensors or cameras to detect or respond to an object or person in the left area of the frame, indicated by the zone hint and the primary person's position."}
+{"primitive":"glance_left","params":{"duration":0.5},"confidence":0.8,"explanation":"cosmos_remote:The robot is likely orienting its sensors or cameras to detect or respond to an object or person in the left area of the frame, indicated by the zone hint and the primary person's position."}
+{"primitive":"glance_left","params":{"duration":0.5},"confidence":0.8,"explanation":"cosmos_remote:The robot is likely orienting its sensors or cameras to detect or respond to an object or person in the left area of the frame, indicated by the zone hint and the primary person's position."}
+{"primitive":"glance_right","params":{"duration":0.5},"confidence":0.9,"explanation":"cosmos_remote:The robot is performing a brief glance to the right, likely to assess the position or movement of the person in the zone."}
+{"primitive":"glance_right","params":{"duration":0.5},"confidence":0.9,"explanation":"cosmos_remote:The robot is performing a brief glance to the right, likely to assess the position or movement of the person in the zone."}
+{"primitive":"glance_right","params":{"duration":0.5},"confidence":0.9,"explanation":"cosmos_remote:The robot is performing a brief glance to the right, likely to assess the position or movement of the person in the zone."}
+{"primitive":"breath","params":{},"confidence":0.99,"explanation":"cosmos_remote:breathing rhythm likely synchronized with the heartbeat of the robot, indicating a controlled and intentional pause in movement."}
+{"primitive":"breath","params":{},"confidence":0.99,"explanation":"cosmos_remote:breathing rhythm likely synchronized with the heartbeat of the robot, indicating a controlled and intentional pause in movement."}
+{"primitive":"breath","params":{},"confidence":0.99,"explanation":"cosmos_remote:breathing rhythm likely synchronized with the heartbeat of the robot, indicating a controlled and intentional pause in movement."}
+{"primitive":"breath","params":{},"confidence":0.99,"explanation":"cosmos_remote:breathing rhythm likely synchronized with the heartbeat of the robot, indicating a controlled and intentional pause in movement."}
+{"primitive":"breath","params":{},"confidence":0.99,"explanation":"cosmos_remote:breathing rhythm likely synchronized with the heartbeat of the robot, indicating a controlled and intentional pause in movement."}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"glance_left","params":{"duration":2.0,"velocity":"slow"},"confidence":0.8,"explanation":"cosmos_remote:The robot is performing a brief glance to the left, likely to assess the environment or locate an object/person of interest. The parameters indicate a short duration and slow velocity, suggesting cautious observation."}
+{"primitive":"glance_left","params":{"duration":2.0,"velocity":"slow"},"confidence":0.8,"explanation":"cosmos_remote:The robot is performing a brief glance to the left, likely to assess the environment or locate an object/person of interest. The parameters indicate a short duration and slow velocity, suggesting cautious observation."}
+{"primitive":"glance_left","params":{"duration":2.0,"velocity":"slow"},"confidence":0.8,"explanation":"cosmos_remote:The robot is performing a brief glance to the left, likely to assess the environment or locate an object/person of interest. The parameters indicate a short duration and slow velocity, suggesting cautious observation."}
+{"primitive":"glance_left","params":{"duration":2.0,"velocity":"slow"},"confidence":0.8,"explanation":"cosmos_remote:The robot is performing a brief glance to the left, likely to assess the environment or locate an object/person of interest. The parameters indicate a short duration and slow velocity, suggesting cautious observation."}
+{"primitive":"glance_left","params":{"duration":2.0,"velocity":"slow"},"confidence":0.8,"explanation":"cosmos_remote:The robot is performing a brief glance to the left, likely to assess the environment or locate an object/person of interest. The parameters indicate a short duration and slow velocity, suggesting cautious observation."}
+{"primitive":"glance_left","params":{"duration":2.0,"velocity":"slow"},"confidence":0.8,"explanation":"cosmos_remote:The robot is performing a brief glance to the left, likely to assess the environment or locate an object of interest. The glance is smooth and directed toward the left side of the frame, suggesting a cautious approach to avoid collisions."}
+{"primitive":"glance_left","params":{"duration":2.0,"velocity":"slow"},"confidence":0.8,"explanation":"cosmos_remote:The robot is performing a brief glance to the left, likely to assess the environment or locate an object of interest. The glance is smooth and directed toward the left side of the frame, suggesting a cautious approach to avoid collisions."}
+{"primitive":"glance_left","params":{"duration":2.0,"velocity":"slow"},"confidence":0.8,"explanation":"cosmos_remote:The robot is performing a brief glance to the left, likely to assess the environment or locate an object of interest. The glance is smooth and directed toward the left side of the frame, suggesting a cautious approach to avoid collisions."}
+{"primitive":"breath","params":{},"confidence":0.9,"explanation":"cosmos_remote:breathing rhythm detected in the sensor data, indicating a momentary pause or regulation of respiration."}
+{"primitive":"breath","params":{},"confidence":0.9,"explanation":"cosmos_remote:breathing rhythm detected in the sensor data, indicating a momentary pause or regulation of respiration."}
+{"primitive":"breath","params":{},"confidence":0.9,"explanation":"cosmos_remote:breathing rhythm detected in the sensor data, indicating a momentary pause or regulation of respiration."}
+{"primitive":"breath","params":{},"confidence":0.9,"explanation":"cosmos_remote:breathing rhythm detected in the sensor data, indicating a momentary pause or regulation of respiration."}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"glance_right","params":{"duration":2},"confidence":0.8,"explanation":"cosmos_remote:The robot is performing a glance to the right, likely to assess the environment or detect an approaching object. The glance duration is estimated to be around 2 seconds, which aligns with typical perceptual processing times for such tasks."}
+{"primitive":"glance_right","params":{"duration":2},"confidence":0.8,"explanation":"cosmos_remote:The robot is performing a glance to the right, likely to assess the environment or detect an approaching object. The glance duration is estimated to be around 2 seconds, which aligns with typical perceptual processing times for such tasks."}
+{"primitive":"glance_right","params":{"duration":2},"confidence":0.8,"explanation":"cosmos_remote:The robot is performing a glance to the right, likely to assess the environment or detect an approaching object. The glance duration is estimated to be around 2 seconds, which aligns with typical perceptual processing times for such tasks."}
+{"primitive":"glance_right","params":{"duration":2},"confidence":0.8,"explanation":"cosmos_remote:The robot is performing a glance to the right, likely to assess the environment or detect an approaching object. The glance duration is estimated to be around 2 seconds, which aligns with typical perceptual processing times for such tasks."}
+{"primitive":"glance_left","params":{"duration":2.0,"velocity":"medium"},"confidence":0.8,"explanation":"cosmos_remote:The robot is performing a brief glance to the left, likely to assess the environment or locate an object/person of interest within the zone."}
+{"primitive":"glance_left","params":{"duration":2.0,"velocity":"medium"},"confidence":0.8,"explanation":"cosmos_remote:The robot is performing a brief glance to the left, likely to assess the environment or locate an object/person of interest within the zone."}
+{"primitive":"glance_left","params":{"duration":2.0,"velocity":"medium"},"confidence":0.8,"explanation":"cosmos_remote:The robot is performing a brief glance to the left, likely to assess the environment or locate an object/person of interest within the zone."}
+{"primitive":"glance_left","params":{"duration":2.0,"velocity":"medium"},"confidence":0.8,"explanation":"cosmos_remote:The robot is performing a brief glance to the left, likely to assess the environment or locate an object/person of interest within the zone."}
+{"primitive":"glance_left","params":{"duration":2.0,"velocity":"medium"},"confidence":0.8,"explanation":"cosmos_remote:The robot is performing a brief glance to the left, likely to assess the environment or locate an object/person of interest within the zone."}
+{"primitive":"glance_left","params":{"duration":2.0},"confidence":0.8,"explanation":"cosmos_remote:The robot is performing a brief glance to the left, likely to assess the environment or locate an object of interest. The glance duration is estimated to be around 2 seconds, indicating a cautious approach to avoid collisions or unexpected obstacles."}
+{"primitive":"glance_left","params":{"duration":2.0},"confidence":0.8,"explanation":"cosmos_remote:The robot is performing a brief glance to the left, likely to assess the environment or locate an object of interest. The glance duration is estimated to be around 2 seconds, indicating a cautious approach to avoid collisions or unexpected obstacles."}
+{"primitive":"glance_left","params":{"duration":2.0},"confidence":0.8,"explanation":"cosmos_remote:The robot is performing a brief glance to the left, likely to assess the environment or locate an object of interest. The glance duration is estimated to be around 2 seconds, indicating a cautious approach to avoid collisions or unexpected obstacles."}
+{"primitive":"glance_left","params":{"duration":2.0},"confidence":0.8,"explanation":"cosmos_remote:The robot is performing a brief glance to the left, likely to assess the environment or locate an object of interest. The glance duration is estimated to be around 2 seconds, indicating a cautious approach to avoid collisions or unexpected obstacles."}
+{"primitive":"breath","params":{},"confidence":0.99,"explanation":"cosmos_remote:Breathing is detected as the primary action, likely to regulate breathing during physical activity. The latency and frame information suggest this is a brief, involuntary response typical in active states."}
+{"primitive":"breath","params":{},"confidence":0.99,"explanation":"cosmos_remote:Breathing is detected as the primary action, likely to regulate breathing during physical activity. The latency and frame information suggest this is a brief, involuntary response typical in active states."}
+{"primitive":"breath","params":{},"confidence":0.99,"explanation":"cosmos_remote:Breathing is detected as the primary action, likely to regulate breathing during physical activity. The latency and frame information suggest this is a brief, involuntary response typical in active states."}
+{"primitive":"breath","params":{},"confidence":0.99,"explanation":"cosmos_remote:Breathing is detected as the primary action, likely to regulate breathing during physical activity. The latency and frame information suggest this is a brief, involuntary response typical in active states."}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"glance_right","params":{"duration":2.0,"velocity":"medium"},"confidence":0.8,"explanation":"cosmos_remote:The robot is performing a glance to the right, likely to assess the environment or locate an object of interest. The glance duration is estimated to be around 2 seconds, and the velocity is set to medium, indicating a controlled and deliberate movement. This action suggests the robot is preparing for a subsequent task involving the right side of its field of view."}
+{"primitive":"glance_right","params":{"duration":2.0,"velocity":"medium"},"confidence":0.8,"explanation":"cosmos_remote:The robot is performing a glance to the right, likely to assess the environment or locate an object of interest. The glance duration is estimated to be around 2 seconds, and the velocity is set to medium, indicating a controlled and deliberate movement. This action suggests the robot is preparing for a subsequent task involving the right side of its field of view."}
+{"primitive":"glance_right","params":{"duration":2.0,"velocity":"medium"},"confidence":0.8,"explanation":"cosmos_remote:The robot is performing a glance to the right, likely to assess the environment or locate an object of interest. The glance duration is estimated to be around 2 seconds, and the velocity is set to medium, indicating a controlled and deliberate movement. This action suggests the robot is preparing for a subsequent task involving the right side of its field of view."}
+{"primitive":"glance_right","params":{"duration":2.0,"velocity":"medium"},"confidence":0.8,"explanation":"cosmos_remote:The robot is performing a glance to the right, likely to assess the environment or locate an object of interest. The glance duration is estimated to be around 2 seconds, and the velocity is set to medium, indicating a controlled and deliberate movement. This action suggests the robot is preparing for a subsequent task involving the right side of its field of view."}
+{"primitive":"breath","params":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","params":{},"confidence":0.9,"explanation":"cosmos_remote:Breathing is detected as the primary action, likely indicating a momentary pause or regulation of breath, possibly due to stress or concentration. The latency and frame information suggest this is a brief, isolated action within a broader context of movement or interaction."}
+{"primitive":"breath","params":{},"confidence":0.9,"explanation":"cosmos_remote:Breathing is detected as the primary action, likely indicating a momentary pause or regulation of breath, possibly due to stress or concentration. The latency and frame information suggest this is a brief, isolated action within a broader context of movement or interaction."}
+{"primitive":"breath","params":{},"confidence":0.9,"explanation":"cosmos_remote:deep breath to stabilize focus and readiness for subsequent actions."}

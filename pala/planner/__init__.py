@@ -1,4 +1,5 @@
-from .interface import PlannerInterface, HeuristicPlanner, CosmosPlanner
+from .protocol import PlannerInterface
+from .heuristic import HeuristicPlanner
 from .cosmos_async import AsyncCosmosPlanner
 
-__all__ = ["PlannerInterface", "HeuristicPlanner", "CosmosPlanner", "AsyncCosmosPlanner"]
+__all__ = ["PlannerInterface", "HeuristicPlanner", "AsyncCosmosPlanner"]

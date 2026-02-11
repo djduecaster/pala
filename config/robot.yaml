@@ -71,6 +71,9 @@ deepstream:
 cosmos:
   enabled: true
   provider: "brev"
+  base_url: "http://160.211.46.147:8000" # Prefer env override: PALA_COSMOS_BASE_URL
+  model: "nvidia/cosmos-reason2-2b"
+  planner_prompt: "Prioritize calm, safe desk-companion behavior. Prefer hold/breath unless confidence is high."
   max_hz: 1.0
   max_frame_age_ms: 500
   request_timeout_ms: 5000

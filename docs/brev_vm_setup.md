@@ -37,7 +37,7 @@ Fast path using project script (on VM, inside repo):
 
 ```bash
 cd ~/pala
-./tools/brev_bootstrap_cosmos.sh
+./tools/brev_bootstrap_cosmos.sh --replace
 ```
 
 Manual equivalent:
@@ -83,7 +83,46 @@ curl -sv --connect-timeout 5 --max-time 10 http://<BREV_PUBLIC_IP>:8000/v1/model
 curl -sS --max-time 30 http://<BREV_PUBLIC_IP>:8000/v1/chat/completions -H "Content-Type: application/json" -d '{"model":"nvidia/cosmos-reason2-2b","messages":[{"role":"user","content":"Reply with exactly: READY"}],"max_tokens":16,"stream":false}'
 ```
 
-## 8) Teardown / recreate
+## 8) Wire PALA runtime to Brev
+On Jetson, set runtime env before launching PALA:
+
+```bash
+export PALA_COSMOS_BASE_URL="http://<BREV_PUBLIC_IP>:8000"
+export PALA_COSMOS_MODEL="nvidia/cosmos-reason2-2b"
+export PALA_COSMOS_PROMPT="Prioritize calm, safe desk-companion behavior."
+# Optional when endpoint is protected:
+# export PALA_COSMOS_API_KEY="..."
+```
+
+Then run:
+
+```bash
+cd ~/pala
+uv run python -m pala.main
+```
+
+Quick end-to-end planner smoke (Jetson or Mac):
+
+```bash
+cd ~/pala
+./tools/cosmos_planner_smoke.sh --base-url "http://<BREV_PUBLIC_IP>:8000" --mode dev --seconds 25
+```
+
+Live camera image probe (Jetson, 1 Hz default):
+
+```bash
+cd ~/pala
+uv run python tools/cosmos_image_probe.py --base-url "http://<BREV_PUBLIC_IP>:8000" --mode jetson_full --count 20
+```
+
+Describe mode (prints what the model sees per frame):
+
+```bash
+cd ~/pala
+uv run python tools/cosmos_image_probe.py --base-url "http://<BREV_PUBLIC_IP>:8000" --mode jetson_full --task describe --question "What is happening in this image?" --count 10
+```
+
+## 9) Teardown / recreate
 - Stop and remove container:
 
 ```bash
@@ -93,7 +132,7 @@ docker rm -f cosmos
 - Delete VM in Brev when done.
 - Recreate by rerunning this document or `./tools/brev_bootstrap_cosmos.sh`.
 
-## 9) Notes
+## 10) Notes
 - Keep `NGC_API_KEY` and any future PALA cloud keys out of git.
 - Keep caches in `~/.cache/nim` so container restarts are faster.
 - If you change container image/tag, pass `--image` to the bootstrap script.
