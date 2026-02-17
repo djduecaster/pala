@@ -4,6 +4,7 @@ import time
 from pala.config.load import LoopRates, LoggingConfig, CameraConfig, RobotConfig, DeepStreamConfig
 import pala.main as pala_main
 from pala.types import HardwareCommand
+from pala.control.primitives import PrimitiveKind
 
 
 class _CaptureLogger:
@@ -50,7 +51,7 @@ def test_dev_runtime_emits_perception_and_action(monkeypatch):
     assert result == 0
 
     assert any(getattr(st, "debug", {}).get("zone_hint") for st in perception_log.items)
-    assert any(getattr(a, "primitive", None) and a.primitive != "hold" for a in action_log.items)
+    assert any(getattr(a, "primitive", None) and a.primitive != PrimitiveKind.HOLD for a in action_log.items)
 
 
 def test_hardware_respects_enable_false(monkeypatch):

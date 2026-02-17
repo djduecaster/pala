@@ -9,13 +9,15 @@ import time
 from urllib import request as urllib_request
 from urllib import error as urllib_error
 
-from ..control.primitives import (
-    ALL_PRIMITIVES,
-    PRIMITIVE_BREATH,
-    PRIMITIVE_HOLD,
-)
 from ..perception.frame_cache import LatestFrameCache
-from ..types import ActionPlan, PerceptionState
+from ..types import (
+    ActionPlan,
+    PerceptionState,
+    PrimitiveKind,
+    HoldCommand,
+    BreathCommand,
+    action_plan_from_dict,
+)
 from .heuristic import HeuristicPlanner
 from .protocol import PlannerInterface
 
@@ -180,16 +182,16 @@ class AsyncCosmosPlanner(PlannerInterface):
     def _mock_plan(self, req: _CosmosRequest) -> ActionPlan:
         if req.state.primary_person is None:
             return ActionPlan(
-                primitive=PRIMITIVE_HOLD,
-                params={},
+                primitive=PrimitiveKind.HOLD,
+                command=HoldCommand(),
                 confidence=0.25,
                 explanation="cosmos_mock:no_person",
             )
 
         has_frame = req.frame_mono_ns is not None and req.frame_shape is not None
         return ActionPlan(
-            primitive=PRIMITIVE_BREATH,
-            params={"amp_rad": 0.1, "period_s": 6.0, "rate_rad_s": 1.1},
+            primitive=PrimitiveKind.BREATH,
+            command=BreathCommand(amp_rad=0.1, period_s=6.0, rate_rad_s=1.1),
             confidence=0.45,
             explanation=f"cosmos_mock:presence frame={has_frame}",
         )
@@ -251,12 +253,13 @@ class AsyncCosmosPlanner(PlannerInterface):
 
         system_prompt = (
             "You are a robotics planner. Return only JSON with keys "
-            "primitive, params, confidence, explanation. "
-            f"Allowed primitive values: {sorted(ALL_PRIMITIVES)}. "
-            "Confidence must be 0..1. Keep params compact. "
+            "primitive, command, confidence, explanation. "
+            f"Allowed primitive values: {[k.value for k in PrimitiveKind]}. "
+            "Confidence must be 0..1. Keep command compact. "
             "No markdown, no prose, no code fences. "
             "Example: "
-            '{"primitive":"hold","params":{},"confidence":0.5,"explanation":"short reason"}'
+            '{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},'
+            '"confidence":0.5,"explanation":"short reason"}'
         )
         if self._planner_prompt:
             system_prompt += f" Operator guidance: {self._planner_prompt}"
@@ -335,35 +338,9 @@ def _parse_action_content(content: str) -> Optional[ActionPlan]:
     if data is None:
         return None
 
-    # Some models wrap the action payload.
-    if isinstance(data.get("action"), dict):
-        data = data["action"]
-
     if not isinstance(data, dict):
         return None
-
-    primitive = str(data.get("primitive", PRIMITIVE_HOLD)).strip().lower()
-    if primitive not in ALL_PRIMITIVES:
-        primitive = PRIMITIVE_HOLD
-
-    params_raw = data.get("params", {})
-    params = params_raw if isinstance(params_raw, dict) else {}
-
-    try:
-        confidence = float(data.get("confidence", 0.5))
-    except Exception:
-        confidence = 0.5
-    confidence = max(0.0, min(1.0, confidence))
-
-    explanation_raw = data.get("explanation")
-    explanation = explanation_raw if isinstance(explanation_raw, str) else None
-
-    return ActionPlan(
-        primitive=primitive,
-        params=params,
-        confidence=confidence,
-        explanation=explanation,
-    )
+    return action_plan_from_dict(data)
 
 
 def _parse_json_obj(raw: str) -> Optional[dict[str, Any]]:

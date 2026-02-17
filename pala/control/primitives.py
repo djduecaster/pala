@@ -1,13 +1,30 @@
-PRIMITIVE_HOLD = "hold"
-PRIMITIVE_GLANCE_LEFT = "glance_left"
-PRIMITIVE_GLANCE_RIGHT = "glance_right"
-PRIMITIVE_ACKNOWLEDGE = "acknowledge"
-PRIMITIVE_BREATH = "breath"
+from __future__ import annotations
 
-ALL_PRIMITIVES = {
-    PRIMITIVE_HOLD,
-    PRIMITIVE_GLANCE_LEFT,
-    PRIMITIVE_GLANCE_RIGHT,
-    PRIMITIVE_ACKNOWLEDGE,
-    PRIMITIVE_BREATH,
-}
+from ..types import (
+    PrimitiveKind,
+    PrimitiveCommand,
+    HoldCommand,
+    HomeCommand,
+    MoveToCommand,
+    GazeToCommand,
+    GlanceCommand,
+    NodCommand,
+    BreathCommand,
+    OrientToZoneCommand,
+)
+
+ALL_PRIMITIVES = {kind.value for kind in PrimitiveKind}
+
+__all__ = [
+    "PrimitiveKind",
+    "PrimitiveCommand",
+    "HoldCommand",
+    "HomeCommand",
+    "MoveToCommand",
+    "GazeToCommand",
+    "GlanceCommand",
+    "NodCommand",
+    "BreathCommand",
+    "OrientToZoneCommand",
+    "ALL_PRIMITIVES",
+]

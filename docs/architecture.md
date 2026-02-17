@@ -16,8 +16,8 @@
    - Emits `ActionPlan`.
 
 3. **Control Loop (50–100 Hz)**
-   - Converts `ActionPlan` → `HardwareCommand` via `TrajectoryExecutor`.
-   - Dummy executor now; real kinematics will be ported later.
+   - Converts typed `ActionPlan` commands → `HardwareCommand` via `TrajectoryExecutor`.
+   - Single active primitive with priority preemption and safety clamps.
 
 4. **Hardware Loop (50–200 Hz)**
    - Sends `HardwareCommand` to servo backend.
@@ -25,7 +25,7 @@
 
 ## Data Contracts
 - `PerceptionState`: timestamp(s), fps, latency, normalized bbox, optional pointing target.
-- `ActionPlan`: primitive, params, confidence, optional explanation.
+- `ActionPlan`: primitive kind, typed command payload, confidence, optional explanation.
 - `HardwareCommand`: timestamp + joint_angles_rad + enable flag.
 
 ## Evaluation & Reproducibility

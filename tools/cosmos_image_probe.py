@@ -17,6 +17,7 @@ import numpy as np
 from PIL import Image
 
 from pala.config import load_config
+from pala.control.primitives import PrimitiveKind
 from pala.hardware.camera import DummyCamera
 from pala.perception.frame_source import CameraFrameSource, ThreadedFrameSource
 
@@ -209,8 +210,8 @@ def _build_payload(
 
     system_prompt = (
         "You are a robotics planner. Return only JSON with keys "
-        "primitive, params, confidence, explanation. "
-        "Allowed primitive values: ['acknowledge','breath','glance_left','glance_right','hold']. "
+        "primitive, command, confidence, explanation. "
+        f"Allowed primitive values: {[k.value for k in PrimitiveKind]}. "
         "Confidence must be 0..1. No markdown or prose."
     )
     if planner_prompt:

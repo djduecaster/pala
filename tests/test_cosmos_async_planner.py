@@ -6,6 +6,7 @@ import numpy as np
 from pala.perception.frame_cache import LatestFrameCache
 from pala.planner.cosmos_async import AsyncCosmosPlanner
 from pala.types import BBoxNorm, PerceptionState
+from pala.control.primitives import PrimitiveKind
 
 
 def _state_with_person() -> PerceptionState:
@@ -33,7 +34,7 @@ def test_async_cosmos_planner_remote_response_used(monkeypatch):
                 {
                     "message": {
                         "content": (
-                            '{"primitive":"breath","params":{"amp_rad":0.11,"period_s":5.5,"rate_rad_s":1.0},'
+                            '{"primitive":"breath","command":{"amp_rad":0.11,"period_s":5.5,"rate_rad_s":1.0},'
                             '"confidence":0.66,"explanation":"remote ok"}'
                         )
                     }
@@ -68,7 +69,7 @@ def test_async_cosmos_planner_remote_response_used(monkeypatch):
 
         assert got is not None
         assert got.explanation == "cosmos_remote:remote ok"
-        assert got.primitive == "breath"
+        assert got.primitive == PrimitiveKind.BREATH
         assert calls["count"] >= 1
     finally:
         planner.shutdown()
@@ -102,7 +103,7 @@ def test_async_cosmos_planner_remote_invalid_response_falls_back(monkeypatch):
 
         assert calls["count"] >= 1
         assert actions
-        assert actions[-1].primitive == "breath"
+        assert actions[-1].primitive == PrimitiveKind.BREATH
         assert actions[-1].explanation == "idle presence"
     finally:
         planner.shutdown()

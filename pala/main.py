@@ -18,6 +18,7 @@ from .perception.frame_source import DummyFrameSource, CameraFrameSource
 from .planner import HeuristicPlanner, AsyncCosmosPlanner
 from .behavior import BehaviorPolicy
 from .control import TrajectoryExecutor
+from .control.primitives import PrimitiveKind, HoldCommand
 from .hardware import DummyServo, PCA9685Servo, ServoCalibration
 from .utils import RateLimiter, LatestValue, maybe_logger
 
@@ -108,7 +109,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         while not stop.is_set():
             action, _ = latest_action.get()
             if action is None:
-                action = ActionPlan(primitive="hold", params={}, confidence=0.1)
+                action = ActionPlan(primitive=PrimitiveKind.HOLD, command=HoldCommand(), confidence=0.1)
 
             now = time.monotonic()
             dt = now - last_ts

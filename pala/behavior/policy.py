@@ -6,10 +6,10 @@ from typing import Optional
 from ..types import PerceptionState, ActionPlan
 from ..planner import PlannerInterface
 from ..control.primitives import (
-    PRIMITIVE_HOLD,
-    PRIMITIVE_GLANCE_LEFT,
-    PRIMITIVE_GLANCE_RIGHT,
-    PRIMITIVE_ACKNOWLEDGE,
+    PrimitiveKind,
+    HoldCommand,
+    GlanceCommand,
+    NodCommand,
 )
 
 
@@ -27,7 +27,7 @@ class BehaviorPolicy:
     def step(self, st: Optional[PerceptionState]) -> ActionPlan:
         now = time.monotonic()
         if st is None or st.primary_person is None:
-            return ActionPlan(primitive=PRIMITIVE_HOLD, params={}, confidence=0.3)
+            return ActionPlan(primitive=PrimitiveKind.HOLD, command=HoldCommand(), confidence=0.3)
 
         zone = _zone_from_cx(st.primary_person.cx)
         if zone != self._curr_zone:
@@ -39,21 +39,21 @@ class BehaviorPolicy:
             self._last_trigger = now
             if zone == "left":
                 return ActionPlan(
-                    primitive=PRIMITIVE_GLANCE_LEFT,
-                    params={"duration_s": 0.6},
+                    primitive=PrimitiveKind.GLANCE,
+                    command=GlanceCommand(direction="left", duration_s=0.6),
                     confidence=0.8,
                     explanation="user dwell left"
                 )
             if zone == "right":
                 return ActionPlan(
-                    primitive=PRIMITIVE_GLANCE_RIGHT,
-                    params={"duration_s": 0.6},
+                    primitive=PrimitiveKind.GLANCE,
+                    command=GlanceCommand(direction="right", duration_s=0.6),
                     confidence=0.8,
                     explanation="user dwell right"
                 )
             return ActionPlan(
-                primitive=PRIMITIVE_ACKNOWLEDGE,
-                params={"duration_s": 0.4, "amp_rad": 0.2},
+                primitive=PrimitiveKind.NOD,
+                command=NodCommand(duration_s=0.4, amp_rad=0.2),
                 confidence=0.7,
                 explanation="user dwell center"
             )
