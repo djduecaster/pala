@@ -115,6 +115,13 @@ cd ~/pala
 uv run python tools/cosmos_image_probe.py --base-url "http://<BREV_PUBLIC_IP>:8000" --mode jetson_full --count 20
 ```
 
+Live camera video-sequence probe (multi-frame temporal context):
+
+```bash
+cd ~/pala
+uv run python tools/cosmos_video_probe.py --base-url "http://<BREV_PUBLIC_IP>:8000" --mode jetson_full --count 12 --video-window-s 4 --video-max-frames 8
+```
+
 Describe mode (prints what the model sees per frame):
 
 ```bash

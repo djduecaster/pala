@@ -177,6 +177,12 @@ cd ~/pala
 uv run python tools/cosmos_image_probe.py --base-url "http://<BREV_PUBLIC_IP>:8000" --mode jetson_full --count 20
 ```
 
+Characterize short video-sequence reasoning (multi-frame temporal context):
+```
+cd ~/pala
+uv run python tools/cosmos_video_probe.py --base-url "http://<BREV_PUBLIC_IP>:8000" --mode jetson_full --count 12 --video-window-s 4 --video-max-frames 8
+```
+
 Ask Cosmos to describe what is happening in the camera image:
 ```
 cd ~/pala

@@ -52,6 +52,7 @@ class BehaviorPolicy:
                     confidence=0.8,
                     explanation="user dwell left",
                     style="curious",
+                    cancel_current=True,
                 )
                 return self._arbitrate(proposed)
             if zone == "right":
@@ -61,6 +62,7 @@ class BehaviorPolicy:
                     confidence=0.8,
                     explanation="user dwell right",
                     style="curious",
+                    cancel_current=True,
                 )
                 return self._arbitrate(proposed)
             proposed = ActionPlan(
@@ -69,6 +71,7 @@ class BehaviorPolicy:
                 confidence=0.7,
                 explanation="user dwell center",
                 style="focused",
+                cancel_current=True,
             )
             return self._arbitrate(proposed)
 
@@ -98,7 +101,7 @@ class BehaviorPolicy:
             explanation=proposed.explanation,
             style=proposed.style,
             action_id=proposed.action_id,
-            cancel_current=True,
+            cancel_current=bool(proposed.cancel_current),
         )
 
     @staticmethod

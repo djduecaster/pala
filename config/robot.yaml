@@ -69,17 +69,28 @@ deepstream:
   conf_threshold: null
 
 cosmos:
-  enabled: false
+  enabled: true
   provider: "brev"
-  base_url: null # Prefer env override: PALA_COSMOS_BASE_URL
+  base_url: "http://160.211.46.144:8000" # Prefer env override: PALA_COSMOS_BASE_URL
   model: "nvidia/cosmos-reason2-2b"
   planner_prompt: "Prioritize calm, safe desk-companion behavior. Prefer hold/breath unless confidence is high."
-  max_hz: 1.0
+  max_hz: 0.3
   max_frame_age_ms: 500
-  video_window_s: 8.0
-  video_max_frames: 8
+  video_window_s: 6.0
+  video_max_frames: 4
   video_max_width: 320
-  video_jpeg_quality: 60
-  request_timeout_ms: 5000
+  video_jpeg_quality: 55
+  request_timeout_ms: 6000
   response_ttl_ms: 1500
+  memory_enabled: true
+  memory_jsonl_path: "logs/orchestrator_memory.jsonl"
+  memory_recent_events: 10
+  memory_digest_items: 3
+  memory_distill_every_n_events: 20
+  context_max_transcript_items: 0
+  decision_repeat_detector_window: 6
+  reasoning_probe_enabled: true
+  reasoning_probe_hz: 0.1
+  reasoning_probe_timeout_ms: 10000
+  reasoning_probe_max_tokens: 1024
   mock_latency_ms: 150

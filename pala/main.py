@@ -297,6 +297,17 @@ def _build_planner(cfg, latest_frame: LatestFrameCache):
             video_jpeg_quality=cfg.cosmos.video_jpeg_quality,
             request_timeout_ms=cfg.cosmos.request_timeout_ms,
             response_ttl_ms=cfg.cosmos.response_ttl_ms,
+            memory_enabled=cfg.cosmos.memory_enabled,
+            memory_jsonl_path=cfg.cosmos.memory_jsonl_path,
+            memory_recent_events=cfg.cosmos.memory_recent_events,
+            memory_digest_items=cfg.cosmos.memory_digest_items,
+            memory_distill_every_n_events=cfg.cosmos.memory_distill_every_n_events,
+            context_max_transcript_items=cfg.cosmos.context_max_transcript_items,
+            decision_repeat_detector_window=cfg.cosmos.decision_repeat_detector_window,
+            reasoning_probe_enabled=cfg.cosmos.reasoning_probe_enabled,
+            reasoning_probe_hz=cfg.cosmos.reasoning_probe_hz,
+            reasoning_probe_timeout_ms=cfg.cosmos.reasoning_probe_timeout_ms,
+            reasoning_probe_max_tokens=cfg.cosmos.reasoning_probe_max_tokens,
         )
     return HeuristicPlanner()
 

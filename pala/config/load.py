@@ -66,6 +66,17 @@ class CosmosConfig:
     video_jpeg_quality: int = 60
     request_timeout_ms: int = 5000
     response_ttl_ms: int = 1500
+    memory_enabled: bool = True
+    memory_jsonl_path: str = "logs/orchestrator_memory.jsonl"
+    memory_recent_events: int = 10
+    memory_digest_items: int = 3
+    memory_distill_every_n_events: int = 20
+    context_max_transcript_items: int = 0
+    decision_repeat_detector_window: int = 6
+    reasoning_probe_enabled: bool = False
+    reasoning_probe_hz: float = 0.1
+    reasoning_probe_timeout_ms: int = 8000
+    reasoning_probe_max_tokens: int = 1024
     mock_latency_ms: int = 150
 
 
@@ -230,6 +241,32 @@ def load_config(path: str) -> RobotConfig:
         video_jpeg_quality=_as_int(cosmos_raw.get("video_jpeg_quality", 60), "cosmos.video_jpeg_quality"),
         request_timeout_ms=_as_int(cosmos_raw.get("request_timeout_ms", 5000), "cosmos.request_timeout_ms"),
         response_ttl_ms=_as_int(cosmos_raw.get("response_ttl_ms", 1500), "cosmos.response_ttl_ms"),
+        memory_enabled=bool(cosmos_raw.get("memory_enabled", True)),
+        memory_jsonl_path=str(cosmos_raw.get("memory_jsonl_path", "logs/orchestrator_memory.jsonl")),
+        memory_recent_events=_as_int(cosmos_raw.get("memory_recent_events", 10), "cosmos.memory_recent_events"),
+        memory_digest_items=_as_int(cosmos_raw.get("memory_digest_items", 3), "cosmos.memory_digest_items"),
+        memory_distill_every_n_events=_as_int(
+            cosmos_raw.get("memory_distill_every_n_events", 20),
+            "cosmos.memory_distill_every_n_events",
+        ),
+        context_max_transcript_items=_as_int(
+            cosmos_raw.get("context_max_transcript_items", 0),
+            "cosmos.context_max_transcript_items",
+        ),
+        decision_repeat_detector_window=_as_int(
+            cosmos_raw.get("decision_repeat_detector_window", 6),
+            "cosmos.decision_repeat_detector_window",
+        ),
+        reasoning_probe_enabled=bool(cosmos_raw.get("reasoning_probe_enabled", False)),
+        reasoning_probe_hz=_as_float(cosmos_raw.get("reasoning_probe_hz", 0.1), "cosmos.reasoning_probe_hz"),
+        reasoning_probe_timeout_ms=_as_int(
+            cosmos_raw.get("reasoning_probe_timeout_ms", 8000),
+            "cosmos.reasoning_probe_timeout_ms",
+        ),
+        reasoning_probe_max_tokens=_as_int(
+            cosmos_raw.get("reasoning_probe_max_tokens", 1024),
+            "cosmos.reasoning_probe_max_tokens",
+        ),
         mock_latency_ms=_as_int(cosmos_raw.get("mock_latency_ms", 150), "cosmos.mock_latency_ms"),
     )
 
