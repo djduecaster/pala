@@ -109,3 +109,54 @@ def test_orchestrator_remote_payload_includes_multi_frame_sequence(monkeypatch):
         assert len(image_items) <= 3
     finally:
         planner.shutdown()
+
+
+def test_orchestrator_prunes_history_without_new_frames():
+    planner = AsyncOrchestratorPlanner(
+        frame_cache=LatestFrameCache(),
+        provider="local",
+        orchestrator_hz=1.0,
+        video_window_s=1.0,
+        video_max_frames=4,
+    )
+    try:
+        old = np.zeros((4, 4, 3), dtype=np.uint8)
+        planner._frame_history.append((time.monotonic() - 5.0, 1, old))
+        planner._frame_history.append((time.monotonic() - 4.0, 2, old))
+        planner._update_frame_history(time.monotonic())
+        assert len(planner._frame_history) == 0
+    finally:
+        planner.shutdown()
+
+
+def test_orchestrator_sampling_includes_newest_frame():
+    planner = AsyncOrchestratorPlanner(
+        frame_cache=LatestFrameCache(),
+        provider="local",
+        orchestrator_hz=1.0,
+        video_window_s=10.0,
+        video_max_frames=1,
+    )
+    try:
+        now = time.monotonic()
+        planner._frame_history.append((now - 2.0, 1, np.full((2, 2, 3), 1, dtype=np.uint8)))
+        planner._frame_history.append((now - 1.0, 2, np.full((2, 2, 3), 9, dtype=np.uint8)))
+        sampled = planner._sample_frame_history()
+        assert len(sampled) == 1
+        assert int(sampled[0][0, 0, 0]) == 9
+    finally:
+        planner.shutdown()
+
+
+def test_local_fallback_recent_absence_prefers_reacquire():
+    summary = SceneSummary(
+        timestamp_monotonic_s=time.monotonic(),
+        person_present=False,
+        zone_hint=None,
+        primary_person_conf=None,
+        activity_hint="away",
+    )
+    decision = _local_decision(summary, recent_absence=True, last_seen_zone="left")
+    assert decision.intent == "reacquire_attention"
+    assert decision.primitive_hint == "orient_to_zone"
+    assert decision.target_zone == "left"

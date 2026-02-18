@@ -74,6 +74,7 @@ class AsyncOrchestratorPlanner(PlannerInterface):
         self._video_max_frames = max(1, int(video_max_frames))
         self._video_max_width = max(64, int(video_max_width))
         self._video_jpeg_quality = max(1, min(100, int(video_jpeg_quality)))
+        self._reacquire_timeout_s = 3.0
         self._request_timeout_s = max(0.05, float(request_timeout_ms) / 1000.0)
         self._response_ttl_s = max(0.1, float(response_ttl_ms) / 1000.0)
         self._orchestrator_period_s = 1.0 / max(0.2, float(orchestrator_hz))
@@ -87,6 +88,8 @@ class AsyncOrchestratorPlanner(PlannerInterface):
         self._zone_history: deque[str] = deque(maxlen=6)
         self._frame_history: deque[tuple[float, int, np.ndarray]] = deque()
         self._last_seen_frame_mono_ns: Optional[int] = None
+        self._last_person_seen_s: Optional[float] = None
+        self._last_person_zone: Optional[str] = None
 
         self._lock = threading.Lock()
         self._cond = threading.Condition(self._lock)
@@ -117,11 +120,19 @@ class AsyncOrchestratorPlanner(PlannerInterface):
         frame_age_ms = self._update_frame_history(now)
         summary = self._summarize_state(st, frame_age_ms)
         self._latest_summary = summary
+        recent_absence = (
+            not summary.person_present
+            and self._last_person_seen_s is not None
+            and (now - self._last_person_seen_s) <= self._reacquire_timeout_s
+        )
 
         if (now - self._last_submit_s) >= self._orchestrator_period_s:
             frames = self._sample_frame_history()
             with self._lock:
-                self._pending = _OrchestratorRequest(summary=summary, frames=frames)
+                self._pending = _OrchestratorRequest(
+                    summary=summary,
+                    frames=frames,
+                )
                 self._last_submit_s = now
                 self._cond.notify_all()
 
@@ -132,7 +143,11 @@ class AsyncOrchestratorPlanner(PlannerInterface):
         if action is not None and action_ts is not None and (now - action_ts) <= self._response_ttl_s:
             return action
 
-        decision = _local_decision(summary)
+        decision = _local_decision(
+            summary,
+            recent_absence=recent_absence,
+            last_seen_zone=self._last_person_zone,
+        )
         return _decision_to_action(decision)
 
     def snapshot(self) -> tuple[Optional[SceneSummary], list[str], Optional[OrchestratorDecision]]:
@@ -163,13 +178,37 @@ class AsyncOrchestratorPlanner(PlannerInterface):
                 if self._remote_enabled:
                     decision = self._remote_decision(req)
                     if decision is None:
-                        decision = _local_decision(req.summary)
+                        decision = _local_decision(
+                            req.summary,
+                            recent_absence=(
+                                not req.summary.person_present
+                                and self._last_person_seen_s is not None
+                                and (time.monotonic() - self._last_person_seen_s) <= self._reacquire_timeout_s
+                            ),
+                            last_seen_zone=self._last_person_zone,
+                        )
                 else:
-                    decision = _local_decision(req.summary)
+                    decision = _local_decision(
+                        req.summary,
+                        recent_absence=(
+                            not req.summary.person_present
+                            and self._last_person_seen_s is not None
+                            and (time.monotonic() - self._last_person_seen_s) <= self._reacquire_timeout_s
+                        ),
+                        last_seen_zone=self._last_person_zone,
+                    )
                 action = _decision_to_action(decision)
             except Exception as exc:
                 logger.warning("orchestrator planning failed: %s", exc)
-                decision = _local_decision(req.summary)
+                decision = _local_decision(
+                    req.summary,
+                    recent_absence=(
+                        not req.summary.person_present
+                        and self._last_person_seen_s is not None
+                        and (time.monotonic() - self._last_person_seen_s) <= self._reacquire_timeout_s
+                    ),
+                    last_seen_zone=self._last_person_zone,
+                )
                 action = _decision_to_action(decision)
 
             self._append_transcript(
@@ -198,6 +237,7 @@ class AsyncOrchestratorPlanner(PlannerInterface):
                 self._last_stats_log_s = now
 
     def _update_frame_history(self, now_s: float) -> Optional[float]:
+        self._prune_frame_history(now_s)
         snap = self._frame_cache.get(max_age_ms=self._max_frame_age_ms)
         if snap is None:
             return None
@@ -206,11 +246,13 @@ class AsyncOrchestratorPlanner(PlannerInterface):
             return frame_age_ms
         self._last_seen_frame_mono_ns = snap.mono_ns
         self._frame_history.append((now_s, snap.mono_ns, np.asarray(snap.frame).copy()))
+        self._prune_frame_history(now_s)
+        return frame_age_ms
 
+    def _prune_frame_history(self, now_s: float) -> None:
         cutoff = now_s - self._video_window_s
         while self._frame_history and self._frame_history[0][0] < cutoff:
             self._frame_history.popleft()
-        return frame_age_ms
 
     def _sample_frame_history(self) -> list[np.ndarray]:
         if not self._frame_history:
@@ -218,8 +260,11 @@ class AsyncOrchestratorPlanner(PlannerInterface):
         frames = [entry[2] for entry in self._frame_history]
         if len(frames) <= self._video_max_frames:
             return frames
-        step = len(frames) / float(self._video_max_frames)
-        idxs = [int(i * step) for i in range(self._video_max_frames)]
+        if self._video_max_frames == 1:
+            return [frames[-1]]
+        n = len(frames)
+        k = self._video_max_frames
+        idxs = [int(i * (n - 1) / (k - 1)) for i in range(k - 1)] + [n - 1]
         return [frames[i] for i in idxs]
 
     def _summarize_state(self, st: PerceptionState, frame_age_ms: Optional[float]) -> SceneSummary:
@@ -232,6 +277,10 @@ class AsyncOrchestratorPlanner(PlannerInterface):
             self._zone_history.append(zone)
 
         person_present = st.primary_person is not None
+        if person_present:
+            self._last_person_seen_s = time.monotonic()
+            if zone is not None:
+                self._last_person_zone = zone
         uncertainty_flags: list[str] = []
         conf = st.primary_person_conf
         if person_present and conf is not None and conf < 0.5:
@@ -346,8 +395,24 @@ class AsyncOrchestratorPlanner(PlannerInterface):
             self._transcript.append(f"{timestamp} {role}: {content}")
 
 
-def _local_decision(summary: SceneSummary) -> OrchestratorDecision:
+def _local_decision(
+    summary: SceneSummary,
+    *,
+    recent_absence: bool = False,
+    last_seen_zone: Optional[str] = None,
+) -> OrchestratorDecision:
     if not summary.person_present:
+        if recent_absence:
+            zone = last_seen_zone if last_seen_zone in {"left", "center", "right"} else "center"
+            return OrchestratorDecision(
+                intent="reacquire_attention",
+                style="focused",
+                primitive_hint="orient_to_zone",
+                target_zone=zone,
+                confidence=0.55,
+                rationale="person recently visible, attempt brief reacquire",
+                source="local",
+            )
         return OrchestratorDecision(
             intent="idle_presence",
             style="calm",
