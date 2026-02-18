@@ -29,7 +29,7 @@
 - `HardwareCommand`: timestamp + joint_angles_rad + enable flag.
 
 ## Evaluation & Reproducibility
-- **Inputs**: camera frames (Jetson modes), config in `config/robot.yaml` (mode set here).
+- **Inputs**: camera frames (Jetson modes), config in `config/robot.yaml` plus optional `--mode` override at runtime.
 - **Outputs**: JSONL logs for perception/actions when a single logging flag is enabled.
 - **Optional outputs**: runtime telemetry preview tap (`telemetry_preview`) writes latest JPEG + metadata files for sidecar viewers.
 - **Steps**: run a mode, capture logs, and (optionally) replay or compare action outputs between runs.

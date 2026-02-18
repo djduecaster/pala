@@ -10,10 +10,16 @@ class HeuristicPlanner(PlannerInterface):
 
     def plan(self, st: PerceptionState) -> ActionPlan:
         if st.primary_person is None:
-            return ActionPlan(primitive=PrimitiveKind.HOLD, command=HoldCommand(), confidence=0.2)
+            return ActionPlan(
+                primitive=PrimitiveKind.HOLD,
+                command=HoldCommand(),
+                confidence=0.2,
+                style="calm",
+            )
         return ActionPlan(
             primitive=PrimitiveKind.BREATH,
             command=BreathCommand(amp_rad=0.08, period_s=7.0, rate_rad_s=1.0),
             confidence=0.4,
             explanation="idle presence",
+            style="calm",
         )

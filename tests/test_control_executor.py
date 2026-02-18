@@ -29,7 +29,7 @@ def test_control_clamps_limits():
     assert math.isclose(cmd.joint_angles_rad[0], -0.1, abs_tol=1e-6)
 
 
-def test_control_breath_preempted_by_move_to():
+def test_control_breath_not_preempted_without_cancel():
     limits = [[-1.0, 1.0] for _ in range(5)]
     executor = TrajectoryExecutor(limits)
 
@@ -42,6 +42,28 @@ def test_control_breath_preempted_by_move_to():
         primitive=PrimitiveKind.MOVE_TO,
         command=MoveToCommand(target_rad=[0.4, 0.0, 0.0, 0.0, 0.0], rate_rad_s=3.0, timeout_s=1.0),
         confidence=1.0,
+    )
+
+    executor.step(breath, dt=0.02)
+    executor.step(move, dt=0.02)
+
+    assert executor.control_state.active_kind == PrimitiveKind.BREATH
+
+
+def test_control_preempts_when_canceled():
+    limits = [[-1.0, 1.0] for _ in range(5)]
+    executor = TrajectoryExecutor(limits)
+
+    breath = ActionPlan(
+        primitive=PrimitiveKind.BREATH,
+        command=BreathCommand(amp_rad=0.08, period_s=3.0, rate_rad_s=1.0),
+        confidence=1.0,
+    )
+    move = ActionPlan(
+        primitive=PrimitiveKind.MOVE_TO,
+        command=MoveToCommand(target_rad=[0.4, 0.0, 0.0, 0.0, 0.0], rate_rad_s=3.0, timeout_s=1.0),
+        confidence=1.0,
+        cancel_current=True,
     )
 
     executor.step(breath, dt=0.02)

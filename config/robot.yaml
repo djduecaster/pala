@@ -1,5 +1,5 @@
-mode: jetson_full # dev | jetson_perception | jetson_full
-detector: deepstream # dummy | jetson | deepstream
+mode: dev # dev | jetson_perception | jetson_full
+detector: dummy # dummy | jetson | deepstream
 
 loop_rates:
   perception_hz: 20
@@ -69,9 +69,9 @@ deepstream:
   conf_threshold: null
 
 cosmos:
-  enabled: true
+  enabled: false
   provider: "brev"
-  base_url: "http://160.211.46.147:8000" # Prefer env override: PALA_COSMOS_BASE_URL
+  base_url: null # Prefer env override: PALA_COSMOS_BASE_URL
   model: "nvidia/cosmos-reason2-2b"
   planner_prompt: "Prioritize calm, safe desk-companion behavior. Prefer hold/breath unless confidence is high."
   max_hz: 1.0

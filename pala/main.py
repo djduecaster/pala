@@ -15,7 +15,7 @@ from .perception import PerceptionNode, LatestFrameCache
 from .perception.preview_tap import PreviewTapWriter
 from .perception.detector import DummyDetector, JetsonDetector, DeepStreamDetector
 from .perception.frame_source import DummyFrameSource, CameraFrameSource
-from .planner import HeuristicPlanner, AsyncCosmosPlanner
+from .planner import HeuristicPlanner, AsyncOrchestratorPlanner
 from .behavior import BehaviorPolicy
 from .control import TrajectoryExecutor
 from .control.primitives import PrimitiveKind, HoldCommand
@@ -28,8 +28,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     _configure_logging()
     args = _parse_cli_args([] if argv is None else argv)
     cfg = load_config(args.config)
-    if args.mode:
-        cfg.mode = args.mode
+    _apply_mode_override(cfg, args.mode)
     max_runtime_s = _parse_max_runtime_s()
 
     stop = threading.Event()
@@ -44,7 +43,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     perception = PerceptionNode(source=_build_frame_source(cfg), detector=_build_detector(cfg))
     planner = _build_planner(cfg, latest_frame)
     behavior = BehaviorPolicy(planner=planner, dwell_s=2.0, cooldown_s=1.0)
-    executor = TrajectoryExecutor(cfg.joint_limits_rad)
+    executor = TrajectoryExecutor(cfg.joint_limits_rad, style_profiles=getattr(cfg, "style_profiles", None))
     servo = _build_servo(cfg)
     preview_tap = _build_preview_tap(cfg)
 
@@ -109,7 +108,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         while not stop.is_set():
             action, _ = latest_action.get()
             if action is None:
-                action = ActionPlan(primitive=PrimitiveKind.HOLD, command=HoldCommand(), confidence=0.1)
+                action = ActionPlan(
+                    primitive=PrimitiveKind.HOLD,
+                    command=HoldCommand(),
+                    confidence=0.1,
+                    cancel_current=True,
+                )
 
             now = time.monotonic()
             dt = now - last_ts
@@ -277,7 +281,7 @@ def _build_planner(cfg, latest_frame: LatestFrameCache):
         api_key = os.getenv("PALA_COSMOS_API_KEY")
         model = os.getenv("PALA_COSMOS_MODEL") or cfg.cosmos.model
         planner_prompt = os.getenv("PALA_COSMOS_PROMPT") or cfg.cosmos.planner_prompt
-        return AsyncCosmosPlanner(
+        return AsyncOrchestratorPlanner(
             frame_cache=latest_frame,
             fallback=HeuristicPlanner(),
             provider=cfg.cosmos.provider,
@@ -285,10 +289,9 @@ def _build_planner(cfg, latest_frame: LatestFrameCache):
             api_key=api_key,
             model=model,
             planner_prompt=planner_prompt,
-            max_hz=cfg.cosmos.max_hz,
-            max_frame_age_ms=cfg.cosmos.max_frame_age_ms,
+            summarizer_hz=2.0,
+            orchestrator_hz=cfg.cosmos.max_hz,
             request_timeout_ms=cfg.cosmos.request_timeout_ms,
-            mock_latency_ms=cfg.cosmos.mock_latency_ms,
             response_ttl_ms=cfg.cosmos.response_ttl_ms,
         )
     return HeuristicPlanner()
@@ -368,6 +371,21 @@ def _parse_cli_args(argv: Optional[list[str]]) -> argparse.Namespace:
         help="Override mode from config",
     )
     return parser.parse_args(argv)
+
+
+def _apply_mode_override(cfg, mode_override: Optional[str]) -> None:
+    if mode_override:
+        cfg.mode = mode_override
+
+    mode = str(cfg.mode).strip().lower()
+    if mode == "dev":
+        cfg.detector = "dummy"
+        if getattr(cfg, "cosmos", None) is not None:
+            cfg.cosmos.enabled = False
+        return
+
+    if mode in {"jetson_perception", "jetson_full"} and str(cfg.detector).strip().lower() == "dummy":
+        cfg.detector = "deepstream"
 
 
 if __name__ == "__main__":

@@ -291,3 +291,54 @@
 {"primitive":"breath","params":{},"confidence":0.9,"explanation":"cosmos_remote:Breathing is detected as the primary action, likely indicating a momentary pause or regulation of breath, possibly due to stress or concentration. The latency and frame information suggest this is a brief, isolated action within a broader context of movement or interaction."}
 {"primitive":"breath","params":{},"confidence":0.9,"explanation":"cosmos_remote:Breathing is detected as the primary action, likely indicating a momentary pause or regulation of breath, possibly due to stress or concentration. The latency and frame information suggest this is a brief, isolated action within a broader context of movement or interaction."}
 {"primitive":"breath","params":{},"confidence":0.9,"explanation":"cosmos_remote:deep breath to stabilize focus and readiness for subsequent actions."}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"hold","command":{},"confidence":0.3,"explanation":null}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence"}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence","style":"calm","action_id":"a49665852903423cb6ec80c58837a0f9","cancel_current":true}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence","style":"calm","action_id":"a49665852903423cb6ec80c58837a0f9","cancel_current":false}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence","style":"calm","action_id":"a49665852903423cb6ec80c58837a0f9","cancel_current":false}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence","style":"calm","action_id":"a49665852903423cb6ec80c58837a0f9","cancel_current":false}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence","style":"calm","action_id":"a49665852903423cb6ec80c58837a0f9","cancel_current":false}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence","style":"calm","action_id":"168b95d5af2e47feadef120e92dd0558","cancel_current":true}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence","style":"calm","action_id":"168b95d5af2e47feadef120e92dd0558","cancel_current":false}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence","style":"calm","action_id":"168b95d5af2e47feadef120e92dd0558","cancel_current":false}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence","style":"calm","action_id":"168b95d5af2e47feadef120e92dd0558","cancel_current":false}
+{"primitive":"breath","command":{"amp_rad":0.08,"period_s":7.0,"rate_rad_s":1.0},"confidence":0.4,"explanation":"idle presence","style":"calm","action_id":"168b95d5af2e47feadef120e92dd0558","cancel_current":false}

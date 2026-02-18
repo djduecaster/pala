@@ -186,6 +186,7 @@ class AsyncCosmosPlanner(PlannerInterface):
                 command=HoldCommand(),
                 confidence=0.25,
                 explanation="cosmos_mock:no_person",
+                style="calm",
             )
 
         has_frame = req.frame_mono_ns is not None and req.frame_shape is not None
@@ -194,6 +195,7 @@ class AsyncCosmosPlanner(PlannerInterface):
             command=BreathCommand(amp_rad=0.1, period_s=6.0, rate_rad_s=1.1),
             confidence=0.45,
             explanation=f"cosmos_mock:presence frame={has_frame}",
+            style="curious",
         )
 
     def _remote_plan(self, req: _CosmosRequest) -> Optional[ActionPlan]:

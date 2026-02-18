@@ -25,6 +25,15 @@ Example commands:
 
 Mode selection will also be supported via `config/robot.yaml` (single source of truth when set).
 
+## Mode-First Usage
+- `config/robot.yaml` is local-safe by default.
+- Use `--mode` to switch runtime behavior:
+  - `uv run python -m pala.main` (default local/dev)
+  - `uv run python -m pala.main --mode jetson_full`
+
+When `--mode dev` is active, runtime forces dummy detector and disables Cosmos.
+When `--mode jetson_full` or `--mode jetson_perception` is active and detector is `dummy`, runtime promotes detector to `deepstream`.
+
 ## Requirements
 
 ### Mac (optional, for enhanced development experience + telemetry viewing)

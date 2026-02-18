@@ -20,4 +20,5 @@ echo "Syncing deps on Jetson..."
 uv sync
 
 echo "Running PALA..."
-uv run python main.py
+PALA_RUNTIME_MODE="${PALA_RUNTIME_MODE:-jetson_full}"
+uv run python -m pala.main --mode "${PALA_RUNTIME_MODE}"

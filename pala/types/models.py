@@ -4,6 +4,7 @@ from dataclasses import dataclass, field, fields, is_dataclass
 from enum import Enum
 from typing import Any, Dict, List, Mapping, Optional, Union
 import json
+from uuid import uuid4
 
 
 @dataclass
@@ -121,11 +122,17 @@ class ActionPlan:
     command: PrimitiveCommand
     confidence: float
     explanation: Optional[str] = None
+    style: str = "calm"
+    action_id: str = field(default_factory=lambda: uuid4().hex)
+    cancel_current: bool = False
 
     def __post_init__(self) -> None:
         self.primitive = _coerce_primitive_kind(self.primitive)
         self.command = _coerce_command(self.primitive, self.command)
         self.confidence = _clamp01(self.confidence)
+        self.style = _coerce_style(self.style)
+        self.action_id = _coerce_action_id(self.action_id)
+        self.cancel_current = bool(self.cancel_current)
 
 
 @dataclass
@@ -162,11 +169,18 @@ def action_plan_from_dict(data: Mapping[str, Any]) -> Optional[ActionPlan]:
         confidence = 0.5
     explanation_raw = payload.get("explanation")
     explanation = explanation_raw if isinstance(explanation_raw, str) else None
+    style = _coerce_style(payload.get("style", "calm"))
+    action_id_raw = payload.get("action_id")
+    action_id = _coerce_action_id(action_id_raw)
+    cancel_current = bool(payload.get("cancel_current", False))
     return ActionPlan(
         primitive=primitive,
         command=command,
         confidence=confidence,
         explanation=explanation,
+        style=style,
+        action_id=action_id,
+        cancel_current=cancel_current,
     )
 
 
@@ -309,6 +323,20 @@ def _as_int(value: Any, field_name: str) -> int:
 def _clamp01(value: Any) -> float:
     v = float(value)
     return max(0.0, min(1.0, v))
+
+
+def _coerce_action_id(value: Any) -> str:
+    if value is None:
+        return uuid4().hex
+    token = str(value).strip()
+    return token if token else uuid4().hex
+
+
+def _coerce_style(value: Any) -> str:
+    if value is None:
+        return "calm"
+    token = str(value).strip().lower()
+    return token if token else "calm"
 
 
 _COMMAND_BY_KIND = {

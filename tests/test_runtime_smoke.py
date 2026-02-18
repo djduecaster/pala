@@ -48,3 +48,19 @@ def test_runtime_starts_in_dev_mode(monkeypatch):
     assert result == 0
     assert perception_log.items
     assert action_log.items
+
+
+def test_runtime_starts_with_checked_in_default_config(monkeypatch):
+    perception_log = _CaptureLogger()
+    action_log = _CaptureLogger()
+
+    def _logger_stub(path):
+        return perception_log if "perception" in (path or "") else action_log
+
+    monkeypatch.setattr(pala_main, "maybe_logger", _logger_stub)
+    monkeypatch.setenv("PALA_MAX_RUNTIME_S", "0.5")
+
+    result = pala_main.main(["--config", "config/robot.yaml"])
+    assert result == 0
+    assert perception_log.items
+    assert action_log.items

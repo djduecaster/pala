@@ -17,5 +17,5 @@ dev = [
     "pytest>=9.0.2",
 ]
 
-[tool.setuptools]
-packages = ["pala"]
+[tool.setuptools.packages.find]
+include = ["pala*"]

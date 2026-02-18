@@ -23,11 +23,19 @@ class BehaviorPolicy:
         self._curr_zone: Optional[str] = None
         self._zone_start = time.monotonic()
         self._last_trigger = 0.0
+        self._active_signature: Optional[str] = None
+        self._active_action_id: Optional[str] = None
 
     def step(self, st: Optional[PerceptionState]) -> ActionPlan:
         now = time.monotonic()
         if st is None or st.primary_person is None:
-            return ActionPlan(primitive=PrimitiveKind.HOLD, command=HoldCommand(), confidence=0.3)
+            proposed = ActionPlan(
+                primitive=PrimitiveKind.HOLD,
+                command=HoldCommand(),
+                confidence=0.3,
+                style="calm",
+            )
+            return self._arbitrate(proposed)
 
         zone = _zone_from_cx(st.primary_person.cx)
         if zone != self._curr_zone:
@@ -38,28 +46,64 @@ class BehaviorPolicy:
         if dwell >= self.dwell_s and (now - self._last_trigger) >= self.cooldown_s:
             self._last_trigger = now
             if zone == "left":
-                return ActionPlan(
+                proposed = ActionPlan(
                     primitive=PrimitiveKind.GLANCE,
                     command=GlanceCommand(direction="left", duration_s=0.6),
                     confidence=0.8,
-                    explanation="user dwell left"
+                    explanation="user dwell left",
+                    style="curious",
                 )
+                return self._arbitrate(proposed)
             if zone == "right":
-                return ActionPlan(
+                proposed = ActionPlan(
                     primitive=PrimitiveKind.GLANCE,
                     command=GlanceCommand(direction="right", duration_s=0.6),
                     confidence=0.8,
-                    explanation="user dwell right"
+                    explanation="user dwell right",
+                    style="curious",
                 )
-            return ActionPlan(
+                return self._arbitrate(proposed)
+            proposed = ActionPlan(
                 primitive=PrimitiveKind.NOD,
                 command=NodCommand(duration_s=0.4, amp_rad=0.2),
                 confidence=0.7,
-                explanation="user dwell center"
+                explanation="user dwell center",
+                style="focused",
             )
+            return self._arbitrate(proposed)
 
         # Default: consult planner (heuristic) for small idle actions
-        return self.planner.plan(st)
+        proposed = self.planner.plan(st)
+        return self._arbitrate(proposed)
+
+    def _arbitrate(self, proposed: ActionPlan) -> ActionPlan:
+        sig = self._signature(proposed)
+        if self._active_signature == sig and self._active_action_id is not None:
+            return ActionPlan(
+                primitive=proposed.primitive,
+                command=proposed.command,
+                confidence=proposed.confidence,
+                explanation=proposed.explanation,
+                style=proposed.style,
+                action_id=self._active_action_id,
+                cancel_current=False,
+            )
+
+        self._active_signature = sig
+        self._active_action_id = proposed.action_id
+        return ActionPlan(
+            primitive=proposed.primitive,
+            command=proposed.command,
+            confidence=proposed.confidence,
+            explanation=proposed.explanation,
+            style=proposed.style,
+            action_id=proposed.action_id,
+            cancel_current=True,
+        )
+
+    @staticmethod
+    def _signature(action: ActionPlan) -> str:
+        return f"{action.primitive.value}:{action.style}:{action.command!r}"
 
 
 def _zone_from_cx(cx: float) -> str:

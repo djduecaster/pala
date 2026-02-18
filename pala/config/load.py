@@ -79,6 +79,7 @@ class RobotConfig:
     deepstream: DeepStreamConfig
     telemetry_preview: TelemetryPreviewConfig = field(default_factory=TelemetryPreviewConfig)
     cosmos: CosmosConfig = field(default_factory=CosmosConfig)
+    style_profiles: Dict[str, Dict[str, float]] = field(default_factory=dict)
 
 
 def _fail(path: str, msg: str) -> None:
@@ -224,6 +225,22 @@ def load_config(path: str) -> RobotConfig:
         mock_latency_ms=_as_int(cosmos_raw.get("mock_latency_ms", 150), "cosmos.mock_latency_ms"),
     )
 
+    style_profiles_raw = data.get("styles", {})
+    if not isinstance(style_profiles_raw, dict):
+        _fail("styles", "expected mapping")
+    style_profiles = _default_style_profiles()
+    for name, raw in style_profiles_raw.items():
+        if not isinstance(raw, dict):
+            _fail(f"styles.{name}", "expected mapping")
+        key = str(name).strip().lower()
+        if not key:
+            continue
+        profile = dict(style_profiles.get(key, {}))
+        for param in ("amp_scale", "rate_scale", "duration_scale", "settle_scale"):
+            if param in raw:
+                profile[param] = _as_float(raw[param], f"styles.{key}.{param}")
+        style_profiles[key] = profile
+
     return RobotConfig(
         mode=mode,
         detector=detector,
@@ -237,4 +254,28 @@ def load_config(path: str) -> RobotConfig:
         camera=camera,
         deepstream=deepstream,
         cosmos=cosmos,
+        style_profiles=style_profiles,
     )
+
+
+def _default_style_profiles() -> Dict[str, Dict[str, float]]:
+    return {
+        "calm": {
+            "amp_scale": 0.85,
+            "rate_scale": 0.9,
+            "duration_scale": 1.1,
+            "settle_scale": 1.1,
+        },
+        "curious": {
+            "amp_scale": 1.15,
+            "rate_scale": 1.15,
+            "duration_scale": 0.9,
+            "settle_scale": 0.9,
+        },
+        "focused": {
+            "amp_scale": 0.7,
+            "rate_scale": 1.0,
+            "duration_scale": 0.85,
+            "settle_scale": 1.0,
+        },
+    }
