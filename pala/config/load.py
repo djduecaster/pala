@@ -60,6 +60,10 @@ class CosmosConfig:
     )
     max_hz: float = 1.0
     max_frame_age_ms: int = 500
+    video_window_s: float = 8.0
+    video_max_frames: int = 8
+    video_max_width: int = 320
+    video_jpeg_quality: int = 60
     request_timeout_ms: int = 5000
     response_ttl_ms: int = 1500
     mock_latency_ms: int = 150
@@ -220,6 +224,10 @@ def load_config(path: str) -> RobotConfig:
         ),
         max_hz=_as_float(cosmos_raw.get("max_hz", 1.0), "cosmos.max_hz"),
         max_frame_age_ms=_as_int(cosmos_raw.get("max_frame_age_ms", 500), "cosmos.max_frame_age_ms"),
+        video_window_s=_as_float(cosmos_raw.get("video_window_s", 8.0), "cosmos.video_window_s"),
+        video_max_frames=_as_int(cosmos_raw.get("video_max_frames", 8), "cosmos.video_max_frames"),
+        video_max_width=_as_int(cosmos_raw.get("video_max_width", 320), "cosmos.video_max_width"),
+        video_jpeg_quality=_as_int(cosmos_raw.get("video_jpeg_quality", 60), "cosmos.video_jpeg_quality"),
         request_timeout_ms=_as_int(cosmos_raw.get("request_timeout_ms", 5000), "cosmos.request_timeout_ms"),
         response_ttl_ms=_as_int(cosmos_raw.get("response_ttl_ms", 1500), "cosmos.response_ttl_ms"),
         mock_latency_ms=_as_int(cosmos_raw.get("mock_latency_ms", 150), "cosmos.mock_latency_ms"),

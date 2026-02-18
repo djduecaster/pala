@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import base64
+from collections import deque
 from dataclasses import dataclass
+import io
 import json
 import logging
 import threading
@@ -8,6 +11,9 @@ import time
 from typing import Any, Optional
 from urllib import error as urllib_error
 from urllib import request as urllib_request
+
+import numpy as np
+from PIL import Image
 
 from ..perception.frame_cache import LatestFrameCache
 from ..types import (
@@ -22,9 +28,7 @@ from ..types import (
 )
 from .heuristic import HeuristicPlanner
 from .protocol import PlannerInterface
-from .state_models import OrchestratorDecision, SceneSummary, SessionMemory
-from .summarizer_async import AsyncSceneSummarizer
-from .session_memory import SessionMemoryManager
+from .state_models import OrchestratorDecision, SceneSummary
 
 logger = logging.getLogger(__name__)
 
@@ -32,11 +36,11 @@ logger = logging.getLogger(__name__)
 @dataclass
 class _OrchestratorRequest:
     summary: SceneSummary
-    memory: SessionMemory
+    frames: list[np.ndarray]
 
 
 class AsyncOrchestratorPlanner(PlannerInterface):
-    """Two-agent stack: async summarizer + async orchestrator with deterministic memory."""
+    """Async orchestrator with transcript context and latest-only remote requests."""
 
     def __init__(
         self,
@@ -48,17 +52,28 @@ class AsyncOrchestratorPlanner(PlannerInterface):
         api_key: Optional[str] = None,
         model: str = "nvidia/cosmos-reason2-2b",
         planner_prompt: Optional[str] = None,
-        summarizer_hz: float = 2.0,
         orchestrator_hz: float = 1.0,
+        max_frame_age_ms: int = 500,
+        video_window_s: float = 8.0,
+        video_max_frames: int = 8,
+        video_max_width: int = 320,
+        video_jpeg_quality: int = 60,
         request_timeout_ms: int = 5000,
         response_ttl_ms: int = 1500,
+        transcript_max_items: int = 80,
     ) -> None:
+        self._frame_cache = frame_cache
         self._fallback = fallback or HeuristicPlanner()
         self._provider = str(provider).strip().lower()
         self._chat_url = _normalize_chat_url(base_url)
         self._api_key = api_key
         self._model = str(model or "nvidia/cosmos-reason2-2b")
         self._planner_prompt = (planner_prompt or "").strip()
+        self._max_frame_age_ms = max(50, int(max_frame_age_ms))
+        self._video_window_s = max(0.1, float(video_window_s))
+        self._video_max_frames = max(1, int(video_max_frames))
+        self._video_max_width = max(64, int(video_max_width))
+        self._video_jpeg_quality = max(1, min(100, int(video_jpeg_quality)))
         self._request_timeout_s = max(0.05, float(request_timeout_ms) / 1000.0)
         self._response_ttl_s = max(0.1, float(response_ttl_ms) / 1000.0)
         self._orchestrator_period_s = 1.0 / max(0.2, float(orchestrator_hz))
@@ -67,12 +82,11 @@ class AsyncOrchestratorPlanner(PlannerInterface):
         self._success_count = 0
         self._last_stats_log_s = 0.0
 
-        self._summarizer = AsyncSceneSummarizer(
-            frame_cache=frame_cache,
-            max_hz=summarizer_hz,
-            response_ttl_ms=max(int(response_ttl_ms), 1200),
-        )
-        self._memory = SessionMemoryManager()
+        self._transcript_lock = threading.Lock()
+        self._transcript: deque[str] = deque(maxlen=max(10, int(transcript_max_items)))
+        self._zone_history: deque[str] = deque(maxlen=6)
+        self._frame_history: deque[tuple[float, int, np.ndarray]] = deque()
+        self._last_seen_frame_mono_ns: Optional[int] = None
 
         self._lock = threading.Lock()
         self._cond = threading.Condition(self._lock)
@@ -84,7 +98,6 @@ class AsyncOrchestratorPlanner(PlannerInterface):
         self._latest_action: Optional[ActionPlan] = None
         self._latest_action_ts_s: Optional[float] = None
         self._latest_summary: Optional[SceneSummary] = None
-        self._latest_memory: Optional[SessionMemory] = None
 
         if self._remote_enabled:
             logger.info(
@@ -101,17 +114,14 @@ class AsyncOrchestratorPlanner(PlannerInterface):
 
     def plan(self, st: PerceptionState) -> ActionPlan:
         now = time.monotonic()
-        self._summarizer.update(st)
-        summary = self._summarizer.latest()
-        if summary is None:
-            return self._fallback.plan(st)
-        memory = self._memory.update(summary)
+        frame_age_ms = self._update_frame_history(now)
+        summary = self._summarize_state(st, frame_age_ms)
         self._latest_summary = summary
-        self._latest_memory = memory
 
         if (now - self._last_submit_s) >= self._orchestrator_period_s:
+            frames = self._sample_frame_history()
             with self._lock:
-                self._pending = _OrchestratorRequest(summary=summary, memory=memory)
+                self._pending = _OrchestratorRequest(summary=summary, frames=frames)
                 self._last_submit_s = now
                 self._cond.notify_all()
 
@@ -122,18 +132,19 @@ class AsyncOrchestratorPlanner(PlannerInterface):
         if action is not None and action_ts is not None and (now - action_ts) <= self._response_ttl_s:
             return action
 
-        decision = _local_decision(summary, memory)
+        decision = _local_decision(summary)
         return _decision_to_action(decision)
 
-    def snapshot(self) -> tuple[Optional[SceneSummary], Optional[SessionMemory], Optional[OrchestratorDecision]]:
-        return self._latest_summary, self._latest_memory, self._latest_decision
+    def snapshot(self) -> tuple[Optional[SceneSummary], list[str], Optional[OrchestratorDecision]]:
+        with self._transcript_lock:
+            transcript = list(self._transcript)
+        return self._latest_summary, transcript, self._latest_decision
 
     def shutdown(self) -> None:
         self._stop.set()
         with self._lock:
             self._cond.notify_all()
         self._thread.join(timeout=1.0)
-        self._summarizer.shutdown()
 
     def _run(self) -> None:
         while not self._stop.is_set():
@@ -150,18 +161,25 @@ class AsyncOrchestratorPlanner(PlannerInterface):
 
             try:
                 if self._remote_enabled:
-                    decision = self._remote_decision(req.summary, req.memory)
+                    decision = self._remote_decision(req)
                     if decision is None:
-                        decision = _local_decision(req.summary, req.memory)
+                        decision = _local_decision(req.summary)
                 else:
-                    decision = _local_decision(req.summary, req.memory)
+                    decision = _local_decision(req.summary)
                 action = _decision_to_action(decision)
             except Exception as exc:
                 logger.warning("orchestrator planning failed: %s", exc)
-                decision = _local_decision(req.summary, req.memory)
+                decision = _local_decision(req.summary)
                 action = _decision_to_action(decision)
 
-            self._memory.note_intent(decision.intent)
+            self._append_transcript(
+                "decision",
+                (
+                    f"source={decision.source} intent={decision.intent} style={decision.style} "
+                    f"primitive={decision.primitive_hint or 'breath'} target_zone={decision.target_zone or '-'} "
+                    f"confidence={decision.confidence:.2f} frames={len(req.frames)} rationale={decision.rationale}"
+                ),
+            )
             self._latest_decision = decision
             with self._lock:
                 self._latest_action = action
@@ -179,10 +197,76 @@ class AsyncOrchestratorPlanner(PlannerInterface):
                 )
                 self._last_stats_log_s = now
 
-    def _remote_decision(self, summary: SceneSummary, memory: SessionMemory) -> Optional[OrchestratorDecision]:
+    def _update_frame_history(self, now_s: float) -> Optional[float]:
+        snap = self._frame_cache.get(max_age_ms=self._max_frame_age_ms)
+        if snap is None:
+            return None
+        frame_age_ms = (time.monotonic_ns() - snap.mono_ns) / 1_000_000.0
+        if self._last_seen_frame_mono_ns == snap.mono_ns:
+            return frame_age_ms
+        self._last_seen_frame_mono_ns = snap.mono_ns
+        self._frame_history.append((now_s, snap.mono_ns, np.asarray(snap.frame).copy()))
+
+        cutoff = now_s - self._video_window_s
+        while self._frame_history and self._frame_history[0][0] < cutoff:
+            self._frame_history.popleft()
+        return frame_age_ms
+
+    def _sample_frame_history(self) -> list[np.ndarray]:
+        if not self._frame_history:
+            return []
+        frames = [entry[2] for entry in self._frame_history]
+        if len(frames) <= self._video_max_frames:
+            return frames
+        step = len(frames) / float(self._video_max_frames)
+        idxs = [int(i * step) for i in range(self._video_max_frames)]
+        return [frames[i] for i in idxs]
+
+    def _summarize_state(self, st: PerceptionState, frame_age_ms: Optional[float]) -> SceneSummary:
+        zone = None
+        if isinstance(st.debug, dict):
+            raw_zone = st.debug.get("zone_hint")
+            if isinstance(raw_zone, str) and raw_zone:
+                zone = raw_zone
+        if zone is not None:
+            self._zone_history.append(zone)
+
+        person_present = st.primary_person is not None
+        uncertainty_flags: list[str] = []
+        conf = st.primary_person_conf
+        if person_present and conf is not None and conf < 0.5:
+            uncertainty_flags.append("low_person_conf")
+
+        if frame_age_ms is not None and frame_age_ms > 250.0:
+            uncertainty_flags.append("stale_frame")
+
+        activity_hint = self._infer_activity_hint(person_present, zone)
+        return SceneSummary(
+            timestamp_monotonic_s=time.monotonic(),
+            person_present=person_present,
+            zone_hint=zone,
+            primary_person_conf=conf,
+            activity_hint=activity_hint,
+            uncertainty_flags=uncertainty_flags,
+            frame_age_ms=frame_age_ms,
+        )
+
+    def _infer_activity_hint(self, person_present: bool, zone: Optional[str]) -> Optional[str]:
+        if not person_present:
+            return "away"
+        if len(self._zone_history) < 3:
+            return "engaged"
+        recent = list(self._zone_history)[-3:]
+        if len(set(recent)) >= 2:
+            return "transitioning"
+        if zone == "center":
+            return "focused_work"
+        return "engaged"
+
+    def _remote_decision(self, req: _OrchestratorRequest) -> Optional[OrchestratorDecision]:
         assert self._chat_url is not None
         self._request_count += 1
-        payload = self._build_payload(summary, memory)
+        payload = self._build_payload(req)
         response = _post_json(
             self._chat_url,
             payload,
@@ -198,26 +282,37 @@ class AsyncOrchestratorPlanner(PlannerInterface):
         self._success_count += 1
         return decision
 
-    def _build_payload(self, summary: SceneSummary, memory: SessionMemory) -> dict[str, Any]:
+    def _build_payload(self, req: _OrchestratorRequest) -> dict[str, Any]:
+        with self._transcript_lock:
+            transcript_tail = list(self._transcript)[-24:]
+        image_data_urls, resized_shapes, total_jpeg_bytes = _encode_frames_to_data_urls(
+            req.frames,
+            max_width=self._video_max_width,
+            jpeg_quality=self._video_jpeg_quality,
+        )
         context = {
             "summary": {
-                "person_present": summary.person_present,
-                "zone_hint": summary.zone_hint,
-                "primary_person_conf": summary.primary_person_conf,
-                "activity_hint": summary.activity_hint,
-                "uncertainty_flags": summary.uncertainty_flags,
-                "frame_age_ms": summary.frame_age_ms,
+                "person_present": req.summary.person_present,
+                "zone_hint": req.summary.zone_hint,
+                "primary_person_conf": req.summary.primary_person_conf,
+                "activity_hint": req.summary.activity_hint,
+                "uncertainty_flags": req.summary.uncertainty_flags,
+                "frame_age_ms": req.summary.frame_age_ms,
             },
-            "memory": {
-                "interaction_state": memory.interaction_state,
-                "task_hypothesis": memory.task_hypothesis,
-                "staleness_ms": memory.staleness_ms,
-                "recent_intents": memory.recent_intents[-5:],
-            },
+            "transcript": transcript_tail,
+            "frames_sent": len(image_data_urls),
+            "resized_shapes": resized_shapes,
+            "jpeg_total_bytes": total_jpeg_bytes,
         }
+        user_text = "Use the provided context and frame sequence to decide next action.\n" + json.dumps(
+            context,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        )
 
         system_prompt = (
             "You are an interaction orchestrator for a social desk robot lamp. "
+            "You may receive multiple frames in chronological order. "
             "Return JSON only with keys: intent, style, primitive_hint, target_zone, confidence, rationale. "
             "style must be one of ['calm','curious','focused']. "
             "primitive_hint should be one of ['hold','breath','glance','nod','orient_to_zone'] or null. "
@@ -231,7 +326,13 @@ class AsyncOrchestratorPlanner(PlannerInterface):
             "model": self._model,
             "messages": [
                 {"role": "system", "content": system_prompt},
-                {"role": "user", "content": json.dumps(context, separators=(",", ":"), ensure_ascii=True)},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": user_text},
+                        *[{"type": "image_url", "image_url": {"url": u}} for u in image_data_urls],
+                    ],
+                },
             ],
             "response_format": {"type": "json_object"},
             "temperature": 0.1,
@@ -239,19 +340,14 @@ class AsyncOrchestratorPlanner(PlannerInterface):
             "stream": False,
         }
 
+    def _append_transcript(self, role: str, content: str) -> None:
+        timestamp = time.strftime("%H:%M:%S", time.localtime())
+        with self._transcript_lock:
+            self._transcript.append(f"{timestamp} {role}: {content}")
 
-def _local_decision(summary: SceneSummary, memory: SessionMemory) -> OrchestratorDecision:
+
+def _local_decision(summary: SceneSummary) -> OrchestratorDecision:
     if not summary.person_present:
-        if memory.interaction_state == "searching":
-            return OrchestratorDecision(
-                intent="reacquire_attention",
-                style="focused",
-                primitive_hint="orient_to_zone",
-                target_zone=summary.zone_hint,
-                confidence=0.55,
-                rationale="person likely nearby but currently out of frame",
-                source="local",
-            )
         return OrchestratorDecision(
             intent="idle_presence",
             style="calm",
@@ -350,6 +446,33 @@ def _decision_to_action(decision: OrchestratorDecision) -> ActionPlan:
     )
 
 
+def _encode_frames_to_data_urls(
+    frames: list[np.ndarray],
+    *,
+    max_width: int,
+    jpeg_quality: int,
+) -> tuple[list[str], list[list[int]], int]:
+    urls: list[str] = []
+    resized_shapes: list[list[int]] = []
+    total_bytes = 0
+    if not frames:
+        return urls, resized_shapes, total_bytes
+
+    for frame in frames:
+        arr = np.asarray(frame)
+        img = Image.fromarray(arr)
+        if max_width > 0 and img.width > max_width:
+            new_h = int(round((max_width / float(img.width)) * img.height))
+            img = img.resize((max_width, max(1, new_h)))
+        out = io.BytesIO()
+        img.save(out, format="JPEG", quality=jpeg_quality, optimize=True)
+        jpeg = out.getvalue()
+        total_bytes += len(jpeg)
+        resized_shapes.append([img.height, img.width, 3])
+        urls.append("data:image/jpeg;base64," + base64.b64encode(jpeg).decode("ascii"))
+    return urls, resized_shapes, total_bytes
+
+
 def _normalize_chat_url(base_url: Optional[str]) -> Optional[str]:
     if base_url is None:
         return None
@@ -398,7 +521,16 @@ def _extract_content(response: dict[str, Any]) -> Optional[str]:
     if not isinstance(message, dict):
         return None
     content = message.get("content")
-    return content if isinstance(content, str) and content.strip() else None
+    if isinstance(content, str) and content.strip():
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict) and isinstance(item.get("text"), str):
+                parts.append(item["text"])
+        joined = "\n".join(parts).strip()
+        return joined if joined else None
+    return None
 
 
 def _parse_decision_content(content: str) -> Optional[OrchestratorDecision]:

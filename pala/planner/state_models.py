@@ -16,15 +16,6 @@ class SceneSummary:
 
 
 @dataclass
-class SessionMemory:
-    interaction_state: str
-    task_hypothesis: Optional[str]
-    last_transition_s: float
-    staleness_ms: float
-    recent_intents: list[str] = field(default_factory=list)
-
-
-@dataclass
 class OrchestratorDecision:
     intent: str
     style: str

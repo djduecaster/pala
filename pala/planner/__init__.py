@@ -2,7 +2,7 @@ from .protocol import PlannerInterface
 from .heuristic import HeuristicPlanner
 from .cosmos_async import AsyncCosmosPlanner
 from .orchestrator_async import AsyncOrchestratorPlanner
-from .state_models import SceneSummary, SessionMemory, OrchestratorDecision
+from .state_models import SceneSummary, OrchestratorDecision
 
 __all__ = [
     "PlannerInterface",
@@ -10,6 +10,5 @@ __all__ = [
     "AsyncCosmosPlanner",
     "AsyncOrchestratorPlanner",
     "SceneSummary",
-    "SessionMemory",
     "OrchestratorDecision",
 ]

@@ -289,8 +289,12 @@ def _build_planner(cfg, latest_frame: LatestFrameCache):
             api_key=api_key,
             model=model,
             planner_prompt=planner_prompt,
-            summarizer_hz=2.0,
             orchestrator_hz=cfg.cosmos.max_hz,
+            max_frame_age_ms=cfg.cosmos.max_frame_age_ms,
+            video_window_s=cfg.cosmos.video_window_s,
+            video_max_frames=cfg.cosmos.video_max_frames,
+            video_max_width=cfg.cosmos.video_max_width,
+            video_jpeg_quality=cfg.cosmos.video_jpeg_quality,
             request_timeout_ms=cfg.cosmos.request_timeout_ms,
             response_ttl_ms=cfg.cosmos.response_ttl_ms,
         )

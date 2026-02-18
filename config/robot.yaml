@@ -76,6 +76,10 @@ cosmos:
   planner_prompt: "Prioritize calm, safe desk-companion behavior. Prefer hold/breath unless confidence is high."
   max_hz: 1.0
   max_frame_age_ms: 500
+  video_window_s: 8.0
+  video_max_frames: 8
+  video_max_width: 320
+  video_jpeg_quality: 60
   request_timeout_ms: 5000
   response_ttl_ms: 1500
   mock_latency_ms: 150

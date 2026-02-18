@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from collections import deque
 import io
 import json
 import os
@@ -38,6 +39,7 @@ class ProbeResult:
     frame_shape: Optional[list[int]]
     resized_shape: Optional[list[int]]
     jpeg_bytes: int
+    frames_sent: int
     error: Optional[str]
 
 
@@ -167,15 +169,16 @@ def _build_payload(
     question: str,
     model: str,
     planner_prompt: str,
-    image_data_url: str,
-    frame_shape: list[int],
-    resized_shape: list[int],
+    image_data_urls: list[str],
+    frame_shapes: list[list[int]],
+    resized_shapes: list[list[int]],
     frame_age_ms: Optional[float],
 ) -> dict[str, Any]:
     user_context = {
         "source": "cosmos_image_probe",
-        "frame_shape": frame_shape,
-        "resized_shape": resized_shape,
+        "frames_sent": len(image_data_urls),
+        "frame_shapes": frame_shapes,
+        "resized_shapes": resized_shapes,
         "frame_age_ms": frame_age_ms,
         "planner_prompt": planner_prompt,
     }
@@ -186,22 +189,20 @@ def _build_payload(
 
     if task == "describe":
         system_prompt = (
-            "You are a vision assistant. Describe what is happening in the image in 1-2 short sentences. "
+            "You are a vision assistant. You are given one or more frames in chronological order. "
+            "Describe what is happening in 1-2 short sentences. "
             "If scene content is unclear, say that directly."
         )
         if planner_prompt:
             system_prompt += f" Operator guidance: {planner_prompt}"
+        content = [{"type": "text", "text": user_text}]
+        for image_data_url in image_data_urls:
+            content.append({"type": "image_url", "image_url": {"url": image_data_url}})
         return {
             "model": model,
             "messages": [
                 {"role": "system", "content": system_prompt},
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": user_text},
-                        {"type": "image_url", "image_url": {"url": image_data_url}},
-                    ],
-                },
+                {"role": "user", "content": content},
             ],
             "temperature": 0.1,
             "max_tokens": 220,
@@ -216,17 +217,14 @@ def _build_payload(
     )
     if planner_prompt:
         system_prompt += f" Operator guidance: {planner_prompt}"
+    content = [{"type": "text", "text": user_text}]
+    for image_data_url in image_data_urls:
+        content.append({"type": "image_url", "image_url": {"url": image_data_url}})
     return {
         "model": model,
         "messages": [
             {"role": "system", "content": system_prompt},
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": user_text},
-                    {"type": "image_url", "image_url": {"url": image_data_url}},
-                ],
-            },
+            {"role": "user", "content": content},
         ],
         "response_format": {"type": "json_object"},
         "temperature": 0.1,
@@ -296,6 +294,18 @@ def main() -> int:
     parser.add_argument("--frame-timeout-s", type=float, default=1.0, help="Frame wait timeout for threaded mode")
     parser.add_argument("--max-width", type=int, default=320, help="Max image width before upload")
     parser.add_argument("--jpeg-quality", type=int, default=60, help="JPEG quality for upload")
+    parser.add_argument(
+        "--video-window-s",
+        type=float,
+        default=0.0,
+        help="If > 0, send a rolling frame sequence covering this many seconds",
+    )
+    parser.add_argument(
+        "--video-max-frames",
+        type=int,
+        default=12,
+        help="Cap frames sent per request when --video-window-s > 0",
+    )
     parser.add_argument("--unthreaded", action="store_true", help="Disable threaded latest-frame capture")
     parser.add_argument("--out", default="logs/cosmos_image_probe.jsonl", help="JSONL output path (empty disables)")
     parser.add_argument("--print-response", action="store_true", help="Print response preview each request")
@@ -336,9 +346,11 @@ def main() -> int:
 
     period_s = 1.0 / max(0.01, float(args.hz))
     next_due = time.monotonic()
+    video_history: deque[tuple[float, np.ndarray]] = deque()
     print(
         f"cosmos_image_probe: mode={mode} url={chat_url} model={model} hz={args.hz:.2f} "
-        f"count={args.count} threaded={is_threaded} task={args.task}"
+        f"count={args.count} threaded={is_threaded} task={args.task} "
+        f"video_window_s={args.video_window_s:.1f}"
     )
 
     try:
@@ -360,24 +372,46 @@ def main() -> int:
             frame = np.asarray(packet.frame)
             frame_shape = list(frame.shape)
             frame_age_ms = (time.monotonic_ns() - packet.mono_ns) / 1_000_000.0
+            now_s = time.monotonic()
+            video_history.append((now_s, frame))
+            if args.video_window_s > 0:
+                cutoff = now_s - max(0.1, float(args.video_window_s))
+                while video_history and video_history[0][0] < cutoff:
+                    video_history.popleft()
+            else:
+                while len(video_history) > 1:
+                    video_history.popleft()
+
+            frames_for_request = [entry[1] for entry in video_history]
+            max_frames = max(1, int(args.video_max_frames))
+            if len(frames_for_request) > max_frames:
+                step = len(frames_for_request) / float(max_frames)
+                idxs = [int(i * step) for i in range(max_frames)]
+                frames_for_request = [frames_for_request[i] for i in idxs]
 
             t_enc0 = time.monotonic()
-            jpeg_bytes, resized_shape = _encode_frame(
-                frame,
-                max_width=max(1, int(args.max_width)),
-                jpeg_quality=max(1, min(100, int(args.jpeg_quality))),
-            )
+            image_data_urls: list[str] = []
+            resized_shapes: list[list[int]] = []
+            total_jpeg_bytes = 0
+            for req_frame in frames_for_request:
+                jpeg_bytes, resized_shape = _encode_frame(
+                    req_frame,
+                    max_width=max(1, int(args.max_width)),
+                    jpeg_quality=max(1, min(100, int(args.jpeg_quality))),
+                )
+                total_jpeg_bytes += len(jpeg_bytes)
+                resized_shapes.append(resized_shape)
+                image_data_urls.append("data:image/jpeg;base64," + base64.b64encode(jpeg_bytes).decode("ascii"))
             encode_ms = (time.monotonic() - t_enc0) * 1000.0
-            data_url = "data:image/jpeg;base64," + base64.b64encode(jpeg_bytes).decode("ascii")
 
             payload = _build_payload(
                 task=args.task,
                 question=args.question,
                 model=model,
                 planner_prompt=planner_prompt,
-                image_data_url=data_url,
-                frame_shape=frame_shape,
-                resized_shape=resized_shape,
+                image_data_urls=image_data_urls,
+                frame_shapes=[list(np.asarray(f).shape) for f in frames_for_request],
+                resized_shapes=resized_shapes,
                 frame_age_ms=frame_age_ms,
             )
 
@@ -447,8 +481,9 @@ def main() -> int:
                 explanation=explanation,
                 response_preview=response_preview[:300],
                 frame_shape=frame_shape,
-                resized_shape=resized_shape,
-                jpeg_bytes=len(jpeg_bytes),
+                resized_shape=resized_shapes[-1] if resized_shapes else None,
+                jpeg_bytes=total_jpeg_bytes,
+                frames_sent=len(image_data_urls),
                 error=error,
             )
 
@@ -463,7 +498,7 @@ def main() -> int:
             print(
                 f"[{idx:03d}] http={http_str} parse={parse_str} total={total_ms:7.1f}ms "
                 f"enc={encode_ms:6.1f}ms net={http_ms:7.1f}ms prim={prim_str:<12} conf={conf_str} "
-                f"jpeg={len(jpeg_bytes):6d}B"
+                f"frames={len(image_data_urls):2d} jpeg={total_jpeg_bytes:6d}B"
             )
             if (args.print_response or args.task == "describe") and response_preview:
                 print(f"      response={response_preview[:240]}")
