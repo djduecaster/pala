@@ -96,11 +96,9 @@ def test_orchestrator_remote_payload_includes_multi_frame_sequence(monkeypatch):
         text_items = [item for item in user_content if isinstance(item, dict) and item.get("type") == "text"]
         assert text_items
         context = text_items[0]["text"]
-        assert "recent_events" in context
-        assert "session_memory_digest" in context
-        assert "perception_state_raw" in context
-        assert "\"observation\":" not in context
-        assert "\"belief\":" not in context
+        assert "\"control_state\"" in context
+        assert "\"transcript_tail\"" in context
+        assert "\"perception_state_raw\"" not in context
     finally:
         planner.shutdown()
 
@@ -303,12 +301,10 @@ def test_reasoning_probe_writes_reasoning_event(monkeypatch):
                     debug={"zone_hint": "left"},
                 )
             )
-            events = planner._memory.context()["recent_events"]
-            if any(evt.get("type") == "reasoning_event" for evt in events):
+            if planner._latest_reasoning:
                 break
             time.sleep(0.02)
-        events = planner._memory.context()["recent_events"]
-        assert any(evt.get("type") == "reasoning_event" for evt in events)
+        assert planner._latest_reasoning is not None
     finally:
         planner.shutdown()
 
@@ -361,7 +357,9 @@ def test_payload_includes_policy_version_and_blocks(monkeypatch):
         user_items = captured["payload"]["messages"][1]["content"]
         assert user_items[0]["type"] == "image_url"
         user_text = next(item["text"] for item in user_items if item.get("type") == "text")
-        assert '"policy":{"version":"vtest"' in user_text
+        assert "[policy_version=vtest]" in user_text
+        assert '"control_state"' in user_text
+        assert '"transcript_tail"' in user_text
     finally:
         planner.shutdown()
 

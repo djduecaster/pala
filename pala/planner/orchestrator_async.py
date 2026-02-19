@@ -27,7 +27,6 @@ from ..types import (
     PerceptionState,
 )
 from .heuristic import HeuristicPlanner
-from .memory_manager import MemoryManager, MemoryManagerConfig
 from .protocol import PlannerInterface
 from .state_models import OrchestratorDecision
 from .timeline import TimelineConfig, TimelineWriter
@@ -50,7 +49,7 @@ class _OrchestratorRequest:
 
 
 class AsyncOrchestratorPlanner(PlannerInterface):
-    """Async orchestrator with transcript context and latest-only remote requests."""
+    """Async orchestrator with rolling transcript context and latest-only remote requests."""
 
     owns_semantic_behavior = True
 
@@ -174,15 +173,13 @@ class AsyncOrchestratorPlanner(PlannerInterface):
         self._latest_action_primitive: Optional[str] = None
         self._latest_latency_ms: Optional[float] = None
         self._latest_reasoning: Optional[str] = None
-        self._memory = MemoryManager(
-            MemoryManagerConfig(
-                enabled=bool(memory_enabled),
-                jsonl_path=str(memory_jsonl_path),
-                recent_events=max(1, int(memory_recent_events)),
-                digest_items=max(1, int(memory_digest_items)),
-                distill_every_n_events=max(1, int(memory_distill_every_n_events)),
-            )
-        )
+        # Legacy memory knobs are currently accepted for config compatibility.
+        # Current architecture uses rolling transcript only for planner context.
+        self._memory_enabled = bool(memory_enabled)
+        self._memory_jsonl_path = str(memory_jsonl_path)
+        self._memory_recent_events = max(1, int(memory_recent_events))
+        self._memory_digest_items = max(1, int(memory_digest_items))
+        self._memory_distill_every_n_events = max(1, int(memory_distill_every_n_events))
 
         if self._remote_enabled:
             logger.info(
@@ -212,22 +209,6 @@ class AsyncOrchestratorPlanner(PlannerInterface):
         if (now - self._last_submit_s) >= self._orchestrator_period_s:
             frames = self._sample_frame_history()
             if len(frames) >= self._request_min_fresh_frames:
-                self._memory.append_event(
-                    "context_event",
-                    {
-                        "frames_available": len(frames),
-                        "frame_age_ms": frame_age_ms,
-                        "control_active_primitive": self._latest_action_primitive,
-                        "control_active_age_s": active_age_s,
-                    },
-                )
-                self._append_transcript(
-                    "system",
-                    (
-                        f"context frames={len(frames)} frame_age_ms={frame_age_ms} "
-                        f"control_active={self._latest_action_primitive or '-'} control_age_s={active_age_s}"
-                    ),
-                )
                 with self._lock:
                     can_submit = not (self._inflight_guard_enabled and self._request_inflight)
                     if can_submit:
@@ -305,22 +286,6 @@ class AsyncOrchestratorPlanner(PlannerInterface):
                 if self._remote_enabled:
                     decision = self._remote_decision(req)
                     if decision is None:
-                        self._memory.append_event(
-                            "decision_event",
-                            {
-                                "source": "remote_none",
-                                "state": None,
-                                "intent": None,
-                                "style": None,
-                                "primitive": None,
-                                "target_zone": None,
-                                "confidence": None,
-                                "allow_interrupt": None,
-                                "urgency": None,
-                                "zone_hint": None,
-                                "latency_ms": self._latest_latency_ms,
-                            },
-                        )
                         self._timeline.write(
                             "fallback_event",
                             {
@@ -352,22 +317,6 @@ class AsyncOrchestratorPlanner(PlannerInterface):
             except Exception as exc:
                 logger.warning("orchestrator planning failed: %s", exc)
                 if self._remote_enabled:
-                    self._memory.append_event(
-                        "decision_event",
-                        {
-                            "source": "remote_error",
-                            "state": None,
-                            "intent": None,
-                            "style": None,
-                            "primitive": None,
-                            "target_zone": None,
-                            "confidence": None,
-                            "allow_interrupt": None,
-                            "urgency": None,
-                            "zone_hint": None,
-                            "latency_ms": self._latest_latency_ms,
-                        },
-                    )
                     self._timeline.write(
                         "fallback_event",
                         {
@@ -407,22 +356,6 @@ class AsyncOrchestratorPlanner(PlannerInterface):
                     f"confidence={decision.confidence:.2f} frames={len(req.frames)} rationale={decision.rationale}"
                 ),
             )
-            self._memory.append_event(
-                "decision_event",
-                {
-                    "source": decision.source,
-                    "state": decision.target_state,
-                    "intent": decision.intent,
-                    "style": decision.style,
-                    "primitive": decision.primitive_hint,
-                    "target_zone": decision.target_zone,
-                    "confidence": decision.confidence,
-                    "allow_interrupt": decision.allow_interrupt,
-                    "urgency": decision.urgency,
-                    "zone_hint": None,
-                    "latency_ms": self._latest_latency_ms,
-                },
-            )
             self._timeline.write(
                 "decision_event",
                 {
@@ -450,9 +383,8 @@ class AsyncOrchestratorPlanner(PlannerInterface):
 
             now = time.monotonic()
             if now - self._last_stats_log_s >= 10.0:
-                mem_stats = self._memory.stats()
                 logger.info(
-                    "orchestrator stats requests=%d successes=%d probe_requests=%d probe_successes=%d source=%s state=%s intent=%s style=%s memory_recent=%d memory_digest=%d",
+                    "orchestrator stats requests=%d successes=%d probe_requests=%d probe_successes=%d source=%s state=%s intent=%s style=%s transcript_items=%d",
                     self._request_count,
                     self._success_count,
                     self._probe_request_count,
@@ -461,8 +393,7 @@ class AsyncOrchestratorPlanner(PlannerInterface):
                     decision.target_state,
                     decision.intent,
                     decision.style,
-                    mem_stats["recent_events"],
-                    mem_stats["digest_items"],
+                    len(self._transcript),
                 )
                 self._last_stats_log_s = now
 
@@ -504,14 +435,6 @@ class AsyncOrchestratorPlanner(PlannerInterface):
                 self._append_transcript("reasoning", _preview(reasoning, 240))
                 logger.debug("orchestrator probe_end id=%d status=ok latency_ms=%.1f", req_id, latency_ms)
                 logger.debug("orchestrator reasoning id=%d text=%s", req_id, _preview(reasoning, 600))
-                self._memory.append_event(
-                    "reasoning_event",
-                    {
-                        "request_id": req_id,
-                        "latency_ms": latency_ms,
-                        "reasoning": reasoning,
-                    },
-                )
                 self._timeline.write(
                     "reasoning_event",
                     {
@@ -563,14 +486,11 @@ class AsyncOrchestratorPlanner(PlannerInterface):
         self._request_count += 1
         with self._transcript_lock:
             transcript_len = len(self._transcript)
-        mem_stats = self._memory.stats()
         logger.debug(
-            "orchestrator req_start id=%d frames=%d transcript=%d mem_recent=%d mem_digest=%d frame_age_ms=%s active_primitive=%s",
+            "orchestrator req_start id=%d frames=%d transcript=%d frame_age_ms=%s active_primitive=%s",
             req_id,
             len(req.frames),
             transcript_len,
-            mem_stats["recent_events"],
-            mem_stats["digest_items"],
             req.frame_age_ms,
             req.control_active_primitive,
         )
@@ -580,8 +500,6 @@ class AsyncOrchestratorPlanner(PlannerInterface):
                 "request_id": req_id,
                 "frames": len(req.frames),
                 "transcript_items": transcript_len,
-                "memory_recent": mem_stats["recent_events"],
-                "memory_digest": mem_stats["digest_items"],
                 "frame_age_ms": req.frame_age_ms,
                 "control_active_primitive": req.control_active_primitive,
                 "control_active_age_s": req.control_active_age_s,
@@ -618,13 +536,6 @@ class AsyncOrchestratorPlanner(PlannerInterface):
             self._latest_reasoning = reasoning
             logger.debug("orchestrator reasoning id=%d text=%s", req_id, _preview(reasoning, 600))
             self._append_transcript("reasoning", _preview(reasoning, 240))
-            self._memory.append_event(
-                "reasoning_event",
-                {
-                    "request_id": req_id,
-                    "reasoning": reasoning,
-                },
-            )
             self._timeline.write(
                 "reasoning_event",
                 {
@@ -702,29 +613,12 @@ class AsyncOrchestratorPlanner(PlannerInterface):
 
     def _build_payload(self, req: _OrchestratorRequest) -> dict[str, Any]:
         transcript_tail = self._build_transcript_window()
-        memory_ctx = self._memory.context()
-        memory_digest = list(memory_ctx["session_memory_digest"])[-self._context_memory_digest_max_items :]
-        image_data_urls, resized_shapes, total_jpeg_bytes = _encode_frames_to_data_urls(
+        image_data_urls, _, _ = _encode_frames_to_data_urls(
             req.frames,
             max_width=self._video_max_width,
             jpeg_quality=self._video_jpeg_quality,
         )
-        policy = {
-            "version": self._policy_version,
-            "identity": self._policy_identity,
-            "capabilities": self._policy_capabilities,
-            "safety": self._policy_safety,
-            "style": self._policy_style,
-            "output_contract": self._policy_output_contract,
-        }
         context = {
-            "policy": policy,
-            "vision": {
-                "frames_sent": len(image_data_urls),
-                "resized_shapes": resized_shapes,
-                "jpeg_total_bytes": total_jpeg_bytes,
-                "frame_age_ms": req.frame_age_ms,
-            },
             "control_state": {
                 "active_primitive": req.control_active_primitive,
                 "active_age_s": req.control_active_age_s,
@@ -739,10 +633,11 @@ class AsyncOrchestratorPlanner(PlannerInterface):
                     "confidence": self._latest_decision.confidence,
                 },
             },
-            "perception_state_raw": _perception_state_context(req.state),
-            "recent_events": memory_ctx["recent_events"],
-            "session_memory_digest": memory_digest,
             "transcript_tail": transcript_tail,
+            "frame_meta": {
+                "frames_sent": len(image_data_urls),
+                "frame_age_ms": req.frame_age_ms,
+            },
         }
         user_text = (
             f"[policy_version={self._policy_version}]\n"
@@ -757,7 +652,8 @@ class AsyncOrchestratorPlanner(PlannerInterface):
             "Your reasoning.\n"
             "</think>\n"
             "{\"target_state\":\"...\",\"intent\":\"...\",\"style\":\"...\",\"primitive_hint\":\"...\",\"target_zone\":\"...\",\"allow_interrupt\":true,\"urgency\":\"...\",\"confidence\":0.0,\"rationale\":\"...\"}\n\n"
-            "Context JSON:\n"
+            "Use the provided context and frame sequence to decide next action.\n"
+            "Decision Context JSON:\n"
             + json.dumps(context, separators=(",", ":"), ensure_ascii=True)
         )
 
@@ -783,23 +679,22 @@ class AsyncOrchestratorPlanner(PlannerInterface):
         }
 
     def _build_reasoning_probe_payload(self, req: _OrchestratorRequest) -> dict[str, Any]:
-        image_data_urls, resized_shapes, total_jpeg_bytes = _encode_frames_to_data_urls(
+        image_data_urls, _, _ = _encode_frames_to_data_urls(
             req.frames,
             max_width=self._video_max_width,
             jpeg_quality=self._video_jpeg_quality,
         )
+        transcript_tail = self._build_transcript_window()
         probe_context = {
-            "vision": {
+            "frame_meta": {
                 "frames_sent": len(image_data_urls),
-                "resized_shapes": resized_shapes,
-                "jpeg_total_bytes": total_jpeg_bytes,
                 "frame_age_ms": req.frame_age_ms,
             },
             "robot_state": {
                 "active_primitive": req.control_active_primitive,
                 "active_age_s": req.control_active_age_s,
             },
-            "perception_state_raw": _perception_state_context(req.state),
+            "transcript_tail": transcript_tail,
         }
         user_text = (
             "Analyze the short frame sequence and context.\n"
@@ -1310,29 +1205,6 @@ def _extract_first_json_object(raw: str) -> Optional[str]:
             if depth == 0:
                 return raw[start : i + 1]
     return None
-
-
-def _perception_state_context(st: PerceptionState) -> dict[str, Any]:
-    person = None
-    if st.primary_person is not None:
-        person = {
-            "cx": float(st.primary_person.cx),
-            "cy": float(st.primary_person.cy),
-            "w": float(st.primary_person.w),
-            "h": float(st.primary_person.h),
-        }
-    return {
-        "timestamp_monotonic_s": st.timestamp_monotonic_s,
-        "fps": st.fps,
-        "latency_ms": st.latency_ms,
-        "primary_person": person,
-        "primary_person_conf": st.primary_person_conf,
-        "pointing_target": None
-        if st.pointing_target is None
-        else {"x": float(st.pointing_target.x), "y": float(st.pointing_target.y)},
-        "pointing_conf": st.pointing_conf,
-        "debug": st.debug if isinstance(st.debug, dict) else {},
-    }
 
 
 def _normalize_transcript_role(role: str) -> str:
