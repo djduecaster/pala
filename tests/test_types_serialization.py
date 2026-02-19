@@ -46,3 +46,15 @@ def test_action_plan_typed_json_roundtrip():
     assert parsed is not None
     assert parsed.primitive == PrimitiveKind.BREATH
     assert parsed.command.period_s == 6.0
+
+
+def test_action_plan_from_dict_parses_bool_strings_safely():
+    payload = {
+        "primitive": "breath",
+        "command": {"amp_rad": 0.08, "period_s": 7.0, "rate_rad_s": 1.0},
+        "confidence": 0.5,
+        "cancel_current": "false",
+    }
+    parsed = action_plan_from_dict(payload)
+    assert parsed is not None
+    assert parsed.cancel_current is False

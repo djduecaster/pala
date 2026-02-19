@@ -265,6 +265,28 @@ def test_capture_and_replay_roundtrip(tmp_path):
     assert isinstance(events[1]["payload"].get("bytes_b64"), str)
 
 
+def test_replay_rejects_frame_ref_path_traversal(tmp_path):
+    session_dir = tmp_path / "session"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    outside = tmp_path / "outside.jpg"
+    outside.write_bytes(b"\xff\xd8\xff\xd9")
+
+    event = {
+        "type": "frame",
+        "source": "video_frame",
+        "ts_wall_s": time.time(),
+        "payload": {"frame_ref": "../outside.jpg"},
+    }
+    (session_dir / "events.jsonl").write_text(json.dumps(event) + "\n", encoding="utf-8")
+
+    reader = SessionReplayReader(str(session_dir))
+    events = [msg for msg, _ in reader.iter_events()]
+    assert len(events) == 1
+    payload = events[0]["payload"]
+    assert payload.get("frame_ref") == "../outside.jpg"
+    assert "bytes_b64" not in payload
+
+
 def test_draw_lamp_panel_with_command_data():
     panel = draw_lamp_panel(
         height=240,

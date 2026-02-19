@@ -11,8 +11,8 @@ from pala.planner.orchestrator_async import (
     _parse_decision_content,
 )
 from pala.perception.frame_cache import LatestFrameCache
-from pala.types import BBoxNorm, PerceptionState
-from pala.control.primitives import PrimitiveKind, OrientToZoneCommand
+from pala.types import ActionPlan, BBoxNorm, PerceptionState
+from pala.control.primitives import HoldCommand, PrimitiveKind, OrientToZoneCommand
 
 
 def test_orchestrator_parse_decision_uses_target_zone():
@@ -400,6 +400,17 @@ def test_parse_decision_accepts_markdown_fenced_json():
     assert decision.target_zone == "right"
 
 
+def test_parse_decision_bool_string_false_is_false():
+    content = (
+        '{"target_state":"tracking","intent":"track_transition","style":"curious","primitive_hint":"orient_to_zone",'
+        '"target_zone":"right","allow_interrupt":"false","urgency":"medium","confidence":0.7,'
+        '"rationale":"follow movement"}'
+    )
+    decision = _parse_decision_content(content)
+    assert decision is not None
+    assert decision.allow_interrupt is False
+
+
 def test_inflight_guard_prevents_request_pileup(monkeypatch):
     call_count = {"n": 0}
 
@@ -499,5 +510,36 @@ def test_timeline_writes_request_lifecycle(monkeypatch, tmp_path):
         assert "request_start" in kinds
         assert "request_end" in kinds
         assert "decision_event" in kinds
+    finally:
+        planner.shutdown()
+
+
+def test_remote_stale_action_falls_back_to_neutral_hold():
+    planner = AsyncOrchestratorPlanner(
+        frame_cache=LatestFrameCache(),
+        provider="brev",
+        base_url="http://127.0.0.1:8000",
+        response_ttl_ms=100,
+    )
+    try:
+        planner._latest_action = ActionPlan(
+            primitive=PrimitiveKind.ORIENT_TO_ZONE,
+            command=OrientToZoneCommand(zone="left"),
+            confidence=0.9,
+            style="focused",
+            cancel_current=False,
+        )
+        planner._latest_action_ts_s = time.monotonic() - 1.0
+        action = planner.plan(
+            PerceptionState(
+                timestamp_monotonic_s=time.monotonic(),
+                primary_person=BBoxNorm(cx=0.2, cy=0.5, w=0.2, h=0.4),
+                primary_person_conf=0.8,
+                debug={"zone_hint": "left"},
+            )
+        )
+        assert action.primitive == PrimitiveKind.HOLD
+        assert isinstance(action.command, HoldCommand)
+        assert action.cancel_current is True
     finally:
         planner.shutdown()

@@ -98,3 +98,39 @@ def test_hardware_respects_enable_false(monkeypatch):
     result = pala_main.main()
     assert result == 0
     assert False in servo.enabled_calls
+
+
+def test_runtime_fails_fast_on_hardware_thread_crash(monkeypatch):
+    class _FaultServo:
+        def enable(self, _on: bool):
+            return None
+
+        def set_angles(self, _angles):
+            raise RuntimeError("servo write failed")
+
+        def shutdown(self):
+            return None
+
+    cfg = RobotConfig(
+        mode="dev",
+        detector="dummy",
+        loop_rates=LoopRates(perception_hz=20, behavior_hz=3, control_hz=80, hardware_hz=120),
+        deadman_timeout_ms=250,
+        joint_names=["yaw", "pitch1", "pitch2", "roll", "pitch3"],
+        joint_limits_rad=[[-1.0, 1.0] for _ in range(5)],
+        servo_calibration={},
+        logging=LoggingConfig(
+            enabled=False,
+            perception_jsonl=None,
+            actions_jsonl=None,
+        ),
+        camera=CameraConfig(device="/dev/video0", width=640, height=480, fps=30, pipeline=None),
+        deepstream=DeepStreamConfig(config_path=None, person_class_id=0, conf_threshold=None),
+    )
+
+    monkeypatch.setattr(pala_main, "load_config", lambda _path: cfg)
+    monkeypatch.setattr(pala_main, "_build_servo", lambda _cfg: _FaultServo())
+    monkeypatch.setenv("PALA_MAX_RUNTIME_S", "1.0")
+
+    result = pala_main.main()
+    assert result == 1

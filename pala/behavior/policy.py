@@ -24,7 +24,6 @@ class BehaviorPolicy:
         self._zone_start = time.monotonic()
         self._last_trigger = 0.0
         self._active_signature: Optional[str] = None
-        self._active_action_id: Optional[str] = None
         self._planner_owns_semantics = bool(getattr(planner, "owns_semantic_behavior", False))
 
     def step(self, st: Optional[PerceptionState]) -> ActionPlan:
@@ -96,19 +95,18 @@ class BehaviorPolicy:
 
     def _arbitrate(self, proposed: ActionPlan) -> ActionPlan:
         sig = self._signature(proposed)
-        if self._active_signature == sig and self._active_action_id is not None:
+        if self._active_signature == sig:
             return ActionPlan(
                 primitive=proposed.primitive,
                 command=proposed.command,
                 confidence=proposed.confidence,
                 explanation=proposed.explanation,
                 style=proposed.style,
-                action_id=self._active_action_id,
+                action_id=proposed.action_id,
                 cancel_current=False,
             )
 
         self._active_signature = sig
-        self._active_action_id = proposed.action_id
         return ActionPlan(
             primitive=proposed.primitive,
             command=proposed.command,

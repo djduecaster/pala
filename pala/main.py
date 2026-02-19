@@ -32,6 +32,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     max_runtime_s = _parse_max_runtime_s()
 
     stop = threading.Event()
+    thread_failure_lock = threading.Lock()
+    thread_failure: Dict[str, str] = {}
 
     # Shared state
     latest_perception = LatestValue[PerceptionState]()
@@ -56,6 +58,23 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     signal.signal(signal.SIGINT, _handle_sig)
     signal.signal(signal.SIGTERM, _handle_sig)
+
+    def _record_thread_failure(name: str, exc: Exception) -> None:
+        with thread_failure_lock:
+            if not thread_failure:
+                thread_failure["name"] = name
+                thread_failure["error"] = f"{type(exc).__name__}: {exc}"
+                logger.exception("runtime thread crashed: %s", name)
+        stop.set()
+
+    def _thread_guard(name: str, fn):
+        def _wrapped() -> None:
+            try:
+                fn()
+            except Exception as exc:  # noqa: BLE001 - fail-fast loop supervision
+                _record_thread_failure(name, exc)
+
+        return _wrapped
 
     # --- Perception loop ---
     def perception_loop() -> None:
@@ -159,10 +178,10 @@ def main(argv: Optional[list[str]] = None) -> int:
             rl.sleep()
 
     threads = [
-        threading.Thread(target=perception_loop, daemon=True),
-        threading.Thread(target=behavior_loop, daemon=True),
-        threading.Thread(target=control_loop, daemon=True),
-        threading.Thread(target=hardware_loop, daemon=True),
+        threading.Thread(target=_thread_guard("perception", perception_loop), daemon=True),
+        threading.Thread(target=_thread_guard("behavior", behavior_loop), daemon=True),
+        threading.Thread(target=_thread_guard("control", control_loop), daemon=True),
+        threading.Thread(target=_thread_guard("hardware", hardware_loop), daemon=True),
     ]
 
     for t in threads:
@@ -171,6 +190,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     start_time = time.monotonic()
     try:
         while not stop.is_set():
+            with thread_failure_lock:
+                if thread_failure:
+                    break
             if max_runtime_s is not None and (time.monotonic() - start_time) >= max_runtime_s:
                 stop.set()
                 break
@@ -189,6 +211,12 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     for t in threads:
         t.join(timeout=1.0)
+
+    with thread_failure_lock:
+        failed = dict(thread_failure)
+    if failed:
+        logger.error("runtime exiting due to thread failure thread=%s error=%s", failed["name"], failed["error"])
+        return 1
 
     logger.info("clean shutdown")
     return 0

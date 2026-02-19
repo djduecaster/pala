@@ -147,6 +147,23 @@ def _as_int(v: Any, path: str) -> int:
         _fail(path, f"expected int, got {type(v).__name__}")
 
 
+def _as_bool(v: Any, path: str) -> bool:
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        token = v.strip().lower()
+        if token in {"true", "1", "yes", "y", "on"}:
+            return True
+        if token in {"false", "0", "no", "n", "off", ""}:
+            return False
+        _fail(path, f"expected bool string, got {v!r}")
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        if v in (0, 1):
+            return bool(v)
+        _fail(path, f"expected bool-compatible number (0/1), got {v!r}")
+    _fail(path, f"expected bool, got {type(v).__name__}")
+
+
 def _as_list(v: Any, path: str) -> List[Any]:
     if not isinstance(v, list):
         _fail(path, f"expected list, got {type(v).__name__}")
@@ -201,7 +218,7 @@ def load_config(path: str) -> RobotConfig:
     if not isinstance(logging_raw, dict):
         _fail("logging", "expected mapping")
     logging = LoggingConfig(
-        enabled=bool(logging_raw.get("enabled", False)),
+        enabled=_as_bool(logging_raw.get("enabled", False), "logging.enabled"),
         perception_jsonl=logging_raw.get("perception_jsonl"),
         actions_jsonl=logging_raw.get("actions_jsonl"),
     )
@@ -210,7 +227,7 @@ def load_config(path: str) -> RobotConfig:
     if not isinstance(telemetry_preview_raw, dict):
         _fail("telemetry_preview", "expected mapping")
     telemetry_preview = TelemetryPreviewConfig(
-        enabled=bool(telemetry_preview_raw.get("enabled", False)),
+        enabled=_as_bool(telemetry_preview_raw.get("enabled", False), "telemetry_preview.enabled"),
         jpeg_path=str(telemetry_preview_raw.get("jpeg_path", "logs/telemetry/preview/latest.jpg")),
         meta_path=str(telemetry_preview_raw.get("meta_path", "logs/telemetry/preview/latest.json")),
         max_hz=_as_float(telemetry_preview_raw.get("max_hz", 4.0), "telemetry_preview.max_hz"),
@@ -244,7 +261,7 @@ def load_config(path: str) -> RobotConfig:
     if not isinstance(cosmos_raw, dict):
         _fail("cosmos", "expected mapping")
     cosmos = CosmosConfig(
-        enabled=bool(cosmos_raw.get("enabled", False)),
+        enabled=_as_bool(cosmos_raw.get("enabled", False), "cosmos.enabled"),
         provider=str(cosmos_raw.get("provider", "brev")),
         base_url=None if cosmos_raw.get("base_url") in (None, "") else str(cosmos_raw.get("base_url")),
         model=str(cosmos_raw.get("model", "nvidia/cosmos-reason2-2b")),
@@ -299,7 +316,7 @@ def load_config(path: str) -> RobotConfig:
         video_jpeg_quality=_as_int(cosmos_raw.get("video_jpeg_quality", 60), "cosmos.video_jpeg_quality"),
         request_timeout_ms=_as_int(cosmos_raw.get("request_timeout_ms", 5000), "cosmos.request_timeout_ms"),
         response_ttl_ms=_as_int(cosmos_raw.get("response_ttl_ms", 1500), "cosmos.response_ttl_ms"),
-        memory_enabled=bool(cosmos_raw.get("memory_enabled", True)),
+        memory_enabled=_as_bool(cosmos_raw.get("memory_enabled", True), "cosmos.memory_enabled"),
         memory_jsonl_path=str(cosmos_raw.get("memory_jsonl_path", "logs/orchestrator_memory.jsonl")),
         memory_recent_events=_as_int(cosmos_raw.get("memory_recent_events", 10), "cosmos.memory_recent_events"),
         memory_digest_items=_as_int(cosmos_raw.get("memory_digest_items", 3), "cosmos.memory_digest_items"),
@@ -334,12 +351,12 @@ def load_config(path: str) -> RobotConfig:
         orchestrator_timeline_jsonl_path=str(
             cosmos_raw.get("orchestrator_timeline_jsonl_path", "logs/orchestrator_timeline.jsonl")
         ),
-        inflight_guard_enabled=bool(cosmos_raw.get("inflight_guard_enabled", True)),
+        inflight_guard_enabled=_as_bool(cosmos_raw.get("inflight_guard_enabled", True), "cosmos.inflight_guard_enabled"),
         request_min_fresh_frames=_as_int(
             cosmos_raw.get("request_min_fresh_frames", 1),
             "cosmos.request_min_fresh_frames",
         ),
-        reasoning_probe_enabled=bool(cosmos_raw.get("reasoning_probe_enabled", False)),
+        reasoning_probe_enabled=_as_bool(cosmos_raw.get("reasoning_probe_enabled", False), "cosmos.reasoning_probe_enabled"),
         reasoning_probe_hz=_as_float(cosmos_raw.get("reasoning_probe_hz", 0.1), "cosmos.reasoning_probe_hz"),
         reasoning_probe_timeout_ms=_as_int(
             cosmos_raw.get("reasoning_probe_timeout_ms", 8000),

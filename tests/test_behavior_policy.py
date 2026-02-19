@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from pala.behavior.policy import BehaviorPolicy
 from pala.types import PerceptionState, BBoxNorm, ActionPlan
-from pala.control.primitives import PrimitiveKind, BreathCommand, HoldCommand
+from pala.control.primitives import PrimitiveKind, BreathCommand, GlanceCommand, HoldCommand
 
 
 @dataclass
@@ -101,3 +101,28 @@ def test_behavior_skips_dwell_semantics_when_planner_owns_semantics(monkeypatch)
     assert first.primitive == PrimitiveKind.BREATH
     assert second.primitive == PrimitiveKind.BREATH
     assert planner.calls == 2
+
+
+def test_behavior_repeated_signature_keeps_new_action_id():
+    planner = _Planner()
+    policy = BehaviorPolicy(planner=planner, dwell_s=1.0, cooldown_s=0.5)
+
+    first = ActionPlan(
+        primitive=PrimitiveKind.GLANCE,
+        command=GlanceCommand(direction="left", duration_s=0.4),
+        confidence=0.8,
+        style="curious",
+        cancel_current=True,
+    )
+    second = ActionPlan(
+        primitive=PrimitiveKind.GLANCE,
+        command=GlanceCommand(direction="left", duration_s=0.4),
+        confidence=0.8,
+        style="curious",
+        cancel_current=True,
+    )
+
+    out1 = policy._arbitrate(first)
+    out2 = policy._arbitrate(second)
+    assert out1.action_id != out2.action_id
+    assert out2.cancel_current is False

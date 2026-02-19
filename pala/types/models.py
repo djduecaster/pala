@@ -132,7 +132,7 @@ class ActionPlan:
         self.confidence = _clamp01(self.confidence)
         self.style = _coerce_style(self.style)
         self.action_id = _coerce_action_id(self.action_id)
-        self.cancel_current = bool(self.cancel_current)
+        self.cancel_current = _coerce_bool(self.cancel_current, default=False)
 
 
 @dataclass
@@ -172,7 +172,7 @@ def action_plan_from_dict(data: Mapping[str, Any]) -> Optional[ActionPlan]:
     style = _coerce_style(payload.get("style", "calm"))
     action_id_raw = payload.get("action_id")
     action_id = _coerce_action_id(action_id_raw)
-    cancel_current = bool(payload.get("cancel_current", False))
+    cancel_current = _coerce_bool(payload.get("cancel_current", False), default=False)
     return ActionPlan(
         primitive=primitive,
         command=command,
@@ -198,7 +198,7 @@ def command_from_dict(kind: PrimitiveKind, payload: Mapping[str, Any]) -> Primit
             raise ValueError("target_rad must not be empty")
         return MoveToCommand(
             target_rad=target,
-            relative=bool(payload.get("relative", False)),
+            relative=_coerce_bool(payload.get("relative", False), default=False),
             rate_rad_s=_as_float(payload.get("rate_rad_s", 1.5), "rate_rad_s"),
             timeout_s=_as_float(payload.get("timeout_s", 2.0), "timeout_s"),
         )
@@ -337,6 +337,22 @@ def _coerce_style(value: Any) -> str:
         return "calm"
     token = str(value).strip().lower()
     return token if token else "calm"
+
+
+def _coerce_bool(value: Any, *, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value != 0
+    if isinstance(value, str):
+        token = value.strip().lower()
+        if token in {"true", "1", "yes", "y", "on"}:
+            return True
+        if token in {"false", "0", "no", "n", "off", ""}:
+            return False
+    return default
 
 
 _COMMAND_BY_KIND = {

@@ -153,6 +153,8 @@ class AsyncOrchestratorPlanner(PlannerInterface):
         self._probe_success_count = 0
         self._last_stats_log_s = 0.0
         self._request_seq = 0
+        self._request_seq_lock = threading.Lock()
+        self._last_stale_action_log_s = 0.0
 
         self._transcript_lock = threading.Lock()
         self._transcript: deque[dict[str, Any]] = deque(maxlen=max(10, int(transcript_max_items)))
@@ -267,7 +269,14 @@ class AsyncOrchestratorPlanner(PlannerInterface):
                 return _neutral_remote_wait_action()
             if (now - action_ts) <= self._response_ttl_s:
                 return action
-            return action
+            if (now - self._last_stale_action_log_s) >= 2.0:
+                logger.warning(
+                    "orchestrator action stale age_s=%.2f ttl_s=%.2f; issuing neutral hold",
+                    now - action_ts,
+                    self._response_ttl_s,
+                )
+                self._last_stale_action_log_s = now
+            return _stale_remote_action()
 
         return self._fallback.plan(st)
 
@@ -430,8 +439,7 @@ class AsyncOrchestratorPlanner(PlannerInterface):
                 continue
 
             self._probe_request_count += 1
-            self._request_seq += 1
-            req_id = self._request_seq
+            req_id = self._next_request_id()
             try:
                 payload = self._build_reasoning_probe_payload(req)
                 t0 = time.monotonic()
@@ -500,8 +508,7 @@ class AsyncOrchestratorPlanner(PlannerInterface):
 
     def _remote_decision(self, req: _OrchestratorRequest) -> Optional[OrchestratorDecision]:
         assert self._chat_url is not None
-        self._request_seq += 1
-        req_id = self._request_seq
+        req_id = self._next_request_id()
         self._request_count += 1
         with self._transcript_lock:
             transcript_len = len(self._transcript)
@@ -697,6 +704,11 @@ class AsyncOrchestratorPlanner(PlannerInterface):
             "stream": False,
         }
 
+    def _next_request_id(self) -> int:
+        with self._request_seq_lock:
+            self._request_seq += 1
+            return self._request_seq
+
     def _build_reasoning_probe_payload(self, req: _OrchestratorRequest) -> dict[str, Any]:
         image_data_urls, _, _ = _encode_frames_to_data_urls(
             req.frames,
@@ -884,6 +896,17 @@ def _neutral_remote_wait_action() -> ActionPlan:
         explanation="remote_waiting_for_first_decision",
         style="calm",
         cancel_current=False,
+    )
+
+
+def _stale_remote_action() -> ActionPlan:
+    return ActionPlan(
+        primitive=PrimitiveKind.HOLD,
+        command=HoldCommand(),
+        confidence=0.2,
+        explanation="remote_action_stale_hold",
+        style="calm",
+        cancel_current=True,
     )
 
 
@@ -1086,7 +1109,7 @@ def _parse_decision_content(content: str) -> Optional[OrchestratorDecision]:
     target_zone = None if target_zone_raw in (None, "") else str(target_zone_raw).strip().lower()
     if target_zone not in {None, "left", "center", "right"}:
         target_zone = None
-    allow_interrupt = bool(data.get("allow_interrupt", False))
+    allow_interrupt = _coerce_bool_value(data.get("allow_interrupt", False), default=False)
     urgency = str(data.get("urgency", "medium")).strip().lower()
     rationale = _derive_rationale(data)
     if rationale is None:
@@ -1141,10 +1164,10 @@ def _normalize_decision_payload(data: dict[str, Any]) -> dict[str, Any]:
         merged.setdefault("target_state", data["state"])
     if isinstance(data.get("inference_confidence"), (int, float, str)):
         merged.setdefault("confidence", data["inference_confidence"])
-    if isinstance(data.get("interruptible"), bool):
-        merged.setdefault("allow_interrupt", data["interruptible"])
-    if isinstance(data.get("should_interrupt"), bool):
-        merged.setdefault("allow_interrupt", data["should_interrupt"])
+    if "interruptible" in data:
+        merged.setdefault("allow_interrupt", _coerce_bool_value(data.get("interruptible"), default=False))
+    if "should_interrupt" in data:
+        merged.setdefault("allow_interrupt", _coerce_bool_value(data.get("should_interrupt"), default=False))
     if isinstance(data.get("priority"), str):
         merged.setdefault("urgency", data["priority"])
     if isinstance(data.get("reason"), str):
@@ -1167,6 +1190,22 @@ def _clean_text(value: Any) -> Optional[str]:
     if cleaned.lower() in {"none", "null", "n/a", "na"}:
         return None
     return cleaned
+
+
+def _coerce_bool_value(value: Any, *, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value != 0
+    if isinstance(value, str):
+        token = value.strip().lower()
+        if token in {"true", "1", "yes", "y", "on"}:
+            return True
+        if token in {"false", "0", "no", "n", "off", "", "none", "null"}:
+            return False
+    return default
 
 
 def _derive_intent(data: dict[str, Any]) -> Optional[str]:
