@@ -12,11 +12,14 @@ import signal
 import subprocess
 import threading
 import time
-from typing import Any, Dict, Optional, Protocol
+from typing import Any, Dict, Optional, Protocol, Sequence
 
 import numpy as np
 from PIL import Image
 
+from tools.telemetry.capture import CaptureConfig, SessionCaptureWriter
+from tools.telemetry.filters import FieldFilter, matches_field_filters, parse_field_filters
+from tools.telemetry.packs import apply_pack_overrides, list_packs, resolve_packs
 from tools.telemetry.protocol import encode_message, event
 
 
@@ -220,6 +223,14 @@ def _truncate(text: str, max_len: int = 240) -> str:
     if len(text) <= max_len:
         return text
     return text[: max_len - 3] + "..."
+
+
+def _source_enabled(source: str, enabled_sources: set[str]) -> bool:
+    return source in enabled_sources
+
+
+def _passes_filters(msg: Dict[str, Any], field_filters: Sequence[FieldFilter]) -> bool:
+    return matches_field_filters(msg, field_filters)
 
 
 def _parse_json_line(line: str) -> Optional[Dict[str, Any]]:
@@ -739,10 +750,52 @@ def _heartbeat_loop(
         stop.wait(interval_s)
 
 
+def _transport_stats_loop(
+    *,
+    stop: threading.Event,
+    out_q: "queue.Queue[Dict[str, Any]]",
+    drops: DropCounter,
+    interval_s: float,
+) -> None:
+    while not stop.is_set():
+        _emit(
+            out_q,
+            drops,
+            "transport_stats",
+            {
+                "queue_depth": out_q.qsize(),
+                "queue_capacity": out_q.maxsize,
+                "dropped_events": drops.value(),
+            },
+        )
+        stop.wait(interval_s)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Jetson telemetry sidecar agent.")
+    parser.add_argument("--list-packs", action="store_true", help="List built-in signal packs and exit.")
+    parser.add_argument(
+        "--pack",
+        action="append",
+        default=[],
+        help="Signal pack to enable (repeatable). Default: runtime_core.",
+    )
+    parser.add_argument(
+        "--pack-override",
+        action="append",
+        default=[],
+        help="Pack override key=value. Keys: include_sources, exclude_sources, add_journal, set_journal, panels.",
+    )
+    parser.add_argument(
+        "--field-filter",
+        action="append",
+        default=[],
+        help="Field predicate source.path<op>value where op is one of =,!=,<,>,~.",
+    )
     parser.add_argument("--perception-log", default="logs/perception.jsonl")
     parser.add_argument("--actions-log", default="logs/actions.jsonl")
+    parser.add_argument("--memory-log", default="logs/orchestrator_memory.jsonl")
+    parser.add_argument("--timeline-log", default="logs/orchestrator_timeline.jsonl")
     parser.add_argument("--poll-ms", type=int, default=200)
     parser.add_argument("--from-start", action="store_true", help="Read logs from beginning instead of tailing.")
     parser.add_argument("--no-tegrastats", action="store_true")
@@ -772,17 +825,95 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--video-tap-jpeg", default="logs/telemetry/preview/latest.jpg")
     parser.add_argument("--video-tap-meta", default="logs/telemetry/preview/latest.json")
     parser.add_argument("--video-pipeline", default=None)
+    parser.add_argument("--capture-dir", default="", help="Optional capture bundle output directory.")
+    parser.add_argument("--capture-frames", choices=["off", "keyframes", "all"], default="off")
+    parser.add_argument("--capture-max-seconds", type=float, default=0.0)
+    parser.add_argument("--capture-manifest-version", type=int, default=1)
     return parser
 
 
 def main() -> int:
-    args = _build_parser().parse_args()
+    parser = _build_parser()
+    args = parser.parse_args()
+    if args.list_packs:
+        for pack in list_packs():
+            print(f"{pack.name}: {pack.description}")
+        return 0
+
+    try:
+        resolved_packs = resolve_packs(args.pack)
+        resolved_packs = apply_pack_overrides(resolved_packs, args.pack_override)
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    try:
+        field_filters = parse_field_filters(args.field_filter)
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    enabled_sources = set(resolved_packs.sources)
+    if args.no_tegrastats:
+        enabled_sources.discard("tegrastats")
+    if args.no_journal:
+        enabled_sources.discard("journal")
+    if args.video_source == "off":
+        enabled_sources.discard("video")
+        enabled_sources.discard("video_frame")
+
+    journal_filters = list(resolved_packs.journal_filters)
+    if args.journal_filter:
+        journal_filters.append(str(args.journal_filter))
+    if not journal_filters:
+        journal_filters.append(r"(error|timeout)")
+    try:
+        journal_re = re.compile("|".join(f"(?:{expr})" for expr in journal_filters), re.IGNORECASE)
+    except re.error as exc:
+        parser.error(f"invalid combined journal filter regex: {exc}")
+
     poll_s = max(0.01, float(args.poll_ms) / 1000.0)
     start_at_end = not bool(args.from_start)
 
     out_q: "queue.Queue[Dict[str, Any]]" = queue.Queue(maxsize=max(128, int(args.queue_size)))
     drops = DropCounter()
     stop = threading.Event()
+    seq_counter = 0
+    capture_writer: Optional[SessionCaptureWriter] = None
+    capture_dir = str(args.capture_dir or "").strip()
+    if capture_dir:
+        enabled_sources.add("capture_status")
+        capture_cfg = CaptureConfig(
+            directory=capture_dir,
+            frames_mode=args.capture_frames,
+            max_seconds=max(0.0, float(args.capture_max_seconds)),
+            manifest_version=int(args.capture_manifest_version),
+            metadata={
+                "packs": list(resolved_packs.names),
+                "field_filters": list(args.field_filter or []),
+            },
+        )
+        try:
+            capture_writer = SessionCaptureWriter(capture_cfg)
+        except Exception as exc:
+            capture_writer = None
+            _emit(
+                out_q,
+                drops,
+                "capture_status",
+                {"status": "init_failed", "error": repr(exc), "capture_dir": capture_dir},
+                level="warning",
+            )
+        else:
+            _emit(
+                out_q,
+                drops,
+                "capture_status",
+                {
+                    "status": "started",
+                    "capture_dir": capture_dir,
+                    "frames_mode": args.capture_frames,
+                    "max_seconds": float(args.capture_max_seconds),
+                },
+            )
 
     def _stop_handler(_sig, _frame) -> None:
         stop.set()
@@ -824,7 +955,9 @@ def main() -> int:
                 "start_at_end": start_at_end,
                 "warning_interval_s": max(0.2, float(args.warning_throttle_s)),
             },
-        ),
+        )
+        if _source_enabled("perception_log", enabled_sources)
+        else None,
         _make_worker_thread(
             name="actions_log",
             target=_tail_jsonl_file,
@@ -838,7 +971,41 @@ def main() -> int:
                 "start_at_end": start_at_end,
                 "warning_interval_s": max(0.2, float(args.warning_throttle_s)),
             },
-        ),
+        )
+        if _source_enabled("actions_log", enabled_sources)
+        else None,
+        _make_worker_thread(
+            name="memory_log",
+            target=_tail_jsonl_file,
+            kwargs={
+                "stop": stop,
+                "out_q": out_q,
+                "drops": drops,
+                "source": "memory_log",
+                "path": args.memory_log,
+                "poll_s": poll_s,
+                "start_at_end": start_at_end,
+                "warning_interval_s": max(0.2, float(args.warning_throttle_s)),
+            },
+        )
+        if _source_enabled("memory_log", enabled_sources)
+        else None,
+        _make_worker_thread(
+            name="timeline_log",
+            target=_tail_jsonl_file,
+            kwargs={
+                "stop": stop,
+                "out_q": out_q,
+                "drops": drops,
+                "source": "timeline_log",
+                "path": args.timeline_log,
+                "poll_s": poll_s,
+                "start_at_end": start_at_end,
+                "warning_interval_s": max(0.2, float(args.warning_throttle_s)),
+            },
+        )
+        if _source_enabled("timeline_log", enabled_sources)
+        else None,
         _make_worker_thread(
             name="heartbeat",
             target=_heartbeat_loop,
@@ -848,10 +1015,25 @@ def main() -> int:
                 "drops": drops,
                 "interval_s": max(0.2, float(args.heartbeat_s)),
             },
-        ),
+        )
+        if _source_enabled("agent", enabled_sources)
+        else None,
+        _make_worker_thread(
+            name="transport_stats",
+            target=_transport_stats_loop,
+            kwargs={
+                "stop": stop,
+                "out_q": out_q,
+                "drops": drops,
+                "interval_s": max(0.2, float(args.heartbeat_s)),
+            },
+        )
+        if _source_enabled("transport_stats", enabled_sources)
+        else None,
     ]
+    threads = [t for t in threads if t is not None]
 
-    if not args.no_tegrastats:
+    if _source_enabled("tegrastats", enabled_sources):
         threads.append(
             _make_worker_thread(
                 name="tegrastats",
@@ -867,7 +1049,7 @@ def main() -> int:
             )
         )
 
-    if not args.no_journal:
+    if _source_enabled("journal", enabled_sources):
         threads.append(
             _make_worker_thread(
                 name="journal",
@@ -876,14 +1058,16 @@ def main() -> int:
                     "stop": stop,
                     "out_q": out_q,
                     "drops": drops,
-                    "filter_re": re.compile(args.journal_filter, re.IGNORECASE),
+                    "filter_re": journal_re,
                     "restart_delay_s": max(0.2, float(args.worker_restart_delay_s)),
                     "warning_interval_s": max(0.2, float(args.warning_throttle_s)),
                 },
             )
         )
 
-    if args.video_source != "off":
+    if args.video_source != "off" and (
+        _source_enabled("video", enabled_sources) or _source_enabled("video_frame", enabled_sources)
+    ):
         threads.append(
             _make_worker_thread(
                 name="video",
@@ -906,6 +1090,27 @@ def main() -> int:
                 msg = out_q.get(timeout=0.2)
             except queue.Empty:
                 continue
+            source = msg.get("source")
+            if not isinstance(source, str):
+                continue
+            if not _source_enabled(source, enabled_sources):
+                continue
+            if not _passes_filters(msg, field_filters):
+                continue
+            if "seq" not in msg:
+                msg["seq"] = seq_counter
+                seq_counter += 1
+            if capture_writer is not None:
+                keep_writing = capture_writer.write(msg)
+                if not keep_writing:
+                    capture_writer.close()
+                    capture_writer = None
+                    _emit(
+                        out_q,
+                        drops,
+                        "capture_status",
+                        {"status": "stopped", "reason": "max_seconds_elapsed"},
+                    )
             print(encode_message(msg), flush=True)
     except KeyboardInterrupt:
         stop.set()
@@ -913,6 +1118,8 @@ def main() -> int:
         stop.set()
         for thread in threads:
             thread.join(timeout=1.0)
+        if capture_writer is not None:
+            capture_writer.close()
 
     return 0
 

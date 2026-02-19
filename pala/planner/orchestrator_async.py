@@ -6,6 +6,8 @@ from dataclasses import dataclass
 import io
 import json
 import logging
+import os
+import subprocess
 import threading
 import time
 from typing import Any, Optional
@@ -63,6 +65,7 @@ class AsyncOrchestratorPlanner(PlannerInterface):
         api_key: Optional[str] = None,
         model: str = "nvidia/cosmos-reason2-2b",
         planner_prompt: Optional[str] = None,
+        runtime_mode: str = "unknown",
         policy_version: str = "v1",
         policy_identity: str = (
             "You are PALA, a social desk companion lamp that should feel alive, expressive, and safe."
@@ -115,6 +118,7 @@ class AsyncOrchestratorPlanner(PlannerInterface):
         self._api_key = api_key
         self._model = str(model or "nvidia/cosmos-reason2-2b")
         self._planner_prompt = (planner_prompt or "").strip()
+        self._runtime_mode = str(runtime_mode or "unknown")
         self._policy_version = str(policy_version or "v1").strip() or "v1"
         self._policy_identity = str(policy_identity or "").strip()
         self._policy_capabilities = str(policy_capabilities or "").strip()
@@ -191,6 +195,21 @@ class AsyncOrchestratorPlanner(PlannerInterface):
             )
         else:
             logger.info("orchestrator remote disabled provider=%s base_url=%s", self._provider, self._chat_url)
+        self._timeline.write(
+            "run_start",
+            {
+                "runtime_mode": self._runtime_mode,
+                "provider": self._provider,
+                "base_url": self._chat_url,
+                "model": self._model,
+                "policy_version": self._policy_version,
+                "reasoning_probe_enabled": self._reasoning_probe_enabled,
+                "orchestrator_hz": 1.0 / self._orchestrator_period_s,
+                "video_max_frames": self._video_max_frames,
+                "video_max_width": self._video_max_width,
+                "git_sha": _resolve_git_sha(),
+            },
+        )
 
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -746,10 +765,13 @@ class AsyncOrchestratorPlanner(PlannerInterface):
         if not entries:
             return []
 
+        allowed_roles = {"decision", "reasoning"}
         selected: list[dict[str, Any]] = []
         per_role: dict[str, int] = {}
         for item in reversed(entries):
             role = str(item.get("role", "system"))
+            if role not in allowed_roles:
+                continue
             count = per_role.get(role, 0)
             if count >= self._context_transcript_per_type_max_items:
                 continue
@@ -1020,8 +1042,22 @@ def _extract_think_block(content: str) -> Optional[str]:
     return None
 
 
+def _strip_markdown_fences(raw: str) -> str:
+    text = raw.strip()
+    if not text.startswith("```"):
+        return text
+    lines = text.splitlines()
+    if len(lines) < 2:
+        return text
+    if lines[0].strip().startswith("```"):
+        lines = lines[1:]
+    if lines and lines[-1].strip() == "```":
+        lines = lines[:-1]
+    return "\n".join(lines).strip()
+
+
 def _parse_decision_content(content: str) -> Optional[OrchestratorDecision]:
-    cleaned = content.strip()
+    cleaned = _strip_markdown_fences(content.strip())
     data = _parse_json_obj(cleaned)
     if data is None:
         candidate = _extract_first_json_object(cleaned)
@@ -1216,6 +1252,23 @@ def _normalize_transcript_role(role: str) -> str:
     if token in {"reasoning", "think"}:
         return "reasoning"
     return "system"
+
+
+def _resolve_git_sha() -> Optional[str]:
+    env_sha = os.getenv("PALA_GIT_SHA")
+    if env_sha:
+        token = env_sha.strip()
+        return token or None
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        token = out.strip()
+        return token or None
+    except Exception:
+        return None
 
 
 def _is_valid_canonical_decision(decision: OrchestratorDecision) -> bool:

@@ -4,6 +4,7 @@ import json
 import pathlib
 import sys
 import base64
+import time
 
 import numpy as np
 from PIL import Image
@@ -16,6 +17,7 @@ from pala.perception.preview_tap import PreviewTapWriter
 from tools.telemetry.lamp_viz import draw_lamp_panel
 from tools.telemetry.protocol import decode_message, encode_message, event
 from tools.telemetry.jetson_agent import _TapVideoSource, _encode_jpeg_frame, _parse_tegrastats
+from tools.telemetry.filters import parse_field_filter, matches_field_filters
 from tools.telemetry.mac_viewer import (
     DashboardState,
     _build_parser,
@@ -23,6 +25,9 @@ from tools.telemetry.mac_viewer import (
     _fit_image_to_window,
     _normalize_jetson_dir,
 )
+from tools.telemetry.packs import resolve_packs, apply_pack_overrides
+from tools.telemetry.capture import CaptureConfig, SessionCaptureWriter
+from tools.telemetry.replay import SessionReplayReader
 
 
 def test_protocol_roundtrip():
@@ -101,6 +106,17 @@ def test_remote_command_expands_tilde_dir():
     assert "--video-source" in cmd
     assert "--video-tap-jpeg" in cmd
     assert "--video-tap-meta" in cmd
+
+
+def test_remote_command_forwards_pack_and_filters():
+    args = _build_parser().parse_args([])
+    args.pack = ["runtime_core", "memory_debug"]
+    args.field_filter = ["actions_log.data.confidence<0.5"]
+    cmd = _build_remote_agent_command(args)
+    assert "--pack runtime_core" in cmd
+    assert "--pack memory_debug" in cmd
+    assert "--field-filter" in cmd
+    assert "confidence<0.5" in cmd
 
 
 def test_preview_tap_writer_emits_files_and_throttles(tmp_path):
@@ -192,6 +208,61 @@ def test_dashboard_state_updates_command_from_video_tap_extra():
     )
     assert state.command is not None
     assert state.command["joint_names"] == ["yaw", "pitch1"]
+
+
+def test_dashboard_state_updates_memory_and_timeline():
+    state = DashboardState(host="jetson")
+    state.apply({"source": "memory_log", "payload": {"data": {"type": "summary_event", "payload": {"highlights": ["a"]}}}})
+    state.apply({"source": "timeline_log", "payload": {"data": {"type": "req_start", "payload": {"id": 3}}}})
+    assert state.memory is not None
+    assert state.timeline is not None
+
+
+def test_field_filter_parsing_and_match():
+    flt = parse_field_filter("actions_log.data.confidence<0.5")
+    msg_ok = {"source": "actions_log", "payload": {"data": {"confidence": 0.4}}}
+    msg_bad = {"source": "actions_log", "payload": {"data": {"confidence": 0.9}}}
+    assert matches_field_filters(msg_ok, [flt]) is True
+    assert matches_field_filters(msg_bad, [flt]) is False
+
+
+def test_signal_pack_resolution_and_override():
+    resolved = resolve_packs(["runtime_core", "memory_debug"])
+    assert "perception_log" in resolved.sources
+    assert "memory_log" in resolved.sources
+    updated = apply_pack_overrides(resolved, ["exclude_sources=video_frame", "include_sources=journal"])
+    assert "video_frame" not in updated.sources
+    assert "journal" in updated.sources
+
+
+def test_capture_and_replay_roundtrip(tmp_path):
+    session_dir = tmp_path / "session"
+    writer = SessionCaptureWriter(
+        CaptureConfig(directory=str(session_dir), frames_mode="all", max_seconds=0.0, metadata={"test": True})
+    )
+    msg1 = {
+        "type": "event",
+        "source": "actions_log",
+        "ts_wall_s": time.time(),
+        "payload": {"data": {"primitive": "hold", "confidence": 0.7}},
+    }
+    frame = base64.b64encode(b"\xff\xd8\xff\xd9").decode("ascii")
+    msg2 = {
+        "type": "frame",
+        "source": "video_frame",
+        "ts_wall_s": time.time(),
+        "payload": {"frame_id": 1, "bytes_b64": frame},
+    }
+    assert writer.write(msg1) is True
+    assert writer.write(msg2) is True
+    writer.close()
+
+    reader = SessionReplayReader(str(session_dir))
+    events = [msg for msg, _ in reader.iter_events()]
+    assert len(events) == 2
+    assert events[0]["source"] == "actions_log"
+    assert events[1]["source"] == "video_frame"
+    assert isinstance(events[1]["payload"].get("bytes_b64"), str)
 
 
 def test_draw_lamp_panel_with_command_data():

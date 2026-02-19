@@ -289,6 +289,7 @@ def _build_planner(cfg, latest_frame: LatestFrameCache):
             api_key=api_key,
             model=model,
             planner_prompt=planner_prompt,
+            runtime_mode=cfg.mode,
             policy_version=cfg.cosmos.policy_version,
             policy_identity=cfg.cosmos.policy_identity,
             policy_capabilities=cfg.cosmos.policy_capabilities,

@@ -88,6 +88,7 @@ cosmos:
   video_jpeg_quality: 55
   request_timeout_ms: 6000
   response_ttl_ms: 1500
+  # Legacy memory knobs (deprecated): retained for compatibility only; current planner context uses rolling transcript.
   memory_enabled: true
   memory_jsonl_path: "logs/orchestrator_memory.jsonl"
   memory_recent_events: 10
@@ -102,7 +103,7 @@ cosmos:
   orchestrator_timeline_jsonl_path: "logs/orchestrator_timeline.jsonl"
   inflight_guard_enabled: true
   request_min_fresh_frames: 1
-  reasoning_probe_enabled: true
+  reasoning_probe_enabled: false
   reasoning_probe_hz: 0.1
   reasoning_probe_timeout_ms: 10000
   reasoning_probe_max_tokens: 1024

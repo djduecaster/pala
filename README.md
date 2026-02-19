@@ -190,5 +190,36 @@ uv run python tools/cosmos_image_probe.py --base-url "http://<BREV_PUBLIC_IP>:80
 ```
 
 Pass criteria:
-- runtime logs include `cosmos stats requests=... successes=...`,
-- new `logs/actions.jsonl` entries include `explanation` prefixed with `cosmos_remote:`.
+- runtime logs include `orchestrator stats requests=... successes=...`,
+- `logs/orchestrator_timeline.jsonl` includes `run_start`, `request_start`, `request_end`, and `decision_event`.
+
+## Cosmos Orchestrator (Current Contract)
+
+The planner is now remote-first when Cosmos is enabled:
+- No local semantic fallback is synthesized while remote is configured.
+- Until first remote decision arrives, behavior emits a neutral hold action.
+- Reasoning probe exists for diagnostics but is disabled by default in `config/robot.yaml`.
+
+Request shape to Cosmos:
+- `system` message is short: `You are a helpful assistant.`
+- `user.content` is media-first:
+  - zero or more `image_url` entries (rolling multi-frame window),
+  - one `text` entry containing policy blocks + output instructions.
+- Text contract asks for:
+  - `<think>...</think>` reasoning,
+  - JSON decision object after `</think>`.
+
+Decision context currently passed in user text:
+- `control_state` (active primitive/age + latest accepted decision),
+- `transcript_tail` (decision + reasoning lines only),
+- `frame_meta` (frames sent + frame age).
+
+Notes:
+- Local perception belief/summary packets are intentionally not sent to Cosmos right now.
+- Legacy memory config keys are kept for compatibility, but planner context is transcript-driven.
+- Parser accepts plain JSON, fenced JSON, and mixed `<think>` + JSON replies.
+- Proposed next-step layered memory design is documented in `docs/memory_architecture.md`.
+
+Debug files:
+- `logs/runtime_debug.log` (request lifecycle, parse failures, reasoning previews).
+- `logs/orchestrator_timeline.jsonl` (structured event stream for replay/analysis).

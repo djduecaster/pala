@@ -1,18 +1,96 @@
-# Telemetry Tools (Phase 1)
+# Telemetry Tools (V2)
 
 This directory contains sidecar telemetry tooling for live debugging and demos.
 It is intentionally separate from core runtime control/safety logic.
 
-## What Phase 1 Provides
+## V2 Shipment Overview
+- Signal packs for role-based debugging (`runtime_core`, `perception_debug`, `planner_debug`, `memory_debug`, `hardware_safety`, `cosmos_io`).
+- Field-level payload filtering (`--field-filter source.path<op>value` with `=`, `!=`, `<`, `>`, `~`).
+- Timeline and memory stream support:
+  - `logs/orchestrator_timeline.jsonl` (primary)
+  - `logs/orchestrator_memory.jsonl` (optional/legacy depending on planner mode)
+- Transport health and robustness improvements:
+  - warning coalescing
+  - stale stream reconnect
+  - worker crash reporting
+  - oversized frame guards
+- Reproducible session bundles:
+  - Agent-side capture (`--capture-dir`)
+  - Viewer-side local capture (`--save-session`)
+  - Offline replay (`--replay`)
+
+## Compatibility Notes
+- Existing Phase 1 commands still work (for example `--video-source tap` and text/video dashboard usage).
+- V2 adds optional controls; you can adopt incrementally by adding `--pack`, `--field-filter`, and capture/replay flags.
+
+## Architecture (V2)
+- Mac: `tools.telemetry.mac_viewer`
+  - Starts Jetson sidecar over SSH for live mode.
+  - Can run fully offline in replay mode (`--replay`).
+- Jetson: `tools.telemetry.jetson_agent`
+  - Tails log sources, reads optional video, emits NDJSON telemetry stream.
+- Runtime: unchanged core loops; telemetry remains optional and failure-isolated.
+
+## Core Signals
 - Mac-run live text dashboard plus optional live video window with overlays.
 - In-window 2D lamp command visualizer panel (joint angles + simplified lamp sketch).
 - Jetson streamed telemetry via SSH sidecar agent.
 - Inputs:
   - `logs/perception.jsonl`
   - `logs/actions.jsonl`
+  - `logs/orchestrator_timeline.jsonl` (primary planner lifecycle stream)
+  - `logs/orchestrator_memory.jsonl` (optional)
   - `tegrastats`
   - filtered `journalctl` lines
   - optional live frames from runtime preview tap (`logs/telemetry/preview/latest.jpg` + metadata)
+
+## Start Here (V2 Quickstart)
+1. On Jetson, run runtime:
+```bash
+cd ~/pala
+PALA_LOG_LEVEL=INFO uv run python -m pala.main
+```
+2. On Mac, run viewer with the default V2 pack:
+```bash
+cd /Users/djduecaster/development/pala
+UV_PYTHON=/opt/homebrew/bin/python3.10 uv run python -m tools.telemetry.mac_viewer --jetson-host jetson --pack runtime_core
+```
+3. Add targeted visibility as needed:
+```bash
+# Add planner + memory focus
+uv run python -m tools.telemetry.mac_viewer --pack runtime_core --pack planner_debug --pack memory_debug
+
+# Show only low-confidence planner actions
+uv run python -m tools.telemetry.mac_viewer --pack planner_debug --field-filter 'actions_log.data.confidence<0.5'
+```
+
+## Session Capture and Replay (V2)
+Capture on Mac (recommended for post-training prep):
+```bash
+uv run python -m tools.telemetry.mac_viewer \
+  --pack runtime_core --pack planner_debug --pack memory_debug \
+  --save-session logs/telemetry/session_001 \
+  --capture-frames keyframes
+```
+
+Replay locally:
+```bash
+uv run python -m tools.telemetry.mac_viewer --replay logs/telemetry/session_001 --replay-speed 1.0
+```
+
+Capture directly on Jetson sidecar:
+```bash
+uv run python -m tools.telemetry.jetson_agent \
+  --pack all \
+  --capture-dir logs/telemetry/session_jetson_001 \
+  --capture-frames keyframes
+```
+
+Bundle contents:
+- `manifest.json` (schema/version + metadata)
+- `events.jsonl` (telemetry stream)
+- `index.json` (frame index)
+- `frames/` (captured JPEG files when enabled)
 
 ## Prerequisites
 - Jetson host alias reachable from Mac (default host: `jetson`).
@@ -102,6 +180,12 @@ Example telemetry viewer on Mac:
 uv run python -m tools.telemetry.mac_viewer --jetson-host jetson
 ```
 
+List built-in signal packs:
+```bash
+uv run python -m tools.telemetry.mac_viewer --list-packs
+uv run python -m tools.telemetry.jetson_agent --list-packs
+```
+
 `jetson_dir` path notes:
 - Default is `~/pala` on the Jetson.
 - If you pass a local Mac absolute path like `/Users/.../pala`, the viewer remaps it to `~/pala` automatically.
@@ -114,6 +198,19 @@ uv run python -m tools.telemetry.mac_viewer --refresh-hz 2
 
 # Disable journal tailing
 uv run python -m tools.telemetry.mac_viewer --no-journal
+
+# Choose signal packs (repeatable)
+uv run python -m tools.telemetry.mac_viewer --pack runtime_core --pack memory_debug
+
+# Add field-level filters
+uv run python -m tools.telemetry.mac_viewer --field-filter 'actions_log.data.confidence<0.5'
+uv run python -m tools.telemetry.mac_viewer --field-filter 'timeline_log.data.type~(req_start|req_end)'
+
+# Timeline file path (primary orchestrator structured log)
+uv run python -m tools.telemetry.mac_viewer --timeline-log logs/orchestrator_timeline.jsonl
+
+# Optional legacy memory log (if your branch still emits it)
+uv run python -m tools.telemetry.mac_viewer --memory-log logs/orchestrator_memory.jsonl --timeline-log logs/orchestrator_timeline.jsonl
 
 # Disable tegrastats polling
 uv run python -m tools.telemetry.mac_viewer --no-tegrastats
@@ -141,6 +238,15 @@ uv run python -m tools.telemetry.mac_viewer --stale-timeout-s 8 --reconnect-dela
 
 # Tune warning coalescing / worker restart cadence
 uv run python -m tools.telemetry.mac_viewer --warning-throttle-s 3 --worker-restart-delay-s 1.0
+
+# Limit dashboard to selected panels
+uv run python -m tools.telemetry.mac_viewer --panel system --panel transport --panel logs
+
+# Save a local reproducible session bundle on Mac (events + optional frame refs)
+uv run python -m tools.telemetry.mac_viewer --save-session logs/telemetry/session_001 --capture-frames keyframes
+
+# Replay an existing local bundle
+uv run python -m tools.telemetry.mac_viewer --replay logs/telemetry/session_001 --replay-speed 1.5
 
 # The window is also mouse-resizable (drag edges/corners)
 
@@ -178,6 +284,11 @@ Then re-run telemetry viewer without `--no-video-window`.
   - Verify SSH alias is non-interactive (`BatchMode=yes` compatible).
   - Increase `--stale-timeout-s` to reduce aggressive stale reconnection.
   - Increase `--ssh-connect-timeout-s` if DNS/network setup is slow.
+- Memory/timeline panels show `no data yet`:
+  - Confirm timeline logging path in `config/robot.yaml` (`cosmos.orchestrator_timeline_jsonl_path`).
+  - Confirm timeline file exists on Jetson:
+    - `~/pala/logs/orchestrator_timeline.jsonl`
+  - `orchestrator_memory.jsonl` is optional/legacy and may be absent in transcript-only planner mode.
 - `Video: waiting for frames` with `--video-source tap`:
   - Ensure `pala.main` is running on Jetson.
   - Confirm `telemetry_preview.enabled: true` in `config/robot.yaml`.
@@ -209,4 +320,10 @@ uv run python -m tools.telemetry.jetson_agent --video-source gst --video-fps 6
 
 # Coalesce repeated warning spam and restart subprocess workers quickly
 uv run python -m tools.telemetry.jetson_agent --warning-throttle-s 3 --worker-restart-delay-s 1.0
+
+# Use packs + field filters directly on agent
+uv run python -m tools.telemetry.jetson_agent --pack runtime_core --pack planner_debug --field-filter 'actions_log.data.confidence<0.5'
+
+# Capture a reproducible bundle on Jetson side
+uv run python -m tools.telemetry.jetson_agent --pack all --capture-dir logs/telemetry/session_jetson_001 --capture-frames keyframes
 ```

@@ -381,9 +381,23 @@ def test_transcript_window_applies_role_and_char_caps():
         window = planner._build_transcript_window()
         assert len(window) <= 4
         assert sum(len(line) + 1 for line in window) <= 120
-        assert sum("observation:" in line for line in window) <= 2
+        assert all(("decision:" in line) or ("reasoning:" in line) for line in window)
     finally:
         planner.shutdown()
+
+
+def test_parse_decision_accepts_markdown_fenced_json():
+    content = (
+        "```json\n"
+        '{"target_state":"tracking","intent":"track_transition","style":"curious","primitive_hint":"orient_to_zone",'
+        '"target_zone":"right","allow_interrupt":true,"urgency":"medium","confidence":0.7,'
+        '"rationale":"follow movement"}\n'
+        "```"
+    )
+    decision = _parse_decision_content(content)
+    assert decision is not None
+    assert decision.intent == "track_transition"
+    assert decision.target_zone == "right"
 
 
 def test_inflight_guard_prevents_request_pileup(monkeypatch):
@@ -481,6 +495,7 @@ def test_timeline_writes_request_lifecycle(monkeypatch, tmp_path):
             time.sleep(0.02)
         rows = [json.loads(line) for line in timeline_path.read_text().splitlines() if line.strip()]
         kinds = {row.get("type") for row in rows}
+        assert "run_start" in kinds
         assert "request_start" in kinds
         assert "request_end" in kinds
         assert "decision_event" in kinds

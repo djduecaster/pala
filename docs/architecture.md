@@ -1,40 +1,66 @@
-# PALA Architecture (Scaffold)
+# PALA Architecture
 
-## Runtime Modes (Planned)
-- **dev**: fully dummy perception + dummy hardware; safe for Mac-only development.
-- **jetson_perception**: reserved for later; needs careful design to avoid confusing closed-loop behavior.
-- **jetson_full**: full Jetson perception + control + hardware actuation (near-term focus).
+## Runtime Modes
+- **dev**: dummy perception + dummy hardware, safe on Mac.
+- **jetson_perception**: camera/perception focused mode (still evolving).
+- **jetson_full**: full camera + planner + control + actuation on Jetson.
 
 ## Four-Loop Runtime
-1. **Perception Loop (15–30 Hz)**
-   - Reads from a `FrameSource` (dummy by default).
-   - Produces `PerceptionState` with normalized bbox and optional pointing target.
+1. **Perception Loop (15-30 Hz)**
+   - Reads from frame source.
+   - Runs detector.
+   - Publishes `PerceptionState`.
+   - Updates latest frame cache for remote planner image payloads.
 
-2. **Behavior Loop (2–5 Hz)**
-   - Consumes latest `PerceptionState`.
-   - Applies dwell + hysteresis on left/center/right zones.
-   - Emits `ActionPlan`.
+2. **Behavior Loop (2-5 Hz)**
+   - Calls planner and emits `ActionPlan`.
+   - If planner declares `owns_semantic_behavior=True` (Cosmos orchestrator), behavior layer does not add extra local semantic triggers.
 
-3. **Control Loop (50–100 Hz)**
-   - Converts typed `ActionPlan` commands → `HardwareCommand` via `TrajectoryExecutor`.
-   - Single active primitive with priority preemption and safety clamps.
+3. **Control Loop (50-100 Hz)**
+   - Converts `ActionPlan` to smoothed joint trajectories in `HardwareCommand`.
+   - Preserves last commanded joints unless new action changes target.
 
-4. **Hardware Loop (50–200 Hz)**
-   - Sends `HardwareCommand` to servo backend.
-   - Applies deadman timeout; disables on stale command.
+4. **Hardware Loop (50-200 Hz)**
+   - Applies `HardwareCommand` to servo backend.
+   - Enforces deadman timeout and safe disable on stale commands.
+
+## Planner Stack (Current)
+- **Heuristic planner**: local fallback when Cosmos is disabled.
+- **AsyncOrchestratorPlanner (Cosmos)**: remote-first semantic planner.
+  - Samples rolling frame window from latest-frame history.
+  - Builds media-first chat payload (images before user text).
+  - User text includes policy blocks, output contract, and compact context JSON.
+  - Expects `<think>...</think>` plus JSON decision payload.
+  - Parses plain JSON, fenced JSON, and mixed think+JSON responses.
+  - Converts canonical decision to core primitives (`hold`, `breath`, `glance`, `nod`, `orient_to_zone`).
+
+## Context Sent to Cosmos
+Current request context JSON includes:
+- `control_state` (active primitive, action age, latest accepted decision),
+- `transcript_tail` (recent `decision` and `reasoning` lines only),
+- `frame_meta` (frames sent and frame age).
+
+Current design intentionally does **not** send local semantic summaries (for example scene summary or belief packets) to remote planning.
+
+## Remote/Local Behavior Contract
+- If Cosmos is enabled and reachable, planner runs in remote-first mode.
+- No local semantic substitute decision is generated when a remote response fails parse/validation; system keeps prior action (or initial neutral hold).
+- Optional reasoning probe runs in a separate low-rate thread for diagnostics; default is disabled.
 
 ## Data Contracts
-- `PerceptionState`: timestamp(s), fps, latency, normalized bbox, optional pointing target.
-- `ActionPlan`: primitive kind, typed command payload, confidence, optional explanation.
-- `HardwareCommand`: timestamp + joint_angles_rad + enable flag.
+- `PerceptionState` -> planner input.
+- `ActionPlan` -> control input.
+- `HardwareCommand` -> hardware input.
 
-## Evaluation & Reproducibility
-- **Inputs**: camera frames (Jetson modes), config in `config/robot.yaml` plus optional `--mode` override at runtime.
-- **Outputs**: JSONL logs for perception/actions when a single logging flag is enabled.
-- **Optional outputs**: runtime telemetry preview tap (`telemetry_preview`) writes latest JPEG + metadata files for sidecar viewers.
-- **Steps**: run a mode, capture logs, and (optionally) replay or compare action outputs between runs.
+## Logging and Replay Artifacts
+- `logs/perception.jsonl`: perception loop output.
+- `logs/actions.jsonl`: behavior output actions.
+- `logs/runtime_debug.log`: request lifecycle, parse failures, reasoning previews.
+- `logs/orchestrator_timeline.jsonl`: structured orchestrator events:
+  - `run_start`, `request_start`, `request_end`, `reasoning_event`, `decision_event`, `fallback_event`.
+- `logs/telemetry/preview/latest.jpg` + `latest.json`: optional preview tap for sidecar telemetry tools.
 
-## Notes
-- Live preview/telemetry streaming is optional and may be enabled for debugging/demos, ideally as sidecar tooling.
-- Default runtime uses dummy hardware and perception, safe for Mac.
-- Jetson compatibility maintained via TODO stubs in hardware/perception.
+## Forward Plan: Memory Layers
+- Near-term planner remains transcript-first.
+- Future memory layering plan (spatial/environmental + short-term + long-term) is documented in:
+  - `docs/memory_architecture.md`

@@ -4,6 +4,7 @@ import argparse
 import base64
 import collections
 import io
+import os
 import queue
 import shlex
 import signal
@@ -25,8 +26,12 @@ try:
 except Exception:  # pragma: no cover - depends on Tk availability.
     tk = None
 
+from tools.telemetry.capture import CaptureConfig, SessionCaptureWriter
+from tools.telemetry.filters import matches_field_filters, parse_field_filters
+from tools.telemetry.packs import apply_pack_overrides, list_packs, resolve_packs
 from tools.telemetry.protocol import decode_message
 from tools.telemetry.lamp_viz import draw_lamp_panel
+from tools.telemetry.replay import SessionReplayReader
 
 
 def _resample_filter() -> int:
@@ -69,13 +74,18 @@ class DashboardState:
     host: str
     started_wall_s: float = field(default_factory=time.time)
     connected: bool = False
+    last_rx_wall_s: Optional[float] = None
     last_event_wall_s: Optional[float] = None
     connection_note: str = "starting"
     event_counts: Dict[str, int] = field(default_factory=dict)
     perception: Optional[Dict[str, Any]] = None
     action: Optional[Dict[str, Any]] = None
+    memory: Optional[Dict[str, Any]] = None
+    timeline: Optional[Dict[str, Any]] = None
     command: Optional[Dict[str, Any]] = None
     tegrastats: Optional[Dict[str, Any]] = None
+    transport: Optional[Dict[str, Any]] = None
+    capture_status: Optional[Dict[str, Any]] = None
     agent: Optional[Dict[str, Any]] = None
     logs: Deque[str] = field(default_factory=lambda: collections.deque(maxlen=12))
     warnings: Deque[str] = field(default_factory=lambda: collections.deque(maxlen=8))
@@ -111,6 +121,18 @@ class DashboardState:
                 self.action = data
             return
 
+        if source == "memory_log":
+            data = payload.get("data")
+            if isinstance(data, dict):
+                self.memory = data
+            return
+
+        if source == "timeline_log":
+            data = payload.get("data")
+            if isinstance(data, dict):
+                self.timeline = data
+            return
+
         if source == "command_log":
             data = payload.get("data")
             if isinstance(data, dict):
@@ -119,6 +141,19 @@ class DashboardState:
 
         if source == "tegrastats":
             self.tegrastats = payload
+            return
+
+        if source == "transport_stats":
+            self.transport = payload
+            return
+
+        if source == "capture_status":
+            self.capture_status = payload
+            status = payload.get("status")
+            if isinstance(status, str):
+                self.logs.append(f"capture: {status}")
+            if "error" in payload:
+                self.warnings.append(f"capture: {payload['error']}")
             return
 
         if source == "agent":
@@ -202,6 +237,10 @@ def _build_remote_agent_command(args: argparse.Namespace) -> str:
         str(args.perception_log),
         "--actions-log",
         str(args.actions_log),
+        "--memory-log",
+        str(args.memory_log),
+        "--timeline-log",
+        str(args.timeline_log),
         "--poll-ms",
         str(int(args.poll_ms)),
         "--heartbeat-s",
@@ -213,6 +252,12 @@ def _build_remote_agent_command(args: argparse.Namespace) -> str:
         "--worker-restart-delay-s",
         str(float(args.worker_restart_delay_s)),
     ]
+    for pack in args.pack:
+        agent_args.extend(["--pack", str(pack)])
+    for override in args.pack_override:
+        agent_args.extend(["--pack-override", str(override)])
+    for expr in args.field_filter:
+        agent_args.extend(["--field-filter", str(expr)])
 
     if args.from_start:
         agent_args.append("--from-start")
@@ -260,6 +305,20 @@ def _build_remote_agent_command(args: argparse.Namespace) -> str:
         )
         if args.video_pipeline:
             agent_args.extend(["--video-pipeline", str(args.video_pipeline)])
+
+    if args.agent_capture_dir:
+        agent_args.extend(
+            [
+                "--capture-dir",
+                str(args.agent_capture_dir),
+                "--capture-frames",
+                str(args.capture_frames),
+                "--capture-max-seconds",
+                str(float(args.capture_max_seconds)),
+                "--capture-manifest-version",
+                str(int(args.capture_manifest_version)),
+            ]
+        )
 
     agent_cmd = " ".join(shlex.quote(part) for part in agent_args)
 
@@ -345,6 +404,66 @@ def _reader_loop(
                     )
                 except queue.Full:
                     continue
+
+
+def _replay_loop(
+    *,
+    stop: threading.Event,
+    out_q: "queue.Queue[Dict[str, Any]]",
+    session_dir: str,
+    speed: float,
+    no_timing: bool,
+) -> None:
+    try:
+        reader = SessionReplayReader(session_dir)
+        if reader.manifest:
+            try:
+                out_q.put_nowait(
+                    {
+                        "type": "event",
+                        "source": "viewer_note",
+                        "payload": {
+                            "line": f"replay manifest schema_version={reader.manifest.get('schema_version')} "
+                            f"events={reader.manifest.get('event_count')}"
+                        },
+                    }
+                )
+            except queue.Full:
+                pass
+
+        scale = max(0.01, float(speed))
+        for msg, delay_s in reader.iter_events():
+            if stop.is_set():
+                break
+            if not no_timing and delay_s is not None and delay_s > 0.0:
+                stop.wait(delay_s / scale)
+                if stop.is_set():
+                    break
+            try:
+                out_q.put_nowait(msg)
+            except queue.Full:
+                continue
+        try:
+            out_q.put_nowait(
+                {
+                    "type": "event",
+                    "source": "viewer_note",
+                    "payload": {"line": "replay complete"},
+                }
+            )
+        except queue.Full:
+            pass
+    except Exception as exc:
+        try:
+            out_q.put_nowait(
+                {
+                    "type": "event",
+                    "source": "viewer_note",
+                    "payload": {"line": f"replay_error: {exc!r}"},
+                }
+            )
+        except queue.Full:
+            pass
 
 
 def _init_video_window(args: argparse.Namespace, state: DashboardState) -> Optional[_VideoWindow]:
@@ -568,126 +687,216 @@ def _pump_video_window(
     return window
 
 
+def _panel_enabled(args: argparse.Namespace, panel: str) -> bool:
+    selected = getattr(args, "panel", None)
+    if not selected:
+        return True
+    return panel in set(selected)
+
+
 def _render(state: DashboardState, *, now_wall_s: float, args: argparse.Namespace) -> str:
     lines = []
-    uptime = now_wall_s - state.started_wall_s
-    lines.append(
-        f"PALA Telemetry Phase 1 | host={state.host} | connected={state.connected} | uptime={uptime:.0f}s"
-    )
-    lines.append(
-        f"Last event age={_fmt_age(now_wall_s, state.last_event_wall_s)} | dropped(agent)={state.dropped_events_reported}"
-    )
-    lines.append(f"Last heartbeat age={_fmt_age(now_wall_s, state.last_agent_wall_s)}")
-    lines.append(f"Connection note: {state.connection_note}")
-    lines.append("")
-
-    lines.append("Video")
-    if args.no_video:
-        lines.append("  disabled")
-    elif state.video_frame_meta is None:
-        lines.append("  waiting for frames")
-    else:
-        meta = state.video_frame_meta
+    if _panel_enabled(args, "summary"):
+        uptime = now_wall_s - state.started_wall_s
+        mode = "replay" if args.replay else "live"
         lines.append(
-            "  "
-            f"frame_id={meta.get('frame_id')} size={meta.get('width')}x{meta.get('height')} "
-            f"age={_fmt_age(now_wall_s, state.last_video_wall_s)} received={state.video_frames_received} "
-            f"decode_errors={state.video_decode_errors} rejected={state.video_frames_rejected}"
+            f"PALA Telemetry | mode={mode} | host={state.host} | connected={state.connected} | uptime={uptime:.0f}s"
         )
-
-    lines.append("")
-    lines.append("Perception")
-    if state.perception is None:
-        lines.append("  no data yet")
-    else:
-        zone = None
-        debug = state.perception.get("debug")
-        if isinstance(debug, dict):
-            zone = debug.get("zone_hint")
-        person_conf = state.perception.get("primary_person_conf")
-        fps = state.perception.get("fps")
-        latency = state.perception.get("latency_ms")
         lines.append(
-            f"  fps={fps} latency_ms={latency} zone={zone} person_conf={person_conf}"
+            f"Last event age={_fmt_age(now_wall_s, state.last_event_wall_s)} | dropped(agent)={state.dropped_events_reported}"
         )
-
-    lines.append("")
-    lines.append("Action")
-    if state.action is None:
-        lines.append("  no data yet")
-    else:
-        primitive = state.action.get("primitive")
-        confidence = state.action.get("confidence")
-        explanation = state.action.get("explanation")
-        lines.append(f"  primitive={primitive} confidence={confidence}")
-        lines.append(f"  explanation={_shorten(str(explanation), 120)}")
-
-    lines.append("")
-    lines.append("Command")
-    if state.command is None:
-        lines.append("  no data yet")
-    else:
-        enabled = state.command.get("enable")
-        angles = state.command.get("joint_angles_rad")
-        names = state.command.get("joint_names")
-        if isinstance(angles, list) and isinstance(names, list) and names:
-            pairs = []
-            for i in range(min(len(names), len(angles))):
-                try:
-                    pairs.append(f"{names[i]}={float(angles[i]):+.2f}")
-                except (TypeError, ValueError):
-                    continue
-            lines.append(f"  enable={enabled} angles=[{', '.join(pairs[:6])}]")
-        else:
-            lines.append(f"  enable={enabled} angles={angles}")
-
-    lines.append("")
-    lines.append("System (tegrastats)")
-    if state.tegrastats is None:
-        lines.append("  no data yet")
-    else:
-        gpu = state.tegrastats.get("gpu_util_pct")
-        cpu = state.tegrastats.get("cpu_util_avg_pct")
-        ram_used = state.tegrastats.get("ram_used_mb")
-        ram_total = state.tegrastats.get("ram_total_mb")
-        temp_max = state.tegrastats.get("temp_max_c")
-        lines.append(
-            f"  cpu_avg_pct={cpu} gpu_pct={gpu} ram_mb={ram_used}/{ram_total} temp_max_c={temp_max}"
-        )
-
-    lines.append("")
-    lines.append("Recent Logs")
-    if state.logs:
-        for item in list(state.logs)[-args.max_log_lines :]:
-            lines.append(f"  {_shorten(item, 160)}")
-    else:
-        lines.append("  no journal matches yet")
-
-    if state.warnings:
+        lines.append(f"Last rx age={_fmt_age(now_wall_s, state.last_rx_wall_s)}")
+        lines.append(f"Last heartbeat age={_fmt_age(now_wall_s, state.last_agent_wall_s)}")
+        lines.append(f"Connection note: {state.connection_note}")
+        if args.pack:
+            lines.append(f"Packs: {', '.join(args.pack)}")
+        if args.field_filter:
+            lines.append(f"Field filters: {', '.join(args.field_filter)}")
         lines.append("")
+
+    if _panel_enabled(args, "video"):
+        lines.append("Video")
+        if args.no_video:
+            lines.append("  disabled")
+        elif state.video_frame_meta is None:
+            lines.append("  waiting for frames")
+        else:
+            meta = state.video_frame_meta
+            lines.append(
+                "  "
+                f"frame_id={meta.get('frame_id')} size={meta.get('width')}x{meta.get('height')} "
+                f"age={_fmt_age(now_wall_s, state.last_video_wall_s)} received={state.video_frames_received} "
+                f"decode_errors={state.video_decode_errors} rejected={state.video_frames_rejected}"
+            )
+        lines.append("")
+
+    if _panel_enabled(args, "perception"):
+        lines.append("Perception")
+        if state.perception is None:
+            lines.append("  no data yet")
+        else:
+            zone = None
+            debug = state.perception.get("debug")
+            if isinstance(debug, dict):
+                zone = debug.get("zone_hint")
+            person_conf = state.perception.get("primary_person_conf")
+            fps = state.perception.get("fps")
+            latency = state.perception.get("latency_ms")
+            lines.append(
+                f"  fps={fps} latency_ms={latency} zone={zone} person_conf={person_conf}"
+            )
+        lines.append("")
+
+    if _panel_enabled(args, "action"):
+        lines.append("Action")
+        if state.action is None:
+            lines.append("  no data yet")
+        else:
+            primitive = state.action.get("primitive")
+            confidence = state.action.get("confidence")
+            explanation = state.action.get("explanation")
+            lines.append(f"  primitive={primitive} confidence={confidence}")
+            lines.append(f"  explanation={_shorten(str(explanation), 120)}")
+        lines.append("")
+
+    if _panel_enabled(args, "command"):
+        lines.append("Command")
+        if state.command is None:
+            lines.append("  no data yet")
+        else:
+            enabled = state.command.get("enable")
+            angles = state.command.get("joint_angles_rad")
+            names = state.command.get("joint_names")
+            if isinstance(angles, list) and isinstance(names, list) and names:
+                pairs = []
+                for i in range(min(len(names), len(angles))):
+                    try:
+                        pairs.append(f"{names[i]}={float(angles[i]):+.2f}")
+                    except (TypeError, ValueError):
+                        continue
+                lines.append(f"  enable={enabled} angles=[{', '.join(pairs[:6])}]")
+            else:
+                lines.append(f"  enable={enabled} angles={angles}")
+        lines.append("")
+
+    if _panel_enabled(args, "system"):
+        lines.append("System (tegrastats)")
+        if state.tegrastats is None:
+            lines.append("  no data yet")
+        else:
+            gpu = state.tegrastats.get("gpu_util_pct")
+            cpu = state.tegrastats.get("cpu_util_avg_pct")
+            ram_used = state.tegrastats.get("ram_used_mb")
+            ram_total = state.tegrastats.get("ram_total_mb")
+            temp_max = state.tegrastats.get("temp_max_c")
+            lines.append(
+                f"  cpu_avg_pct={cpu} gpu_pct={gpu} ram_mb={ram_used}/{ram_total} temp_max_c={temp_max}"
+            )
+        lines.append("")
+
+    if _panel_enabled(args, "memory"):
+        lines.append("Memory")
+        if state.memory is None:
+            lines.append("  no data yet")
+        else:
+            lines.append(
+                f"  type={state.memory.get('type')} ts_wall_s={state.memory.get('ts_wall_s')}"
+            )
+            payload = state.memory.get("payload")
+            if isinstance(payload, dict):
+                highlights = payload.get("highlights")
+                if isinstance(highlights, list):
+                    lines.append(f"  highlights={_shorten(', '.join(str(x) for x in highlights), 140)}")
+        lines.append("")
+
+    if _panel_enabled(args, "timeline"):
+        lines.append("Timeline")
+        if state.timeline is None:
+            lines.append("  no data yet")
+        else:
+            lines.append(
+                f"  type={state.timeline.get('type')} ts_wall_s={state.timeline.get('ts_wall_s')} "
+                f"ts_mono_s={state.timeline.get('ts_mono_s')}"
+            )
+            payload = state.timeline.get("payload")
+            if isinstance(payload, dict):
+                lines.append(f"  payload_keys={','.join(sorted(payload.keys())[:8])}")
+        lines.append("")
+
+    if _panel_enabled(args, "transport"):
+        lines.append("Transport")
+        if state.transport is None:
+            lines.append("  no data yet")
+        else:
+            lines.append(
+                f"  queue_depth={state.transport.get('queue_depth')} "
+                f"queue_capacity={state.transport.get('queue_capacity')} "
+                f"dropped={state.transport.get('dropped_events')}"
+            )
+        if state.capture_status is not None:
+            lines.append(
+                f"  capture_status={state.capture_status.get('status')} "
+                f"capture_dir={state.capture_status.get('capture_dir')}"
+            )
+        lines.append("")
+
+    if _panel_enabled(args, "logs"):
+        lines.append("Recent Logs")
+        if state.logs:
+            for item in list(state.logs)[-args.max_log_lines :]:
+                lines.append(f"  {_shorten(item, 160)}")
+        else:
+            lines.append("  no journal matches yet")
+        lines.append("")
+
+    if _panel_enabled(args, "warnings") and state.warnings:
         lines.append("Warnings")
         for item in state.warnings:
             lines.append(f"  {_shorten(item, 160)}")
+        lines.append("")
 
-    lines.append("")
-    lines.append("Event Counts")
-    if not state.event_counts:
-        lines.append("  no events yet")
-    else:
-        for source in sorted(state.event_counts):
-            lines.append(f"  {source}: {state.event_counts[source]}")
+    if _panel_enabled(args, "events"):
+        lines.append("Event Counts")
+        if not state.event_counts:
+            lines.append("  no events yet")
+        else:
+            for source in sorted(state.event_counts):
+                lines.append(f"  {source}: {state.event_counts[source]}")
+        lines.append("")
 
-    lines.append("")
     lines.append("Exit: Ctrl-C")
     return "\n".join(lines)
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Mac-side telemetry dashboard for PALA.")
+    parser.add_argument("--list-packs", action="store_true", help="List built-in signal packs and exit.")
+    parser.add_argument("--pack", action="append", default=[], help="Signal pack to enable (repeatable).")
+    parser.add_argument(
+        "--pack-override",
+        action="append",
+        default=[],
+        help="Pack override key=value (forwarded to agent).",
+    )
+    parser.add_argument(
+        "--field-filter",
+        action="append",
+        default=[],
+        help="Field predicate source.path<op>value where op in =,!=,<,>,~.",
+    )
+    parser.add_argument(
+        "--panel",
+        action="append",
+        default=[],
+        choices=["summary", "video", "perception", "action", "command", "system", "memory", "timeline", "transport", "logs", "warnings", "events"],
+        help="Restrict visible dashboard panels (repeatable). Default derives from active packs.",
+    )
     parser.add_argument("--jetson-host", default="jetson")
     parser.add_argument("--jetson-dir", default="~/pala")
     parser.add_argument("--perception-log", default="logs/perception.jsonl")
     parser.add_argument("--actions-log", default="logs/actions.jsonl")
+    parser.add_argument("--memory-log", default="logs/orchestrator_memory.jsonl")
+    parser.add_argument("--timeline-log", default="logs/orchestrator_timeline.jsonl")
     parser.add_argument("--poll-ms", type=int, default=200)
     parser.add_argument("--from-start", action="store_true")
     parser.add_argument("--heartbeat-s", type=float, default=1.0)
@@ -729,15 +938,45 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reconnect-max-delay-s", type=float, default=15.0)
     parser.add_argument("--stale-timeout-s", type=float, default=10.0)
     parser.add_argument("--ssh-connect-timeout-s", type=float, default=5.0)
+    parser.add_argument("--agent-capture-dir", default="", help="Remote capture directory on Jetson for agent-side capture.")
+    parser.add_argument("--capture-frames", choices=["off", "keyframes", "all"], default="off")
+    parser.add_argument("--capture-max-seconds", type=float, default=0.0)
+    parser.add_argument("--capture-manifest-version", type=int, default=1)
+    parser.add_argument("--save-session", default="", help="Local capture directory on Mac for viewer-side session bundle.")
+    parser.add_argument("--replay", default="", help="Replay an existing local capture directory instead of SSH live mode.")
+    parser.add_argument("--replay-speed", type=float, default=1.0)
+    parser.add_argument("--replay-no-timing", action="store_true")
     parser.add_argument("--max-log-lines", type=int, default=8)
     return parser
 
 
 def main() -> int:
-    args = _build_parser().parse_args()
+    parser = _build_parser()
+    args = parser.parse_args()
+    if args.list_packs:
+        for pack in list_packs():
+            print(f"{pack.name}: {pack.description}")
+        return 0
+    if not args.pack:
+        args.pack = ["runtime_core"]
+    try:
+        resolved_packs = resolve_packs(args.pack)
+        resolved_packs = apply_pack_overrides(resolved_packs, args.pack_override)
+    except ValueError as exc:
+        parser.error(str(exc))
+    if not args.panel:
+        args.panel = sorted(set(resolved_packs.panels) | {"summary"})
+    try:
+        field_filters = parse_field_filters(args.field_filter)
+    except ValueError as exc:
+        parser.error(str(exc))
+
     stop = threading.Event()
-    mapped_dir, map_note = _normalize_jetson_dir(args.jetson_dir)
-    args.jetson_dir = mapped_dir
+    replay_mode = bool(str(args.replay or "").strip())
+    map_note: Optional[str] = None
+    if not replay_mode:
+        mapped_dir, map_note = _normalize_jetson_dir(args.jetson_dir)
+        args.jetson_dir = mapped_dir
 
     def _stop_handler(_sig, _frame) -> None:
         stop.set()
@@ -753,6 +992,7 @@ def main() -> int:
     proc: Optional[subprocess.Popen[str]] = None
     proc_started_wall_s: Optional[float] = None
     reader_thread: Optional[threading.Thread] = None
+    replay_thread: Optional[threading.Thread] = None
     next_connect_time = 0.0
     reconnect_attempt = 0
     reconnect_base_s = max(0.5, float(args.reconnect_delay_s))
@@ -761,6 +1001,26 @@ def main() -> int:
     stale_timeout_s = max(2.0, float(args.stale_timeout_s))
     refresh_s = 1.0 / max(1.0, float(args.refresh_hz))
     last_draw = 0.0
+    capture_writer: Optional[SessionCaptureWriter] = None
+    save_session_dir = str(args.save_session or "").strip()
+    if save_session_dir:
+        cfg = CaptureConfig(
+            directory=save_session_dir,
+            frames_mode=args.capture_frames,
+            max_seconds=max(0.0, float(args.capture_max_seconds)),
+            manifest_version=int(args.capture_manifest_version),
+            metadata={
+                "mode": "replay" if replay_mode else "live",
+                "packs": list(args.pack),
+                "field_filters": list(args.field_filter),
+            },
+        )
+        try:
+            capture_writer = SessionCaptureWriter(cfg)
+            state.logs.append(f"local capture started: {save_session_dir}")
+        except Exception as exc:
+            capture_writer = None
+            state.warnings.append(f"local capture init failed: {exc!r}")
 
     def _schedule_reconnect(reason: str) -> None:
         nonlocal next_connect_time, reconnect_attempt
@@ -771,10 +1031,29 @@ def main() -> int:
 
     video_window = _init_video_window(args, state)
 
+    if replay_mode:
+        replay_dir = str(args.replay).strip()
+        if not os.path.isdir(replay_dir):
+            parser.error(f"replay directory not found: {replay_dir}")
+        state.connected = True
+        state.connection_note = f"replay from {replay_dir}"
+        replay_thread = threading.Thread(
+            target=_replay_loop,
+            kwargs={
+                "stop": stop,
+                "out_q": in_q,
+                "session_dir": replay_dir,
+                "speed": max(0.01, float(args.replay_speed)),
+                "no_timing": bool(args.replay_no_timing),
+            },
+            daemon=True,
+        )
+        replay_thread.start()
+
     while not stop.is_set():
         now = time.time()
 
-        if proc is None and now >= next_connect_time:
+        if (not replay_mode) and proc is None and now >= next_connect_time:
             state.connection_note = "connecting via ssh"
             try:
                 proc = _start_ssh_agent(args)
@@ -810,10 +1089,19 @@ def main() -> int:
                             state.warnings.append(text)
                         state.logs.append(text)
                 continue
+            state.last_rx_wall_s = time.time()
+            if not matches_field_filters(msg, field_filters):
+                continue
             state.apply(msg)
+            if capture_writer is not None:
+                keep_writing = capture_writer.write(msg)
+                if not keep_writing:
+                    capture_writer.close()
+                    capture_writer = None
+                    state.logs.append("local capture stopped: max_seconds_elapsed")
 
-        if proc is not None and proc.poll() is None:
-            stale_ref_s = state.last_event_wall_s
+        if (not replay_mode) and proc is not None and proc.poll() is None:
+            stale_ref_s = state.last_rx_wall_s
             if stale_ref_s is None:
                 stale_ref_s = proc_started_wall_s
             stale_age = None if stale_ref_s is None else (now - stale_ref_s)
@@ -833,7 +1121,7 @@ def main() -> int:
                 _schedule_reconnect("reconnecting after stale stream")
 
         # Handle process exit / reconnect.
-        if proc is not None and proc.poll() is not None:
+        if (not replay_mode) and proc is not None and proc.poll() is not None:
             state.connected = False
             exit_code = proc.returncode
             proc = None
@@ -842,6 +1130,9 @@ def main() -> int:
                 reader_thread.join(timeout=1.0)
                 reader_thread = None
             _schedule_reconnect(f"disconnected (exit={exit_code})")
+
+        if replay_mode and replay_thread is not None and not replay_thread.is_alive() and in_q.empty():
+            stop.set()
 
         video_window = _pump_video_window(video_window, state, args)
 
@@ -857,6 +1148,10 @@ def main() -> int:
 
     if reader_thread is not None:
         reader_thread.join(timeout=1.0)
+    if replay_thread is not None:
+        replay_thread.join(timeout=1.0)
+    if capture_writer is not None:
+        capture_writer.close()
 
     if video_window is not None:
         try:
