@@ -133,6 +133,15 @@ uv run python -m tools.telemetry.mac_viewer --video-source gst
 # Resize video stream and preview
 uv run python -m tools.telemetry.mac_viewer --video-max-width 480 --video-max-height 270 --video-window-scale 1.2
 
+# Tighten frame size limits (agent output + viewer decode guard)
+uv run python -m tools.telemetry.mac_viewer --video-max-bytes 500000 --max-frame-bytes 1200000
+
+# Reconnect more aggressively on stale streams
+uv run python -m tools.telemetry.mac_viewer --stale-timeout-s 8 --reconnect-delay-s 1 --reconnect-backoff 1.4 --reconnect-max-delay-s 10
+
+# Tune warning coalescing / worker restart cadence
+uv run python -m tools.telemetry.mac_viewer --warning-throttle-s 3 --worker-restart-delay-s 1.0
+
 # The window is also mouse-resizable (drag edges/corners)
 
 # Disable the 2D lamp panel if needed
@@ -165,6 +174,10 @@ Then re-run telemetry viewer without `--no-video-window`.
 - `connected=False`:
   - Check SSH host and key access.
   - Verify `--jetson-dir` points to the repo on Jetson.
+- Frequent disconnect/reconnect loops:
+  - Verify SSH alias is non-interactive (`BatchMode=yes` compatible).
+  - Increase `--stale-timeout-s` to reduce aggressive stale reconnection.
+  - Increase `--ssh-connect-timeout-s` if DNS/network setup is slow.
 - `Video: waiting for frames` with `--video-source tap`:
   - Ensure `pala.main` is running on Jetson.
   - Confirm `telemetry_preview.enabled: true` in `config/robot.yaml`.
@@ -193,4 +206,7 @@ uv run python -m tools.telemetry.jetson_agent --video-source tap --video-fps 6
 
 # Direct camera capture mode (single-consumer; may conflict with runtime camera owner)
 uv run python -m tools.telemetry.jetson_agent --video-source gst --video-fps 6
+
+# Coalesce repeated warning spam and restart subprocess workers quickly
+uv run python -m tools.telemetry.jetson_agent --warning-throttle-s 3 --worker-restart-delay-s 1.0
 ```

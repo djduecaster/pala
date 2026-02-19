@@ -85,7 +85,10 @@ class DashboardState:
     video_frame_meta: Optional[Dict[str, Any]] = None
     video_frames_received: int = 0
     video_decode_errors: int = 0
+    video_frames_rejected: int = 0
     last_video_wall_s: Optional[float] = None
+    last_agent_wall_s: Optional[float] = None
+    max_frame_bytes: int = 2_000_000
 
     def apply(self, msg: Dict[str, Any]) -> None:
         source = str(msg.get("source", "unknown"))
@@ -120,6 +123,7 @@ class DashboardState:
 
         if source == "agent":
             self.agent = payload
+            self.last_agent_wall_s = time.time()
             dropped = payload.get("dropped_events")
             if isinstance(dropped, int):
                 self.dropped_events_reported = dropped
@@ -139,11 +143,21 @@ class DashboardState:
                 self.video_decode_errors += 1
                 self.warnings.append("video_frame: missing bytes_b64")
                 return
+            max_bytes = max(0, int(self.max_frame_bytes))
+            est_bytes = (len(frame_b64) * 3) // 4
+            if max_bytes > 0 and est_bytes > max_bytes:
+                self.video_frames_rejected += 1
+                self.warnings.append(f"video_frame: rejected oversized payload est={est_bytes}B")
+                return
             try:
                 frame_bytes = base64.b64decode(frame_b64, validate=True)
             except Exception:
                 self.video_decode_errors += 1
                 self.warnings.append("video_frame: invalid base64")
+                return
+            if max_bytes > 0 and len(frame_bytes) > max_bytes:
+                self.video_frames_rejected += 1
+                self.warnings.append(f"video_frame: rejected oversized frame bytes={len(frame_bytes)}")
                 return
             meta = dict(payload)
             meta.pop("bytes_b64", None)
@@ -194,6 +208,10 @@ def _build_remote_agent_command(args: argparse.Namespace) -> str:
         str(float(args.heartbeat_s)),
         "--queue-size",
         str(int(args.queue_size)),
+        "--warning-throttle-s",
+        str(float(args.warning_throttle_s)),
+        "--worker-restart-delay-s",
+        str(float(args.worker_restart_delay_s)),
     ]
 
     if args.from_start:
@@ -230,6 +248,10 @@ def _build_remote_agent_command(args: argparse.Namespace) -> str:
                 str(int(args.video_max_height)),
                 "--video-jpeg-quality",
                 str(int(args.video_jpeg_quality)),
+                "--video-max-bytes",
+                str(int(args.video_max_bytes)),
+                "--video-wait-warn-s",
+                str(float(args.video_wait_warn_s)),
                 "--video-tap-jpeg",
                 str(args.video_tap_jpeg),
                 "--video-tap-meta",
@@ -261,12 +283,36 @@ def _build_remote_agent_command(args: argparse.Namespace) -> str:
 def _start_ssh_agent(args: argparse.Namespace) -> subprocess.Popen[str]:
     remote_cmd = _build_remote_agent_command(args)
     return subprocess.Popen(
-        ["ssh", "-T", args.jetson_host, remote_cmd],
+        [
+            "ssh",
+            "-T",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            f"ConnectTimeout={max(1, int(args.ssh_connect_timeout_s))}",
+            "-o",
+            "ServerAliveInterval=5",
+            "-o",
+            "ServerAliveCountMax=3",
+            args.jetson_host,
+            remote_cmd,
+        ],
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
+        start_new_session=True,
     )
+
+
+def _stop_process(proc: subprocess.Popen[str], *, grace_s: float = 1.0) -> None:
+    if proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=max(0.2, float(grace_s)))
+    except subprocess.TimeoutExpired:
+        proc.kill()
 
 
 def _reader_loop(
@@ -289,13 +335,16 @@ def _reader_loop(
         else:
             text = line.strip()
             if text:
-                out_q.put(
-                    {
-                        "type": "event",
-                        "source": "viewer_note",
-                        "payload": {"line": text},
-                    }
-                )
+                try:
+                    out_q.put_nowait(
+                        {
+                            "type": "event",
+                            "source": "viewer_note",
+                            "payload": {"line": _shorten(text, 200)},
+                        }
+                    )
+                except queue.Full:
+                    continue
 
 
 def _init_video_window(args: argparse.Namespace, state: DashboardState) -> Optional[_VideoWindow]:
@@ -457,7 +506,12 @@ def _pump_video_window(
     try:
         window.root.update_idletasks()
         window.root.update()
-    except Exception:
+    except Exception as exc:
+        state.warnings.append(f"video_window_closed: {_shorten(str(exc), 120)}")
+        try:
+            window.root.destroy()
+        except Exception:
+            pass
         return None
 
     meta = state.video_frame_meta
@@ -523,6 +577,7 @@ def _render(state: DashboardState, *, now_wall_s: float, args: argparse.Namespac
     lines.append(
         f"Last event age={_fmt_age(now_wall_s, state.last_event_wall_s)} | dropped(agent)={state.dropped_events_reported}"
     )
+    lines.append(f"Last heartbeat age={_fmt_age(now_wall_s, state.last_agent_wall_s)}")
     lines.append(f"Connection note: {state.connection_note}")
     lines.append("")
 
@@ -537,7 +592,7 @@ def _render(state: DashboardState, *, now_wall_s: float, args: argparse.Namespac
             "  "
             f"frame_id={meta.get('frame_id')} size={meta.get('width')}x{meta.get('height')} "
             f"age={_fmt_age(now_wall_s, state.last_video_wall_s)} received={state.video_frames_received} "
-            f"decode_errors={state.video_decode_errors}"
+            f"decode_errors={state.video_decode_errors} rejected={state.video_frames_rejected}"
         )
 
     lines.append("")
@@ -636,7 +691,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--poll-ms", type=int, default=200)
     parser.add_argument("--from-start", action="store_true")
     parser.add_argument("--heartbeat-s", type=float, default=1.0)
-    parser.add_argument("--queue-size", type=int, default=4096)
+    parser.add_argument("--queue-size", type=int, default=1024)
+    parser.add_argument("--warning-throttle-s", type=float, default=2.0)
+    parser.add_argument("--worker-restart-delay-s", type=float, default=1.0)
     parser.add_argument("--no-tegrastats", action="store_true")
     parser.add_argument("--tegrastats-interval-ms", type=int, default=1000)
     parser.add_argument("--no-journal", action="store_true")
@@ -655,9 +712,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--video-max-width", type=int, default=640)
     parser.add_argument("--video-max-height", type=int, default=360)
     parser.add_argument("--video-jpeg-quality", type=int, default=70)
+    parser.add_argument("--video-max-bytes", type=int, default=700_000)
+    parser.add_argument("--video-wait-warn-s", type=float, default=5.0)
     parser.add_argument("--video-tap-jpeg", default="logs/telemetry/preview/latest.jpg")
     parser.add_argument("--video-tap-meta", default="logs/telemetry/preview/latest.json")
     parser.add_argument("--video-pipeline", default="")
+    parser.add_argument("--max-frame-bytes", type=int, default=2_000_000)
     parser.add_argument("--no-video-window", action="store_true")
     parser.add_argument("--video-window-scale", type=float, default=1.0)
     parser.add_argument("--no-lamp-panel", action="store_true")
@@ -665,6 +725,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--refresh-hz", type=float, default=4.0)
     parser.add_argument("--reconnect-delay-s", type=float, default=2.0)
+    parser.add_argument("--reconnect-backoff", type=float, default=1.6)
+    parser.add_argument("--reconnect-max-delay-s", type=float, default=15.0)
+    parser.add_argument("--stale-timeout-s", type=float, default=10.0)
+    parser.add_argument("--ssh-connect-timeout-s", type=float, default=5.0)
     parser.add_argument("--max-log-lines", type=int, default=8)
     return parser
 
@@ -681,16 +745,29 @@ def main() -> int:
     signal.signal(signal.SIGINT, _stop_handler)
     signal.signal(signal.SIGTERM, _stop_handler)
 
-    state = DashboardState(host=args.jetson_host)
+    state = DashboardState(host=args.jetson_host, max_frame_bytes=max(0, int(args.max_frame_bytes)))
     if map_note:
         state.logs.append(map_note)
     in_q: "queue.Queue[Dict[str, Any]]" = queue.Queue(maxsize=max(256, int(args.queue_size)))
 
     proc: Optional[subprocess.Popen[str]] = None
+    proc_started_wall_s: Optional[float] = None
     reader_thread: Optional[threading.Thread] = None
     next_connect_time = 0.0
+    reconnect_attempt = 0
+    reconnect_base_s = max(0.5, float(args.reconnect_delay_s))
+    reconnect_backoff = max(1.0, float(args.reconnect_backoff))
+    reconnect_max_s = max(reconnect_base_s, float(args.reconnect_max_delay_s))
+    stale_timeout_s = max(2.0, float(args.stale_timeout_s))
     refresh_s = 1.0 / max(1.0, float(args.refresh_hz))
     last_draw = 0.0
+
+    def _schedule_reconnect(reason: str) -> None:
+        nonlocal next_connect_time, reconnect_attempt
+        reconnect_attempt += 1
+        delay = min(reconnect_max_s, reconnect_base_s * (reconnect_backoff ** (reconnect_attempt - 1)))
+        next_connect_time = time.time() + delay
+        state.connection_note = f"{reason}; retry in {delay:.1f}s"
 
     video_window = _init_video_window(args, state)
 
@@ -703,11 +780,12 @@ def main() -> int:
                 proc = _start_ssh_agent(args)
             except OSError as exc:
                 state.connected = False
-                state.connection_note = f"ssh start failed: {exc!r}"
-                next_connect_time = now + max(1.0, float(args.reconnect_delay_s))
+                _schedule_reconnect(f"ssh start failed: {exc!r}")
             else:
                 state.connected = True
-                state.connection_note = "connected"
+                reconnect_attempt = 0
+                state.connection_note = "connected (awaiting events)"
+                proc_started_wall_s = time.time()
                 reader_thread = threading.Thread(
                     target=_reader_loop,
                     kwargs={"stop": stop, "proc": proc, "out_q": in_q},
@@ -728,16 +806,42 @@ def main() -> int:
                 if isinstance(payload, dict):
                     text = payload.get("line")
                     if isinstance(text, str):
+                        if text.startswith("telemetry_agent_error:"):
+                            state.warnings.append(text)
                         state.logs.append(text)
                 continue
             state.apply(msg)
 
+        if proc is not None and proc.poll() is None:
+            stale_ref_s = state.last_event_wall_s
+            if stale_ref_s is None:
+                stale_ref_s = proc_started_wall_s
+            stale_age = None if stale_ref_s is None else (now - stale_ref_s)
+            if stale_age is None:
+                pass
+            elif stale_age <= stale_timeout_s:
+                pass
+            else:
+                state.warnings.append(f"stream stale for {stale_age:.1f}s; reconnecting")
+                _stop_process(proc, grace_s=0.8)
+                proc = None
+                proc_started_wall_s = None
+                state.connected = False
+                if reader_thread is not None:
+                    reader_thread.join(timeout=1.0)
+                    reader_thread = None
+                _schedule_reconnect("reconnecting after stale stream")
+
         # Handle process exit / reconnect.
         if proc is not None and proc.poll() is not None:
             state.connected = False
-            state.connection_note = f"disconnected (exit={proc.returncode})"
+            exit_code = proc.returncode
             proc = None
-            next_connect_time = time.time() + max(0.5, float(args.reconnect_delay_s))
+            proc_started_wall_s = None
+            if reader_thread is not None:
+                reader_thread.join(timeout=1.0)
+                reader_thread = None
+            _schedule_reconnect(f"disconnected (exit={exit_code})")
 
         video_window = _pump_video_window(video_window, state, args)
 
@@ -749,11 +853,7 @@ def main() -> int:
         stop.wait(0.05)
 
     if proc is not None and proc.poll() is None:
-        proc.terminate()
-        try:
-            proc.wait(timeout=1.0)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+        _stop_process(proc, grace_s=1.0)
 
     if reader_thread is not None:
         reader_thread.join(timeout=1.0)

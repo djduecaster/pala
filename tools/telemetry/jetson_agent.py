@@ -34,6 +34,27 @@ class DropCounter:
             return self._value
 
 
+class WarningLimiter:
+    """Coalesce repeated warning events to avoid flooding the stream."""
+
+    def __init__(self, min_interval_s: float) -> None:
+        self._min_interval_s = max(0.1, float(min_interval_s))
+        self._lock = threading.Lock()
+        self._last_emit_s: Dict[str, float] = {}
+        self._suppressed: Dict[str, int] = {}
+
+    def acquire(self, key: str) -> Optional[int]:
+        now = time.monotonic()
+        with self._lock:
+            last = self._last_emit_s.get(key)
+            if last is None or (now - last) >= self._min_interval_s:
+                self._last_emit_s[key] = now
+                suppressed = self._suppressed.pop(key, 0)
+                return suppressed
+            self._suppressed[key] = self._suppressed.get(key, 0) + 1
+            return None
+
+
 class _VideoSource(Protocol):
     def get_frame(self) -> tuple[np.ndarray, Optional[int], int]:
         ...
@@ -177,6 +198,30 @@ def _emit(
         drops.inc()
 
 
+def _emit_warning_limited(
+    *,
+    out_q: "queue.Queue[Dict[str, Any]]",
+    drops: DropCounter,
+    source: str,
+    payload: Dict[str, Any],
+    limiter: WarningLimiter,
+    key: str,
+) -> None:
+    suppressed = limiter.acquire(key)
+    if suppressed is None:
+        return
+    out = dict(payload)
+    if suppressed > 0:
+        out["suppressed"] = suppressed
+    _emit(out_q, drops, source, out, level="warning")
+
+
+def _truncate(text: str, max_len: int = 240) -> str:
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 3] + "..."
+
+
 def _parse_json_line(line: str) -> Optional[Dict[str, Any]]:
     text = line.strip()
     if not text:
@@ -199,9 +244,11 @@ def _tail_jsonl_file(
     path: str,
     poll_s: float,
     start_at_end: bool,
+    warning_interval_s: float,
 ) -> None:
     fh = None
     inode_key = None
+    warning_limiter = WarningLimiter(min_interval_s=warning_interval_s)
 
     while not stop.is_set():
         if fh is None:
@@ -223,12 +270,17 @@ def _tail_jsonl_file(
         if line:
             parsed = _parse_json_line(line)
             if parsed is None:
-                _emit(
-                    out_q,
-                    drops,
-                    source,
-                    {"path": path, "raw_line": line.strip(), "parse_error": "invalid_json_line"},
-                    level="warning",
+                _emit_warning_limited(
+                    out_q=out_q,
+                    drops=drops,
+                    source=source,
+                    payload={
+                        "path": path,
+                        "raw_line": _truncate(line.strip()),
+                        "parse_error": "invalid_json_line",
+                    },
+                    limiter=warning_limiter,
+                    key=f"{source}:invalid_json_line",
                 )
             else:
                 _emit(out_q, drops, source, {"path": path, "data": parsed})
@@ -311,41 +363,73 @@ def _run_tegrastats(
     out_q: "queue.Queue[Dict[str, Any]]",
     drops: DropCounter,
     interval_ms: int,
+    restart_delay_s: float,
+    warning_interval_s: float,
 ) -> None:
     cmd = ["tegrastats", "--interval", str(interval_ms)]
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
-    except FileNotFoundError:
-        _emit(out_q, drops, "tegrastats", {"error": "command_not_found"}, level="warning")
-        return
-    except OSError as exc:
-        _emit(out_q, drops, "tegrastats", {"error": repr(exc)}, level="warning")
-        return
+    warning_limiter = WarningLimiter(min_interval_s=warning_interval_s)
 
-    try:
-        assert proc.stdout is not None
-        while not stop.is_set():
-            line = proc.stdout.readline()
-            if line == "":
-                if proc.poll() is not None:
-                    break
-                time.sleep(0.1)
-                continue
-            payload = _parse_tegrastats(line)
-            _emit(out_q, drops, "tegrastats", payload)
-    finally:
-        if proc.poll() is None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=1.0)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+    while not stop.is_set():
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+        except FileNotFoundError:
+            _emit_warning_limited(
+                out_q=out_q,
+                drops=drops,
+                source="tegrastats",
+                payload={"error": "command_not_found"},
+                limiter=warning_limiter,
+                key="tegrastats:command_not_found",
+            )
+            return
+        except OSError as exc:
+            _emit_warning_limited(
+                out_q=out_q,
+                drops=drops,
+                source="tegrastats",
+                payload={"error": f"spawn_failed: {exc!r}"},
+                limiter=warning_limiter,
+                key="tegrastats:spawn_failed",
+            )
+            stop.wait(max(0.2, float(restart_delay_s)))
+            continue
+
+        try:
+            assert proc.stdout is not None
+            while not stop.is_set():
+                line = proc.stdout.readline()
+                if line == "":
+                    if proc.poll() is not None:
+                        break
+                    time.sleep(0.1)
+                    continue
+                payload = _parse_tegrastats(line)
+                _emit(out_q, drops, "tegrastats", payload)
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+
+        if stop.is_set():
+            break
+        _emit_warning_limited(
+            out_q=out_q,
+            drops=drops,
+            source="tegrastats",
+            payload={"error": "process_exited", "returncode": proc.returncode},
+            limiter=warning_limiter,
+            key="tegrastats:process_exited",
+        )
+        stop.wait(max(0.2, float(restart_delay_s)))
 
 
 def _run_journalctl(
@@ -354,45 +438,77 @@ def _run_journalctl(
     out_q: "queue.Queue[Dict[str, Any]]",
     drops: DropCounter,
     filter_re: re.Pattern[str],
+    restart_delay_s: float,
+    warning_interval_s: float,
 ) -> None:
     cmd = ["journalctl", "-f", "-n", "0", "-o", "cat"]
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
-    except FileNotFoundError:
-        _emit(out_q, drops, "journal", {"error": "command_not_found"}, level="warning")
-        return
-    except OSError as exc:
-        _emit(out_q, drops, "journal", {"error": repr(exc)}, level="warning")
-        return
+    warning_limiter = WarningLimiter(min_interval_s=warning_interval_s)
 
-    try:
-        assert proc.stdout is not None
-        while not stop.is_set():
-            line = proc.stdout.readline()
-            if line == "":
-                if proc.poll() is not None:
-                    break
-                time.sleep(0.1)
-                continue
-            text = line.rstrip("\n")
-            if not text:
-                continue
-            if not filter_re.search(text):
-                continue
-            _emit(out_q, drops, "journal", {"line": text}, level="warning")
-    finally:
-        if proc.poll() is None:
-            proc.terminate()
-            try:
-                proc.wait(timeout=1.0)
-            except subprocess.TimeoutExpired:
-                proc.kill()
+    while not stop.is_set():
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+        except FileNotFoundError:
+            _emit_warning_limited(
+                out_q=out_q,
+                drops=drops,
+                source="journal",
+                payload={"error": "command_not_found"},
+                limiter=warning_limiter,
+                key="journal:command_not_found",
+            )
+            return
+        except OSError as exc:
+            _emit_warning_limited(
+                out_q=out_q,
+                drops=drops,
+                source="journal",
+                payload={"error": f"spawn_failed: {exc!r}"},
+                limiter=warning_limiter,
+                key="journal:spawn_failed",
+            )
+            stop.wait(max(0.2, float(restart_delay_s)))
+            continue
+
+        try:
+            assert proc.stdout is not None
+            while not stop.is_set():
+                line = proc.stdout.readline()
+                if line == "":
+                    if proc.poll() is not None:
+                        break
+                    time.sleep(0.1)
+                    continue
+                text = line.rstrip("\n")
+                if not text:
+                    continue
+                if not filter_re.search(text):
+                    continue
+                _emit(out_q, drops, "journal", {"line": _truncate(text)}, level="warning")
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+
+        if stop.is_set():
+            break
+        _emit_warning_limited(
+            out_q=out_q,
+            drops=drops,
+            source="journal",
+            payload={"error": "process_exited", "returncode": proc.returncode},
+            limiter=warning_limiter,
+            key="journal:process_exited",
+        )
+        stop.wait(max(0.2, float(restart_delay_s)))
 
 
 def _build_video_source(args: argparse.Namespace) -> Optional[_VideoSource]:
@@ -460,10 +576,19 @@ def _run_video_stream(
     drops: DropCounter,
     args: argparse.Namespace,
 ) -> None:
+    warning_limiter = WarningLimiter(min_interval_s=max(0.2, float(args.warning_throttle_s)))
+
     try:
         source = _build_video_source(args)
     except Exception as exc:
-        _emit(out_q, drops, "video", {"error": f"video_init_failed: {exc!r}"}, level="warning")
+        _emit_warning_limited(
+            out_q=out_q,
+            drops=drops,
+            source="video",
+            payload={"error": f"video_init_failed: {exc!r}"},
+            limiter=warning_limiter,
+            key="video:init_failed",
+        )
         return
 
     if source is None:
@@ -488,18 +613,42 @@ def _run_video_stream(
     frame_id = 0
     last_emit_s = 0.0
     emit_period_s = 1.0 / max(0.2, float(args.video_fps))
+    last_frame_seen_s = time.monotonic()
 
     try:
         while not stop.is_set():
             try:
                 frame, pts_ns, mono_ns = source.get_frame()
             except _NoFrameAvailable:
+                now_s = time.monotonic()
+                if (now_s - last_frame_seen_s) >= max(0.5, float(args.video_wait_warn_s)):
+                    _emit_warning_limited(
+                        out_q=out_q,
+                        drops=drops,
+                        source="video",
+                        payload={
+                            "error": "video_frame_wait_timeout",
+                            "video_source": args.video_source,
+                            "tap_jpeg": args.video_tap_jpeg if args.video_source == "tap" else None,
+                            "tap_meta": args.video_tap_meta if args.video_source == "tap" else None,
+                        },
+                        limiter=warning_limiter,
+                        key="video:no_frame",
+                    )
                 stop.wait(0.05)
                 continue
             except Exception as exc:
-                _emit(out_q, drops, "video", {"error": f"video_capture_failed: {exc!r}"}, level="warning")
+                _emit_warning_limited(
+                    out_q=out_q,
+                    drops=drops,
+                    source="video",
+                    payload={"error": f"video_capture_failed: {exc!r}"},
+                    limiter=warning_limiter,
+                    key="video:capture_failed",
+                )
                 stop.wait(0.2)
                 continue
+            last_frame_seen_s = time.monotonic()
 
             now_s = time.monotonic()
             if (now_s - last_emit_s) < emit_period_s:
@@ -514,7 +663,31 @@ def _run_video_stream(
                     quality=args.video_jpeg_quality,
                 )
             except Exception as exc:
-                _emit(out_q, drops, "video", {"error": f"video_encode_failed: {exc!r}"}, level="warning")
+                _emit_warning_limited(
+                    out_q=out_q,
+                    drops=drops,
+                    source="video",
+                    payload={"error": f"video_encode_failed: {exc!r}"},
+                    limiter=warning_limiter,
+                    key="video:encode_failed",
+                )
+                continue
+
+            max_frame_bytes = int(args.video_max_bytes)
+            if max_frame_bytes > 0 and len(jpeg) > max_frame_bytes:
+                _emit_warning_limited(
+                    out_q=out_q,
+                    drops=drops,
+                    source="video",
+                    payload={
+                        "error": "video_frame_too_large",
+                        "frame_bytes": len(jpeg),
+                        "max_bytes": max_frame_bytes,
+                        "size": [width, height],
+                    },
+                    limiter=warning_limiter,
+                    key="video:frame_too_large",
+                )
                 continue
 
             payload = {
@@ -580,8 +753,10 @@ def _build_parser() -> argparse.ArgumentParser:
         default=r"(deepstream|nvinfer|gstreamer|gst|error|timeout|engine)",
         help="Case-insensitive regex for filtering journal lines.",
     )
+    parser.add_argument("--warning-throttle-s", type=float, default=2.0)
+    parser.add_argument("--worker-restart-delay-s", type=float, default=1.0)
     parser.add_argument("--heartbeat-s", type=float, default=1.0)
-    parser.add_argument("--queue-size", type=int, default=4096)
+    parser.add_argument("--queue-size", type=int, default=1024)
 
     parser.add_argument("--video-source", choices=["off", "dummy", "gst", "tap"], default="off")
     parser.add_argument("--video-device", default="/dev/video0")
@@ -592,6 +767,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--video-max-width", type=int, default=640)
     parser.add_argument("--video-max-height", type=int, default=360)
     parser.add_argument("--video-jpeg-quality", type=int, default=70)
+    parser.add_argument("--video-max-bytes", type=int, default=700_000)
+    parser.add_argument("--video-wait-warn-s", type=float, default=5.0)
     parser.add_argument("--video-tap-jpeg", default="logs/telemetry/preview/latest.jpg")
     parser.add_argument("--video-tap-meta", default="logs/telemetry/preview/latest.json")
     parser.add_argument("--video-pipeline", default=None)
@@ -613,8 +790,29 @@ def main() -> int:
     signal.signal(signal.SIGINT, _stop_handler)
     signal.signal(signal.SIGTERM, _stop_handler)
 
+    def _make_worker_thread(
+        *,
+        name: str,
+        target,
+        kwargs: Dict[str, Any],
+    ) -> threading.Thread:
+        def _runner() -> None:
+            try:
+                target(**kwargs)
+            except Exception as exc:
+                _emit(
+                    out_q,
+                    drops,
+                    "agent",
+                    {"error": "worker_crashed", "worker": name, "detail": repr(exc)},
+                    level="warning",
+                )
+
+        return threading.Thread(target=_runner, name=f"telemetry-{name}", daemon=True)
+
     threads = [
-        threading.Thread(
+        _make_worker_thread(
+            name="perception_log",
             target=_tail_jsonl_file,
             kwargs={
                 "stop": stop,
@@ -624,10 +822,11 @@ def main() -> int:
                 "path": args.perception_log,
                 "poll_s": poll_s,
                 "start_at_end": start_at_end,
+                "warning_interval_s": max(0.2, float(args.warning_throttle_s)),
             },
-            daemon=True,
         ),
-        threading.Thread(
+        _make_worker_thread(
+            name="actions_log",
             target=_tail_jsonl_file,
             kwargs={
                 "stop": stop,
@@ -637,10 +836,11 @@ def main() -> int:
                 "path": args.actions_log,
                 "poll_s": poll_s,
                 "start_at_end": start_at_end,
+                "warning_interval_s": max(0.2, float(args.warning_throttle_s)),
             },
-            daemon=True,
         ),
-        threading.Thread(
+        _make_worker_thread(
+            name="heartbeat",
             target=_heartbeat_loop,
             kwargs={
                 "stop": stop,
@@ -648,41 +848,45 @@ def main() -> int:
                 "drops": drops,
                 "interval_s": max(0.2, float(args.heartbeat_s)),
             },
-            daemon=True,
         ),
     ]
 
     if not args.no_tegrastats:
         threads.append(
-            threading.Thread(
+            _make_worker_thread(
+                name="tegrastats",
                 target=_run_tegrastats,
                 kwargs={
                     "stop": stop,
                     "out_q": out_q,
                     "drops": drops,
                     "interval_ms": max(100, int(args.tegrastats_interval_ms)),
+                    "restart_delay_s": max(0.2, float(args.worker_restart_delay_s)),
+                    "warning_interval_s": max(0.2, float(args.warning_throttle_s)),
                 },
-                daemon=True,
             )
         )
 
     if not args.no_journal:
         threads.append(
-            threading.Thread(
+            _make_worker_thread(
+                name="journal",
                 target=_run_journalctl,
                 kwargs={
                     "stop": stop,
                     "out_q": out_q,
                     "drops": drops,
                     "filter_re": re.compile(args.journal_filter, re.IGNORECASE),
+                    "restart_delay_s": max(0.2, float(args.worker_restart_delay_s)),
+                    "warning_interval_s": max(0.2, float(args.warning_throttle_s)),
                 },
-                daemon=True,
             )
         )
 
     if args.video_source != "off":
         threads.append(
-            threading.Thread(
+            _make_worker_thread(
+                name="video",
                 target=_run_video_stream,
                 kwargs={
                     "stop": stop,
@@ -690,7 +894,6 @@ def main() -> int:
                     "drops": drops,
                     "args": args,
                 },
-                daemon=True,
             )
         )
 

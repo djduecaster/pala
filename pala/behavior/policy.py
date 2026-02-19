@@ -25,10 +25,25 @@ class BehaviorPolicy:
         self._last_trigger = 0.0
         self._active_signature: Optional[str] = None
         self._active_action_id: Optional[str] = None
+        self._planner_owns_semantics = bool(getattr(planner, "owns_semantic_behavior", False))
 
     def step(self, st: Optional[PerceptionState]) -> ActionPlan:
         now = time.monotonic()
-        if st is None or st.primary_person is None:
+        if st is None:
+            proposed = ActionPlan(
+                primitive=PrimitiveKind.HOLD,
+                command=HoldCommand(),
+                confidence=0.3,
+                style="calm",
+            )
+            return self._arbitrate(proposed)
+
+        # In orchestrator-owned mode, behavior policy avoids additional semantic triggers.
+        if self._planner_owns_semantics:
+            proposed = self.planner.plan(st)
+            return self._arbitrate(proposed)
+
+        if st.primary_person is None:
             proposed = ActionPlan(
                 primitive=PrimitiveKind.HOLD,
                 command=HoldCommand(),

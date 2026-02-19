@@ -29,24 +29,30 @@ from ..types import (
 from .heuristic import HeuristicPlanner
 from .memory_manager import MemoryManager, MemoryManagerConfig
 from .protocol import PlannerInterface
-from .state_models import ObservationPacket, InteractionBelief, OrchestratorDecision, SceneSummary
+from .state_models import OrchestratorDecision
+from .timeline import TimelineConfig, TimelineWriter
 
 logger = logging.getLogger(__name__)
 
 _TARGET_STATES = {"idle", "user_detected", "engaging", "tracking", "acknowledging", "reacquiring"}
 _STYLES = {"calm", "curious", "focused"}
 _URGENCY = {"low", "medium", "high"}
+_PRIMITIVE_HINTS = {"hold", "breath", "glance", "nod", "orient_to_zone"}
 
 
 @dataclass
 class _OrchestratorRequest:
-    observation: ObservationPacket
-    belief: InteractionBelief
+    state: PerceptionState
     frames: list[np.ndarray]
+    frame_age_ms: Optional[float]
+    control_active_primitive: Optional[str]
+    control_active_age_s: Optional[float]
 
 
 class AsyncOrchestratorPlanner(PlannerInterface):
     """Async orchestrator with transcript context and latest-only remote requests."""
+
+    owns_semantic_behavior = True
 
     def __init__(
         self,
@@ -58,6 +64,23 @@ class AsyncOrchestratorPlanner(PlannerInterface):
         api_key: Optional[str] = None,
         model: str = "nvidia/cosmos-reason2-2b",
         planner_prompt: Optional[str] = None,
+        policy_version: str = "v1",
+        policy_identity: str = (
+            "You are PALA, a social desk companion lamp that should feel alive, expressive, and safe."
+        ),
+        policy_capabilities: str = (
+            "You can move head/neck joints via primitives: hold, breath, glance, nod, orient_to_zone. "
+            "You cannot manipulate external objects, move base position, or physically touch users."
+        ),
+        policy_safety: str = (
+            "Avoid sudden aggressive motion. Prefer stable behavior. If uncertain, choose conservative actions."
+        ),
+        policy_style: str = (
+            "Default style is calm; use curious for gentle tracking and focused for attentive task support."
+        ),
+        policy_output_contract: str = (
+            "Return JSON only with target_state,intent,style,primitive_hint,target_zone,allow_interrupt,urgency,confidence,rationale."
+        ),
         orchestrator_hz: float = 1.0,
         max_frame_age_ms: int = 500,
         video_window_s: float = 8.0,
@@ -68,12 +91,19 @@ class AsyncOrchestratorPlanner(PlannerInterface):
         response_ttl_ms: int = 1500,
         transcript_max_items: int = 80,
         context_max_transcript_items: int = 0,
+        context_transcript_max_items: int = 24,
+        context_transcript_per_type_max_items: int = 8,
+        context_transcript_max_chars: int = 4000,
+        context_memory_digest_max_items: int = 3,
         memory_enabled: bool = True,
         memory_jsonl_path: str = "logs/orchestrator_memory.jsonl",
         memory_recent_events: int = 10,
         memory_digest_items: int = 3,
         memory_distill_every_n_events: int = 20,
         decision_repeat_detector_window: int = 6,
+        timeline_jsonl_path: str = "logs/orchestrator_timeline.jsonl",
+        inflight_guard_enabled: bool = True,
+        request_min_fresh_frames: int = 1,
         reasoning_probe_enabled: bool = False,
         reasoning_probe_hz: float = 0.1,
         reasoning_probe_timeout_ms: int = 8000,
@@ -86,16 +116,29 @@ class AsyncOrchestratorPlanner(PlannerInterface):
         self._api_key = api_key
         self._model = str(model or "nvidia/cosmos-reason2-2b")
         self._planner_prompt = (planner_prompt or "").strip()
+        self._policy_version = str(policy_version or "v1").strip() or "v1"
+        self._policy_identity = str(policy_identity or "").strip()
+        self._policy_capabilities = str(policy_capabilities or "").strip()
+        self._policy_safety = str(policy_safety or "").strip()
+        self._policy_style = str(policy_style or "").strip()
+        self._policy_output_contract = str(policy_output_contract or "").strip()
         self._max_frame_age_ms = max(50, int(max_frame_age_ms))
         self._video_window_s = max(0.1, float(video_window_s))
         self._video_max_frames = max(1, int(video_max_frames))
         self._video_max_width = max(64, int(video_max_width))
         self._video_jpeg_quality = max(1, min(100, int(video_jpeg_quality)))
-        self._reacquire_timeout_s = 3.0
         self._request_timeout_s = max(0.05, float(request_timeout_ms) / 1000.0)
         self._response_ttl_s = max(0.1, float(response_ttl_ms) / 1000.0)
         self._orchestrator_period_s = 1.0 / max(0.2, float(orchestrator_hz))
-        self._context_max_transcript_items = max(0, int(context_max_transcript_items))
+        legacy_max_items = max(0, int(context_max_transcript_items))
+        default_max_items = max(1, int(context_transcript_max_items))
+        self._context_transcript_max_items = legacy_max_items if legacy_max_items > 0 else default_max_items
+        self._context_transcript_per_type_max_items = max(1, int(context_transcript_per_type_max_items))
+        self._context_transcript_max_chars = max(64, int(context_transcript_max_chars))
+        self._context_memory_digest_max_items = max(1, int(context_memory_digest_max_items))
+        self._timeline = TimelineWriter(TimelineConfig(enabled=True, jsonl_path=str(timeline_jsonl_path)))
+        self._inflight_guard_enabled = bool(inflight_guard_enabled)
+        self._request_min_fresh_frames = max(0, int(request_min_fresh_frames))
         self._reasoning_probe_enabled = bool(reasoning_probe_enabled)
         self._reasoning_probe_period_s = 1.0 / max(0.05, float(reasoning_probe_hz))
         self._reasoning_probe_timeout_s = max(0.1, float(reasoning_probe_timeout_ms) / 1000.0)
@@ -109,24 +152,16 @@ class AsyncOrchestratorPlanner(PlannerInterface):
         self._request_seq = 0
 
         self._transcript_lock = threading.Lock()
-        self._transcript: deque[str] = deque(maxlen=max(10, int(transcript_max_items)))
-        self._zone_history: deque[str] = deque(maxlen=6)
+        self._transcript: deque[dict[str, Any]] = deque(maxlen=max(10, int(transcript_max_items)))
         self._frame_history: deque[tuple[float, int, np.ndarray]] = deque()
-        self._zone_transition_times: deque[float] = deque()
         self._last_seen_frame_mono_ns: Optional[int] = None
-        self._last_person_seen_s: Optional[float] = None
-        self._last_person_zone: Optional[str] = None
-        self._last_zone_hint: Optional[str] = None
-        self._last_zone_change_s: float = time.monotonic()
-        self._belief_state: str = "idle"
-        self._belief_since_s: float = time.monotonic()
         self._decision_signature_history: deque[str] = deque(maxlen=max(2, int(decision_repeat_detector_window)))
-        self._last_decision_zone: Optional[str] = None
 
         self._lock = threading.Lock()
         self._cond = threading.Condition(self._lock)
         self._stop = threading.Event()
         self._pending: Optional[_OrchestratorRequest] = None
+        self._request_inflight = False
         self._last_submit_s = 0.0
         self._last_probe_submit_s = 0.0
         self._probe_lock = threading.Lock()
@@ -137,9 +172,6 @@ class AsyncOrchestratorPlanner(PlannerInterface):
         self._latest_action: Optional[ActionPlan] = None
         self._latest_action_ts_s: Optional[float] = None
         self._latest_action_primitive: Optional[str] = None
-        self._latest_summary: Optional[SceneSummary] = None
-        self._latest_observation: Optional[ObservationPacket] = None
-        self._latest_belief: Optional[InteractionBelief] = None
         self._latest_latency_ms: Optional[float] = None
         self._latest_reasoning: Optional[str] = None
         self._memory = MemoryManager(
@@ -154,10 +186,11 @@ class AsyncOrchestratorPlanner(PlannerInterface):
 
         if self._remote_enabled:
             logger.info(
-                "orchestrator remote enabled provider=%s url=%s model=%s",
+                "orchestrator remote enabled provider=%s url=%s model=%s policy_version=%s",
                 self._provider,
                 self._chat_url,
                 self._model,
+                self._policy_version,
             )
         else:
             logger.info("orchestrator remote disabled provider=%s base_url=%s", self._provider, self._chat_url)
@@ -172,35 +205,41 @@ class AsyncOrchestratorPlanner(PlannerInterface):
     def plan(self, st: PerceptionState) -> ActionPlan:
         now = time.monotonic()
         frame_age_ms = self._update_frame_history(now)
-        summary = self._summarize_state(st, frame_age_ms)
-        observation = self._build_observation(summary, now)
-        belief = self._update_belief(observation, now)
-        self._latest_summary = summary
-        self._latest_observation = observation
-        self._latest_belief = belief
+        active_age_s = None
+        if self._latest_action_ts_s is not None:
+            active_age_s = max(0.0, now - self._latest_action_ts_s)
 
         if (now - self._last_submit_s) >= self._orchestrator_period_s:
             frames = self._sample_frame_history()
-            self._memory.append_event(
-                "observation_event",
-                {
-                    "state": belief.state,
-                    "zone_hint": observation.zone_hint,
-                    "person_present": observation.person_present,
-                    "activity_hint": observation.activity_hint,
-                    "uncertainty_flags": observation.uncertainty_flags,
-                    "zone_transitions_recent": observation.zone_transitions_recent,
-                    "control_active_primitive": observation.control_active_primitive,
-                },
-            )
-            with self._lock:
-                self._pending = _OrchestratorRequest(
-                    observation=observation,
-                    belief=belief,
-                    frames=frames,
+            if len(frames) >= self._request_min_fresh_frames:
+                self._memory.append_event(
+                    "context_event",
+                    {
+                        "frames_available": len(frames),
+                        "frame_age_ms": frame_age_ms,
+                        "control_active_primitive": self._latest_action_primitive,
+                        "control_active_age_s": active_age_s,
+                    },
                 )
-                self._last_submit_s = now
-                self._cond.notify_all()
+                self._append_transcript(
+                    "system",
+                    (
+                        f"context frames={len(frames)} frame_age_ms={frame_age_ms} "
+                        f"control_active={self._latest_action_primitive or '-'} control_age_s={active_age_s}"
+                    ),
+                )
+                with self._lock:
+                    can_submit = not (self._inflight_guard_enabled and self._request_inflight)
+                    if can_submit:
+                        self._pending = _OrchestratorRequest(
+                            state=st,
+                            frames=frames,
+                            frame_age_ms=frame_age_ms,
+                            control_active_primitive=self._latest_action_primitive,
+                            control_active_age_s=active_age_s,
+                        )
+                        self._last_submit_s = now
+                        self._cond.notify_all()
         if (
             self._reasoning_probe_enabled
             and self._remote_enabled
@@ -209,9 +248,11 @@ class AsyncOrchestratorPlanner(PlannerInterface):
             frames = self._sample_frame_history()
             with self._probe_lock:
                 self._pending_probe = _OrchestratorRequest(
-                    observation=observation,
-                    belief=belief,
+                    state=st,
                     frames=frames,
+                    frame_age_ms=frame_age_ms,
+                    control_active_primitive=self._latest_action_primitive,
+                    control_active_age_s=active_age_s,
                 )
                 self._last_probe_submit_s = now
                 self._probe_cond.notify_all()
@@ -228,20 +269,12 @@ class AsyncOrchestratorPlanner(PlannerInterface):
                 return action
             return action
 
-        decision = _local_decision(observation, belief)
-        logger.debug(
-            "orchestrator fallback source=local target_state=%s intent=%s style=%s zone=%s",
-            decision.target_state,
-            decision.intent,
-            decision.style,
-            decision.target_zone,
-        )
-        return _decision_to_action(decision, observation)
+        return self._fallback.plan(st)
 
-    def snapshot(self) -> tuple[Optional[SceneSummary], list[str], Optional[OrchestratorDecision]]:
+    def snapshot(self) -> tuple[None, list[str], Optional[OrchestratorDecision]]:
         with self._transcript_lock:
-            transcript = list(self._transcript)
-        return self._latest_summary, transcript, self._latest_decision
+            transcript = [entry.get("line", "") for entry in self._transcript]
+        return None, transcript, self._latest_decision
 
     def shutdown(self) -> None:
         self._stop.set()
@@ -262,6 +295,8 @@ class AsyncOrchestratorPlanner(PlannerInterface):
                     break
                 req = self._pending
                 self._pending = None
+                if req is not None:
+                    self._request_inflight = True
 
             if req is None:
                 continue
@@ -274,7 +309,7 @@ class AsyncOrchestratorPlanner(PlannerInterface):
                             "decision_event",
                             {
                                 "source": "remote_none",
-                                "state": req.belief.state,
+                                "state": None,
                                 "intent": None,
                                 "style": None,
                                 "primitive": None,
@@ -282,14 +317,38 @@ class AsyncOrchestratorPlanner(PlannerInterface):
                                 "confidence": None,
                                 "allow_interrupt": None,
                                 "urgency": None,
-                                "zone_hint": req.observation.zone_hint,
+                                "zone_hint": None,
                                 "latency_ms": self._latest_latency_ms,
+                            },
+                        )
+                        self._timeline.write(
+                            "fallback_event",
+                            {
+                                "request_id": self._request_seq,
+                                "source": "remote_none",
+                                "state": None,
+                                "zone_hint": None,
+                                "latency_ms": self._latest_latency_ms,
+                                "policy_version": self._policy_version,
                             },
                         )
                         continue
                 else:
-                    decision = _local_decision(req.observation, req.belief)
-                action = _decision_to_action(decision, req.observation)
+                    action = self._fallback.plan(req.state)
+                    decision = OrchestratorDecision(
+                        target_state="idle",
+                        intent="fallback_planner",
+                        style=action.style,
+                        primitive_hint=action.primitive.value,
+                        target_zone=None,
+                        allow_interrupt=action.cancel_current,
+                        urgency="low",
+                        confidence=action.confidence,
+                        rationale=action.explanation or "fallback planner",
+                        source="local",
+                    )
+                if self._remote_enabled:
+                    action = _decision_to_action(decision)
             except Exception as exc:
                 logger.warning("orchestrator planning failed: %s", exc)
                 if self._remote_enabled:
@@ -297,7 +356,7 @@ class AsyncOrchestratorPlanner(PlannerInterface):
                         "decision_event",
                         {
                             "source": "remote_error",
-                            "state": req.belief.state,
+                            "state": None,
                             "intent": None,
                             "style": None,
                             "primitive": None,
@@ -305,13 +364,39 @@ class AsyncOrchestratorPlanner(PlannerInterface):
                             "confidence": None,
                             "allow_interrupt": None,
                             "urgency": None,
-                            "zone_hint": req.observation.zone_hint,
+                            "zone_hint": None,
                             "latency_ms": self._latest_latency_ms,
                         },
                     )
+                    self._timeline.write(
+                        "fallback_event",
+                        {
+                            "request_id": self._request_seq,
+                            "source": "remote_error",
+                            "state": None,
+                            "zone_hint": None,
+                            "latency_ms": self._latest_latency_ms,
+                            "error": str(exc),
+                            "policy_version": self._policy_version,
+                        },
+                    )
                     continue
-                decision = _local_decision(req.observation, req.belief)
-                action = _decision_to_action(decision, req.observation)
+                action = self._fallback.plan(req.state)
+                decision = OrchestratorDecision(
+                    target_state="idle",
+                    intent="fallback_planner",
+                    style=action.style,
+                    primitive_hint=action.primitive.value,
+                    target_zone=None,
+                    allow_interrupt=action.cancel_current,
+                    urgency="low",
+                    confidence=action.confidence,
+                    rationale=action.explanation or "fallback planner",
+                    source="local",
+                )
+            finally:
+                with self._lock:
+                    self._request_inflight = False
 
             self._append_transcript(
                 "decision",
@@ -334,11 +419,29 @@ class AsyncOrchestratorPlanner(PlannerInterface):
                     "confidence": decision.confidence,
                     "allow_interrupt": decision.allow_interrupt,
                     "urgency": decision.urgency,
-                    "zone_hint": req.observation.zone_hint,
+                    "zone_hint": None,
                     "latency_ms": self._latest_latency_ms,
                 },
             )
-            self._track_repetition(decision, req.observation)
+            self._timeline.write(
+                "decision_event",
+                {
+                    "request_id": self._request_seq,
+                    "source": decision.source,
+                    "state": decision.target_state,
+                    "intent": decision.intent,
+                    "style": decision.style,
+                    "primitive": decision.primitive_hint,
+                    "target_zone": decision.target_zone,
+                    "confidence": decision.confidence,
+                    "allow_interrupt": decision.allow_interrupt,
+                    "urgency": decision.urgency,
+                    "zone_hint": None,
+                    "latency_ms": self._latest_latency_ms,
+                    "policy_version": self._policy_version,
+                },
+            )
+            self._track_repetition(decision)
             self._latest_decision = decision
             with self._lock:
                 self._latest_action = action
@@ -398,6 +501,7 @@ class AsyncOrchestratorPlanner(PlannerInterface):
                     continue
                 self._probe_success_count += 1
                 self._latest_reasoning = reasoning
+                self._append_transcript("reasoning", _preview(reasoning, 240))
                 logger.debug("orchestrator probe_end id=%d status=ok latency_ms=%.1f", req_id, latency_ms)
                 logger.debug("orchestrator reasoning id=%d text=%s", req_id, _preview(reasoning, 600))
                 self._memory.append_event(
@@ -406,6 +510,16 @@ class AsyncOrchestratorPlanner(PlannerInterface):
                         "request_id": req_id,
                         "latency_ms": latency_ms,
                         "reasoning": reasoning,
+                    },
+                )
+                self._timeline.write(
+                    "reasoning_event",
+                    {
+                        "request_id": req_id,
+                        "latency_ms": latency_ms,
+                        "reasoning": _preview(reasoning, 1200),
+                        "source": "probe",
+                        "policy_version": self._policy_version,
                     },
                 )
             except Exception as exc:
@@ -442,122 +556,6 @@ class AsyncOrchestratorPlanner(PlannerInterface):
         idxs = [int(i * (n - 1) / (k - 1)) for i in range(k - 1)] + [n - 1]
         return [frames[i] for i in idxs]
 
-    def _summarize_state(self, st: PerceptionState, frame_age_ms: Optional[float]) -> SceneSummary:
-        zone = None
-        if isinstance(st.debug, dict):
-            raw_zone = st.debug.get("zone_hint")
-            if isinstance(raw_zone, str) and raw_zone:
-                zone = raw_zone
-        if zone is not None:
-            now = time.monotonic()
-            if self._last_zone_hint is not None and self._last_zone_hint != zone:
-                self._zone_transition_times.append(now)
-                self._last_zone_change_s = now
-            elif self._last_zone_hint is None:
-                self._last_zone_change_s = now
-            self._last_zone_hint = zone
-            self._zone_history.append(zone)
-
-        person_present = st.primary_person is not None
-        if person_present:
-            self._last_person_seen_s = time.monotonic()
-            if zone is not None:
-                self._last_person_zone = zone
-        uncertainty_flags: list[str] = []
-        conf = st.primary_person_conf
-        if person_present and conf is not None and conf < 0.5:
-            uncertainty_flags.append("low_person_conf")
-
-        if frame_age_ms is not None and frame_age_ms > 250.0:
-            uncertainty_flags.append("stale_frame")
-
-        activity_hint = self._infer_activity_hint(person_present, zone)
-        return SceneSummary(
-            timestamp_monotonic_s=time.monotonic(),
-            person_present=person_present,
-            zone_hint=zone,
-            primary_person_conf=conf,
-            activity_hint=activity_hint,
-            uncertainty_flags=uncertainty_flags,
-            frame_age_ms=frame_age_ms,
-        )
-
-    def _infer_activity_hint(self, person_present: bool, zone: Optional[str]) -> Optional[str]:
-        if not person_present:
-            return "away"
-        if len(self._zone_history) < 3:
-            return "engaged"
-        recent = list(self._zone_history)[-3:]
-        if len(set(recent)) >= 2:
-            return "transitioning"
-        if zone == "center":
-            return "focused_work"
-        return "engaged"
-
-    def _build_observation(self, summary: SceneSummary, now_s: float) -> ObservationPacket:
-        transition_cutoff = now_s - 3.0
-        while self._zone_transition_times and self._zone_transition_times[0] < transition_cutoff:
-            self._zone_transition_times.popleft()
-        zone_stable_s = max(0.0, now_s - self._last_zone_change_s) if summary.zone_hint is not None else 0.0
-        active_age_s = None
-        if self._latest_action_ts_s is not None:
-            active_age_s = max(0.0, now_s - self._latest_action_ts_s)
-        return ObservationPacket(
-            timestamp_monotonic_s=now_s,
-            person_present=summary.person_present,
-            zone_hint=summary.zone_hint,
-            primary_person_conf=summary.primary_person_conf,
-            frame_age_ms=summary.frame_age_ms,
-            activity_hint=summary.activity_hint,
-            uncertainty_flags=list(summary.uncertainty_flags),
-            zone_stable_s=zone_stable_s,
-            zone_transitions_recent=len(self._zone_transition_times),
-            control_active_primitive=self._latest_action_primitive,
-            control_active_age_s=active_age_s,
-        )
-
-    def _update_belief(self, observation: ObservationPacket, now_s: float) -> InteractionBelief:
-        recent_absence = (
-            not observation.person_present
-            and self._last_person_seen_s is not None
-            and (now_s - self._last_person_seen_s) <= self._reacquire_timeout_s
-        )
-        if not observation.person_present:
-            if recent_absence:
-                next_state = "reacquiring"
-                confidence = 0.55
-                reason = "person recently visible"
-            else:
-                next_state = "idle"
-                confidence = 0.7
-                reason = "person absent"
-        elif observation.zone_transitions_recent >= 2:
-            next_state = "tracking"
-            confidence = 0.7
-            reason = "recent zone transitions"
-        elif observation.zone_hint == "center" and observation.zone_stable_s >= 1.2:
-            next_state = "engaging"
-            confidence = 0.74
-            reason = "stable centered engagement"
-        else:
-            next_state = "user_detected"
-            confidence = 0.64
-            reason = "person visible"
-
-        if next_state != self._belief_state:
-            self._belief_state = next_state
-            self._belief_since_s = now_s
-
-        return InteractionBelief(
-            timestamp_monotonic_s=now_s,
-            state=self._belief_state,
-            confidence=confidence,
-            last_seen_zone=self._last_person_zone,
-            person_last_seen_s=self._last_person_seen_s,
-            reason=reason,
-            uncertainty_flags=list(observation.uncertainty_flags),
-        )
-
     def _remote_decision(self, req: _OrchestratorRequest) -> Optional[OrchestratorDecision]:
         assert self._chat_url is not None
         self._request_seq += 1
@@ -567,15 +565,28 @@ class AsyncOrchestratorPlanner(PlannerInterface):
             transcript_len = len(self._transcript)
         mem_stats = self._memory.stats()
         logger.debug(
-            "orchestrator req_start id=%d frames=%d transcript=%d mem_recent=%d mem_digest=%d zone=%s person=%s belief=%s",
+            "orchestrator req_start id=%d frames=%d transcript=%d mem_recent=%d mem_digest=%d frame_age_ms=%s active_primitive=%s",
             req_id,
             len(req.frames),
             transcript_len,
             mem_stats["recent_events"],
             mem_stats["digest_items"],
-            req.observation.zone_hint,
-            req.observation.person_present,
-            req.belief.state,
+            req.frame_age_ms,
+            req.control_active_primitive,
+        )
+        self._timeline.write(
+            "request_start",
+            {
+                "request_id": req_id,
+                "frames": len(req.frames),
+                "transcript_items": transcript_len,
+                "memory_recent": mem_stats["recent_events"],
+                "memory_digest": mem_stats["digest_items"],
+                "frame_age_ms": req.frame_age_ms,
+                "control_active_primitive": req.control_active_primitive,
+                "control_active_age_s": req.control_active_age_s,
+                "policy_version": self._policy_version,
+            },
         )
         payload = self._build_payload(req)
         t0 = time.monotonic()
@@ -590,16 +601,37 @@ class AsyncOrchestratorPlanner(PlannerInterface):
         content = _extract_content(response)
         if content is None:
             logger.warning("orchestrator req_end id=%d status=no_content latency_ms=%.1f", req_id, latency_ms)
+            self._timeline.write(
+                "request_end",
+                {
+                    "request_id": req_id,
+                    "status": "no_content",
+                    "latency_ms": latency_ms,
+                    "policy_version": self._policy_version,
+                },
+            )
             return None
         reasoning = _extract_reasoning(response)
+        if not reasoning and content:
+            reasoning = _extract_think_block(content)
         if reasoning:
             self._latest_reasoning = reasoning
             logger.debug("orchestrator reasoning id=%d text=%s", req_id, _preview(reasoning, 600))
+            self._append_transcript("reasoning", _preview(reasoning, 240))
             self._memory.append_event(
                 "reasoning_event",
                 {
                     "request_id": req_id,
                     "reasoning": reasoning,
+                },
+            )
+            self._timeline.write(
+                "reasoning_event",
+                {
+                    "request_id": req_id,
+                    "latency_ms": latency_ms,
+                    "reasoning": _preview(reasoning, 1200),
+                    "policy_version": self._policy_version,
                 },
             )
         decision = _parse_decision_content(content)
@@ -609,6 +641,36 @@ class AsyncOrchestratorPlanner(PlannerInterface):
                 req_id,
                 latency_ms,
                 _preview(content),
+            )
+            self._timeline.write(
+                "request_end",
+                {
+                    "request_id": req_id,
+                    "status": "parse_fail",
+                    "latency_ms": latency_ms,
+                    "preview": _preview(content, 400),
+                    "policy_version": self._policy_version,
+                },
+            )
+            return None
+        if not _is_valid_canonical_decision(decision):
+            logger.warning(
+                "orchestrator req_end id=%d status=invalid_canonical latency_ms=%.1f intent=%s primitive=%s",
+                req_id,
+                latency_ms,
+                decision.intent,
+                decision.primitive_hint,
+            )
+            self._timeline.write(
+                "request_end",
+                {
+                    "request_id": req_id,
+                    "status": "invalid_canonical",
+                    "latency_ms": latency_ms,
+                    "intent": decision.intent,
+                    "primitive_hint": decision.primitive_hint,
+                    "policy_version": self._policy_version,
+                },
             )
             return None
         self._success_count += 1
@@ -622,70 +684,86 @@ class AsyncOrchestratorPlanner(PlannerInterface):
             decision.primitive_hint,
             decision.target_zone,
         )
+        self._timeline.write(
+            "request_end",
+            {
+                "request_id": req_id,
+                "status": "ok",
+                "latency_ms": latency_ms,
+                "state": decision.target_state,
+                "intent": decision.intent,
+                "style": decision.style,
+                "primitive_hint": decision.primitive_hint,
+                "target_zone": decision.target_zone,
+                "policy_version": self._policy_version,
+            },
+        )
         return decision
 
     def _build_payload(self, req: _OrchestratorRequest) -> dict[str, Any]:
-        with self._transcript_lock:
-            transcript_tail = (
-                list(self._transcript)[-self._context_max_transcript_items :]
-                if self._context_max_transcript_items > 0
-                else []
-            )
+        transcript_tail = self._build_transcript_window()
         memory_ctx = self._memory.context()
+        memory_digest = list(memory_ctx["session_memory_digest"])[-self._context_memory_digest_max_items :]
         image_data_urls, resized_shapes, total_jpeg_bytes = _encode_frames_to_data_urls(
             req.frames,
             max_width=self._video_max_width,
             jpeg_quality=self._video_jpeg_quality,
         )
-        context = {
-            "observation": {
-                "person_present": req.observation.person_present,
-                "zone_hint": req.observation.zone_hint,
-                "primary_person_conf": req.observation.primary_person_conf,
-                "frame_age_ms": req.observation.frame_age_ms,
-                "activity_hint": req.observation.activity_hint,
-                "uncertainty_flags": req.observation.uncertainty_flags,
-                "zone_stable_s": req.observation.zone_stable_s,
-                "zone_transitions_recent": req.observation.zone_transitions_recent,
-                "control_active_primitive": req.observation.control_active_primitive,
-                "control_active_age_s": req.observation.control_active_age_s,
-            },
-            "belief": {
-                "state": req.belief.state,
-                "confidence": req.belief.confidence,
-                "last_seen_zone": req.belief.last_seen_zone,
-                "person_last_seen_s": req.belief.person_last_seen_s,
-                "reason": req.belief.reason,
-                "uncertainty_flags": req.belief.uncertainty_flags,
-            },
-            "recent_events": memory_ctx["recent_events"],
-            "session_memory_digest": memory_ctx["session_memory_digest"],
-            "transcript_tail": transcript_tail,
-            "frames_sent": len(image_data_urls),
-            "resized_shapes": resized_shapes,
-            "jpeg_total_bytes": total_jpeg_bytes,
+        policy = {
+            "version": self._policy_version,
+            "identity": self._policy_identity,
+            "capabilities": self._policy_capabilities,
+            "safety": self._policy_safety,
+            "style": self._policy_style,
+            "output_contract": self._policy_output_contract,
         }
-        user_text = "Use the provided context and frame sequence to decide next action.\n" + json.dumps(
-            context,
-            separators=(",", ":"),
-            ensure_ascii=True,
+        context = {
+            "policy": policy,
+            "vision": {
+                "frames_sent": len(image_data_urls),
+                "resized_shapes": resized_shapes,
+                "jpeg_total_bytes": total_jpeg_bytes,
+                "frame_age_ms": req.frame_age_ms,
+            },
+            "control_state": {
+                "active_primitive": req.control_active_primitive,
+                "active_age_s": req.control_active_age_s,
+                "latest_decision": None
+                if self._latest_decision is None
+                else {
+                    "target_state": self._latest_decision.target_state,
+                    "intent": self._latest_decision.intent,
+                    "style": self._latest_decision.style,
+                    "primitive_hint": self._latest_decision.primitive_hint,
+                    "target_zone": self._latest_decision.target_zone,
+                    "confidence": self._latest_decision.confidence,
+                },
+            },
+            "perception_state_raw": _perception_state_context(req.state),
+            "recent_events": memory_ctx["recent_events"],
+            "session_memory_digest": memory_digest,
+            "transcript_tail": transcript_tail,
+        }
+        user_text = (
+            f"[policy_version={self._policy_version}]\n"
+            f"Identity:\n{self._policy_identity}\n\n"
+            f"Capabilities:\n{self._policy_capabilities}\n\n"
+            f"Safety:\n{self._policy_safety}\n\n"
+            f"Style:\n{self._policy_style}\n\n"
+            f"Output contract:\n{self._policy_output_contract}\n\n"
+            "Rely primarily on visual evidence from frames and robot context.\n"
+            "Answer the request using the following format:\n"
+            "<think>\n"
+            "Your reasoning.\n"
+            "</think>\n"
+            "{\"target_state\":\"...\",\"intent\":\"...\",\"style\":\"...\",\"primitive_hint\":\"...\",\"target_zone\":\"...\",\"allow_interrupt\":true,\"urgency\":\"...\",\"confidence\":0.0,\"rationale\":\"...\"}\n\n"
+            "Context JSON:\n"
+            + json.dumps(context, separators=(",", ":"), ensure_ascii=True)
         )
 
-        system_prompt = (
-            "You are a policy orchestrator for a social desk robot lamp. "
-            "You may receive multiple frames in chronological order. "
-            "Return JSON only with keys: target_state, intent, style, primitive_hint, target_zone, allow_interrupt, urgency, confidence, rationale. "
-            "target_state must be one of ['idle','user_detected','engaging','tracking','acknowledging','reacquiring']. "
-            "style must be one of ['calm','curious','focused']. "
-            "primitive_hint should be one of ['hold','breath','glance','nod','orient_to_zone'] or null. "
-            "target_zone should be one of ['left','center','right'] or null. "
-            "urgency must be one of ['low','medium','high']. "
-            "allow_interrupt is boolean. confidence in [0,1]. Keep rationale concise. "
-            "If person_present=true and zone_hint is left/right with low uncertainty, do not default to center. "
-            "Include observation_zone_used and policy_reason in the rationale text."
-        )
+        system_prompt = "You are a helpful assistant."
         if self._planner_prompt:
-            system_prompt += f" Operator guidance: {self._planner_prompt}"
+            user_text += f"\n\nOperator guidance:\n{self._planner_prompt}"
 
         return {
             "model": self._model,
@@ -694,14 +772,13 @@ class AsyncOrchestratorPlanner(PlannerInterface):
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": user_text},
                         *[{"type": "image_url", "image_url": {"url": u}} for u in image_data_urls],
+                        {"type": "text", "text": user_text},
                     ],
                 },
             ],
-            "response_format": {"type": "json_object"},
             "temperature": 0.1,
-            "max_tokens": 180,
+            "max_tokens": 700,
             "stream": False,
         }
 
@@ -712,39 +789,29 @@ class AsyncOrchestratorPlanner(PlannerInterface):
             jpeg_quality=self._video_jpeg_quality,
         )
         probe_context = {
-            "observation": {
-                "person_present": req.observation.person_present,
-                "zone_hint": req.observation.zone_hint,
-                "primary_person_conf": req.observation.primary_person_conf,
-                "activity_hint": req.observation.activity_hint,
-                "uncertainty_flags": req.observation.uncertainty_flags,
-                "zone_stable_s": req.observation.zone_stable_s,
-                "zone_transitions_recent": req.observation.zone_transitions_recent,
+            "vision": {
+                "frames_sent": len(image_data_urls),
+                "resized_shapes": resized_shapes,
+                "jpeg_total_bytes": total_jpeg_bytes,
+                "frame_age_ms": req.frame_age_ms,
             },
-            "belief": {
-                "state": req.belief.state,
-                "confidence": req.belief.confidence,
-                "reason": req.belief.reason,
+            "robot_state": {
+                "active_primitive": req.control_active_primitive,
+                "active_age_s": req.control_active_age_s,
             },
-            "frames_sent": len(image_data_urls),
-            "resized_shapes": resized_shapes,
-            "jpeg_total_bytes": total_jpeg_bytes,
+            "perception_state_raw": _perception_state_context(req.state),
         }
-        user_text = "Analyze the short frame sequence and context.\n" + json.dumps(
-            probe_context,
-            separators=(",", ":"),
-            ensure_ascii=True,
-        )
-        system_prompt = (
-            "You are analyzing a social robot lamp scene over time. "
-            "Answer in this exact format:\n"
+        user_text = (
+            "Analyze the short frame sequence and context.\n"
+            "Answer the question using the following format:\n"
             "<think>\n"
-            "your reasoning\n"
-            "</think>\n\n"
-            "<answer>\n"
-            "short concise conclusion\n"
-            "</answer>"
+            "Your reasoning.\n"
+            "</think>\n"
+            "Write your final answer immediately after the </think> tag.\n\n"
+            "Context JSON:\n"
+            + json.dumps(probe_context, separators=(",", ":"), ensure_ascii=True)
         )
+        system_prompt = "You are a helpful assistant."
 
         return {
             "model": self._model,
@@ -753,8 +820,8 @@ class AsyncOrchestratorPlanner(PlannerInterface):
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": user_text},
                         *[{"type": "image_url", "image_url": {"url": u}} for u in image_data_urls],
+                        {"type": "text", "text": user_text},
                     ],
                 },
             ],
@@ -764,13 +831,48 @@ class AsyncOrchestratorPlanner(PlannerInterface):
         }
 
     def _append_transcript(self, role: str, content: str) -> None:
+        category = _normalize_transcript_role(role)
         timestamp = time.strftime("%H:%M:%S", time.localtime())
+        line = f"{timestamp} {category}: {content}"
+        item = {
+            "ts_wall_s": time.time(),
+            "ts_mono_s": time.monotonic(),
+            "role": category,
+            "text": str(content),
+            "line": line,
+        }
         with self._transcript_lock:
-            line = f"{timestamp} {role}: {content}"
-            self._transcript.append(line)
+            self._transcript.append(item)
         logger.debug("orchestrator transcript %s", line)
 
-    def _track_repetition(self, decision: OrchestratorDecision, observation: ObservationPacket) -> None:
+    def _build_transcript_window(self) -> list[str]:
+        with self._transcript_lock:
+            entries = list(self._transcript)
+        if not entries:
+            return []
+
+        selected: list[dict[str, Any]] = []
+        per_role: dict[str, int] = {}
+        for item in reversed(entries):
+            role = str(item.get("role", "system"))
+            count = per_role.get(role, 0)
+            if count >= self._context_transcript_per_type_max_items:
+                continue
+            per_role[role] = count + 1
+            selected.append(item)
+            if len(selected) >= self._context_transcript_max_items:
+                break
+        selected.reverse()
+        lines = [str(item.get("line", "")).strip() for item in selected if str(item.get("line", "")).strip()]
+        if not lines:
+            return []
+
+        # Preserve newest lines under character budget.
+        while lines and sum(len(line) + 1 for line in lines) > self._context_transcript_max_chars:
+            lines.pop(0)
+        return lines
+
+    def _track_repetition(self, decision: OrchestratorDecision) -> None:
         signature = "|".join(
             [
                 decision.target_state,
@@ -784,100 +886,23 @@ class AsyncOrchestratorPlanner(PlannerInterface):
         )
         self._decision_signature_history.append(signature)
         if len(self._decision_signature_history) < self._decision_signature_history.maxlen:
-            self._last_decision_zone = observation.zone_hint
             return
 
         unique_count = len(set(self._decision_signature_history))
-        zone_changed = (
-            self._last_decision_zone is not None
-            and observation.zone_hint is not None
-            and self._last_decision_zone != observation.zone_hint
-        )
-        if unique_count == 1 and zone_changed:
+        if unique_count == 1:
             logger.warning(
-                "orchestrator repeated_decision_detected window=%d zone_prev=%s zone_now=%s",
+                "orchestrator repeated_decision_detected window=%d signature=%s",
                 self._decision_signature_history.maxlen,
-                self._last_decision_zone,
-                observation.zone_hint,
+                signature,
             )
-        self._last_decision_zone = observation.zone_hint
 
 
-def _local_decision(observation: ObservationPacket, belief: InteractionBelief) -> OrchestratorDecision:
-    if belief.state == "reacquiring":
-        zone = belief.last_seen_zone if belief.last_seen_zone in {"left", "center", "right"} else "center"
-        return OrchestratorDecision(
-            target_state="reacquiring",
-            intent="reacquire_attention",
-            style="focused",
-            primitive_hint="orient_to_zone",
-            target_zone=zone,
-            allow_interrupt=True,
-            urgency="medium",
-            confidence=0.56,
-            rationale="person recently visible, attempt brief reacquire",
-            source="local",
-        )
-    if belief.state == "idle":
-        return OrchestratorDecision(
-            target_state="idle",
-            intent="idle_presence",
-            style="calm",
-            primitive_hint="breath",
-            target_zone=None,
-            allow_interrupt=False,
-            urgency="low",
-            confidence=0.62,
-            rationale="no person present",
-            source="local",
-        )
-    if belief.state == "tracking":
-        return OrchestratorDecision(
-            target_state="tracking",
-            intent="track_transition",
-            style="curious",
-            primitive_hint="orient_to_zone",
-            target_zone=observation.zone_hint,
-            allow_interrupt=True,
-            urgency="medium",
-            confidence=0.72,
-            rationale="recent zone transitions indicate movement",
-            source="local",
-        )
-    if belief.state == "engaging":
-        return OrchestratorDecision(
-            target_state="engaging",
-            intent="engaged_focus",
-            style="focused",
-            primitive_hint="nod",
-            target_zone=observation.zone_hint,
-            allow_interrupt=False,
-            urgency="low",
-            confidence=0.72,
-            rationale="stable centered engagement",
-            source="local",
-        )
-    return OrchestratorDecision(
-        target_state="user_detected",
-        intent="maintain_presence",
-        style="curious",
-        primitive_hint="orient_to_zone",
-        target_zone=observation.zone_hint,
-        allow_interrupt=True,
-        urgency="medium",
-        confidence=0.66,
-        rationale="person present, orient gently",
-        source="local",
-    )
-
-
-def _decision_to_action(decision: OrchestratorDecision, observation: ObservationPacket) -> ActionPlan:
+def _decision_to_action(decision: OrchestratorDecision) -> ActionPlan:
     hint = (decision.primitive_hint or "").strip().lower()
     if hint not in {"hold", "breath", "glance", "nod", "orient_to_zone"}:
         hint = _default_primitive_for_state(decision.target_state)
 
     zone = decision.target_zone if decision.target_zone in {"left", "center", "right"} else None
-    zone_hint = observation.zone_hint if observation.zone_hint in {"left", "center", "right"} else None
 
     cancel_current = bool(decision.allow_interrupt or decision.urgency == "high")
     if hint == "nod":
@@ -906,7 +931,7 @@ def _decision_to_action(decision: OrchestratorDecision, observation: Observation
             cancel_current=cancel_current,
         )
     if hint == "orient_to_zone":
-        zone_value = zone or zone_hint or "center"
+        zone_value = zone or "center"
         return ActionPlan(
             primitive=PrimitiveKind.ORIENT_TO_ZONE,
             command=OrientToZoneCommand(zone=zone_value, amp_rad=0.2, rate_rad_s=1.4),
@@ -1088,6 +1113,18 @@ def _extract_think_content(content: str) -> Optional[str]:
     return raw if raw else None
 
 
+def _extract_think_block(content: str) -> Optional[str]:
+    raw = content.strip()
+    if not raw:
+        return None
+    start = raw.find("<think>")
+    end = raw.find("</think>")
+    if start >= 0 and end > start:
+        think = raw[start + len("<think>") : end].strip()
+        return think or None
+    return None
+
+
 def _parse_decision_content(content: str) -> Optional[OrchestratorDecision]:
     cleaned = content.strip()
     data = _parse_json_obj(cleaned)
@@ -1112,6 +1149,8 @@ def _parse_decision_content(content: str) -> Optional[OrchestratorDecision]:
     style = str(data.get("style", "calm")).strip().lower()
     primitive_hint = data.get("primitive_hint")
     primitive_hint_str = None if primitive_hint in (None, "") else str(primitive_hint).strip().lower()
+    if primitive_hint_str not in _PRIMITIVE_HINTS:
+        primitive_hint_str = None
     target_zone_raw = data.get("target_zone", data.get("zone_hint"))
     target_zone = None if target_zone_raw in (None, "") else str(target_zone_raw).strip().lower()
     if target_zone not in {None, "left", "center", "right"}:
@@ -1271,6 +1310,60 @@ def _extract_first_json_object(raw: str) -> Optional[str]:
             if depth == 0:
                 return raw[start : i + 1]
     return None
+
+
+def _perception_state_context(st: PerceptionState) -> dict[str, Any]:
+    person = None
+    if st.primary_person is not None:
+        person = {
+            "cx": float(st.primary_person.cx),
+            "cy": float(st.primary_person.cy),
+            "w": float(st.primary_person.w),
+            "h": float(st.primary_person.h),
+        }
+    return {
+        "timestamp_monotonic_s": st.timestamp_monotonic_s,
+        "fps": st.fps,
+        "latency_ms": st.latency_ms,
+        "primary_person": person,
+        "primary_person_conf": st.primary_person_conf,
+        "pointing_target": None
+        if st.pointing_target is None
+        else {"x": float(st.pointing_target.x), "y": float(st.pointing_target.y)},
+        "pointing_conf": st.pointing_conf,
+        "debug": st.debug if isinstance(st.debug, dict) else {},
+    }
+
+
+def _normalize_transcript_role(role: str) -> str:
+    token = str(role or "").strip().lower()
+    if token in {"obs", "observation"}:
+        return "observation"
+    if token in {"decision", "action"}:
+        return "decision"
+    if token in {"reasoning", "think"}:
+        return "reasoning"
+    return "system"
+
+
+def _is_valid_canonical_decision(decision: OrchestratorDecision) -> bool:
+    if decision.target_state not in _TARGET_STATES:
+        return False
+    if decision.style not in _STYLES:
+        return False
+    if decision.urgency not in _URGENCY:
+        return False
+    if not isinstance(decision.intent, str) or not decision.intent.strip():
+        return False
+    if decision.primitive_hint is not None and decision.primitive_hint not in _PRIMITIVE_HINTS:
+        return False
+    if decision.target_zone is not None and decision.target_zone not in {"left", "center", "right"}:
+        return False
+    if not isinstance(decision.rationale, str) or not decision.rationale.strip():
+        return False
+    if not (0.0 <= float(decision.confidence) <= 1.0):
+        return False
+    return True
 
 
 def _preview(text: str, n: int = 180) -> str:

@@ -9,6 +9,7 @@ from .state_models import (
     InteractionBelief,
     OrchestratorDecision,
 )
+from .timeline import TimelineWriter, TimelineConfig
 
 __all__ = [
     "PlannerInterface",
@@ -21,4 +22,6 @@ __all__ = [
     "ObservationPacket",
     "InteractionBelief",
     "OrchestratorDecision",
+    "TimelineWriter",
+    "TimelineConfig",
 ]

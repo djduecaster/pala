@@ -4,6 +4,9 @@ import json
 import time
 from typing import Any, Dict, Optional
 
+PROTOCOL_NAME = "pala.telemetry"
+PROTOCOL_VERSION = 1
+
 
 def monotonic_s() -> float:
     return time.monotonic()
@@ -21,8 +24,11 @@ def event(
     msg_type: str = "event",
     ts_mono_s: Optional[float] = None,
     ts_wall_s: Optional[float] = None,
+    seq: Optional[int] = None,
 ) -> Dict[str, Any]:
-    return {
+    msg: Dict[str, Any] = {
+        "proto": PROTOCOL_NAME,
+        "proto_version": PROTOCOL_VERSION,
         "type": msg_type,
         "source": source,
         "level": level,
@@ -30,6 +36,9 @@ def event(
         "ts_wall_s": wall_s() if ts_wall_s is None else float(ts_wall_s),
         "payload": payload,
     }
+    if seq is not None:
+        msg["seq"] = int(seq)
+    return msg
 
 
 def encode_message(msg: Dict[str, Any]) -> str:
@@ -46,5 +55,28 @@ def decode_message(line: str) -> Optional[Dict[str, Any]]:
         return None
     if not isinstance(decoded, dict):
         return None
-    return decoded
+    proto = decoded.get("proto")
+    if proto is not None:
+        if proto != PROTOCOL_NAME:
+            return None
+        try:
+            version = int(decoded.get("proto_version", -1))
+        except (TypeError, ValueError):
+            return None
+        if version != PROTOCOL_VERSION:
+            return None
+    else:
+        # Backward-compatibility for older untagged telemetry events.
+        if not {"type", "source", "payload"}.issubset(decoded):
+            return None
 
+    msg_type = decoded.get("type")
+    source = decoded.get("source")
+    payload = decoded.get("payload")
+    if not isinstance(msg_type, str):
+        return None
+    if not isinstance(source, str):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return decoded

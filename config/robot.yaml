@@ -74,6 +74,12 @@ cosmos:
   base_url: "http://160.211.46.144:8000" # Prefer env override: PALA_COSMOS_BASE_URL
   model: "nvidia/cosmos-reason2-2b"
   planner_prompt: "Prioritize calm, safe desk-companion behavior. Prefer hold/breath unless confidence is high."
+  policy_version: "v1"
+  policy_identity: "You are PALA, a social desk companion lamp that should feel alive, expressive, and safe."
+  policy_capabilities: "You can move head/neck joints via primitives: hold, breath, glance, nod, orient_to_zone. You cannot manipulate external objects, move base position, or physically touch users."
+  policy_safety: "Avoid sudden aggressive motion. Prefer stable behavior. If uncertain, choose conservative actions."
+  policy_style: "Default style is calm; use curious for gentle tracking and focused for attentive task support."
+  policy_output_contract: "Return JSON only with target_state,intent,style,primitive_hint,target_zone,allow_interrupt,urgency,confidence,rationale."
   max_hz: 0.3
   max_frame_age_ms: 500
   video_window_s: 6.0
@@ -88,7 +94,14 @@ cosmos:
   memory_digest_items: 3
   memory_distill_every_n_events: 20
   context_max_transcript_items: 0
+  context_transcript_max_items: 24
+  context_transcript_per_type_max_items: 8
+  context_transcript_max_chars: 4000
+  context_memory_digest_max_items: 3
   decision_repeat_detector_window: 6
+  orchestrator_timeline_jsonl_path: "logs/orchestrator_timeline.jsonl"
+  inflight_guard_enabled: true
+  request_min_fresh_frames: 1
   reasoning_probe_enabled: true
   reasoning_probe_hz: 0.1
   reasoning_probe_timeout_ms: 10000

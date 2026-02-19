@@ -1,4 +1,5 @@
 import time
+import json
 
 import numpy as np
 
@@ -7,12 +8,10 @@ from pala.planner.orchestrator_async import (
     _decision_to_action,
     _extract_reasoning,
     _extract_think_content,
-    _local_decision,
     _parse_decision_content,
 )
 from pala.perception.frame_cache import LatestFrameCache
 from pala.types import BBoxNorm, PerceptionState
-from pala.planner.state_models import ObservationPacket, InteractionBelief
 from pala.control.primitives import PrimitiveKind, OrientToZoneCommand
 
 
@@ -24,45 +23,11 @@ def test_orchestrator_parse_decision_uses_target_zone():
     )
     decision = _parse_decision_content(content)
     assert decision is not None
-    obs = ObservationPacket(
-        timestamp_monotonic_s=time.monotonic(),
-        person_present=True,
-        zone_hint="right",
-        primary_person_conf=0.8,
-        frame_age_ms=20.0,
-        activity_hint="engaged",
-    )
-    action = _decision_to_action(decision, obs)
+    action = _decision_to_action(decision)
     assert action.primitive == PrimitiveKind.ORIENT_TO_ZONE
     assert isinstance(action.command, OrientToZoneCommand)
     assert action.command.zone == "right"
     assert action.style == "curious"
-
-
-def test_orchestrator_local_center_maps_to_focused_nod():
-    observation = ObservationPacket(
-        timestamp_monotonic_s=time.monotonic(),
-        person_present=True,
-        zone_hint="center",
-        primary_person_conf=0.8,
-        activity_hint="focused_work",
-        frame_age_ms=20.0,
-        zone_stable_s=2.0,
-    )
-    belief = InteractionBelief(
-        timestamp_monotonic_s=time.monotonic(),
-        state="engaging",
-        confidence=0.8,
-        last_seen_zone="center",
-        person_last_seen_s=time.monotonic(),
-        reason="stable centered engagement",
-    )
-    decision = _local_decision(observation, belief)
-    assert decision.intent == "engaged_focus"
-    assert decision.style == "focused"
-    action = _decision_to_action(decision, observation)
-    assert action.primitive == PrimitiveKind.NOD
-    assert action.style == "focused"
 
 
 def test_orchestrator_remote_payload_includes_multi_frame_sequence(monkeypatch):
@@ -133,6 +98,9 @@ def test_orchestrator_remote_payload_includes_multi_frame_sequence(monkeypatch):
         context = text_items[0]["text"]
         assert "recent_events" in context
         assert "session_memory_digest" in context
+        assert "perception_state_raw" in context
+        assert "\"observation\":" not in context
+        assert "\"belief\":" not in context
     finally:
         planner.shutdown()
 
@@ -174,29 +142,6 @@ def test_orchestrator_sampling_includes_newest_frame():
         planner.shutdown()
 
 
-def test_local_fallback_recent_absence_prefers_reacquire():
-    observation = ObservationPacket(
-        timestamp_monotonic_s=time.monotonic(),
-        person_present=False,
-        zone_hint=None,
-        primary_person_conf=None,
-        activity_hint="away",
-        frame_age_ms=None,
-    )
-    belief = InteractionBelief(
-        timestamp_monotonic_s=time.monotonic(),
-        state="reacquiring",
-        confidence=0.5,
-        last_seen_zone="left",
-        person_last_seen_s=time.monotonic(),
-        reason="person recently visible",
-    )
-    decision = _local_decision(observation, belief)
-    assert decision.intent == "reacquire_attention"
-    assert decision.primitive_hint == "orient_to_zone"
-    assert decision.target_zone == "left"
-
-
 def test_compiler_preserves_remote_zone_choice():
     content = (
         '{"target_state":"tracking","intent":"track_transition","style":"calm","primitive_hint":"orient_to_zone",'
@@ -205,15 +150,7 @@ def test_compiler_preserves_remote_zone_choice():
     )
     decision = _parse_decision_content(content)
     assert decision is not None
-    obs = ObservationPacket(
-        timestamp_monotonic_s=time.monotonic(),
-        person_present=True,
-        zone_hint="left",
-        primary_person_conf=0.9,
-        frame_age_ms=30.0,
-        activity_hint="engaged",
-    )
-    action = _decision_to_action(decision, obs)
+    action = _decision_to_action(decision)
     assert action.primitive == PrimitiveKind.ORIENT_TO_ZONE
     assert isinstance(action.command, OrientToZoneCommand)
     assert action.command.zone == "center"
@@ -316,7 +253,9 @@ def test_parse_decision_accepts_prediction_string_schema():
 
 def test_reasoning_probe_writes_reasoning_event(monkeypatch):
     def _fake_post(url, payload, *, timeout_s, api_key):
-        if "response_format" in payload:
+        user_parts = payload["messages"][1]["content"]
+        user_text = next((item["text"] for item in user_parts if item.get("type") == "text"), "")
+        if "Use the provided context and frame sequence to decide next action." in user_text:
             return {
                 "choices": [
                     {
@@ -370,5 +309,182 @@ def test_reasoning_probe_writes_reasoning_event(monkeypatch):
             time.sleep(0.02)
         events = planner._memory.context()["recent_events"]
         assert any(evt.get("type") == "reasoning_event" for evt in events)
+    finally:
+        planner.shutdown()
+
+
+def test_payload_includes_policy_version_and_blocks(monkeypatch):
+    captured = {"payload": None}
+
+    def _fake_post(url, payload, *, timeout_s, api_key):
+        captured["payload"] = payload
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            '{"target_state":"tracking","intent":"track_transition","style":"curious",'
+                            '"primitive_hint":"orient_to_zone","target_zone":"left","allow_interrupt":true,'
+                            '"urgency":"medium","confidence":0.7,"rationale":"follow movement"}'
+                        )
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr("pala.planner.orchestrator_async._post_json", _fake_post)
+
+    cache = LatestFrameCache()
+    planner = AsyncOrchestratorPlanner(
+        frame_cache=cache,
+        provider="brev",
+        base_url="http://127.0.0.1:8000",
+        policy_version="vtest",
+        orchestrator_hz=50.0,
+    )
+    try:
+        deadline = time.monotonic() + 1.0
+        while captured["payload"] is None and time.monotonic() < deadline:
+            cache.set(np.full((6, 6, 3), 4, dtype=np.uint8), mono_ns=time.monotonic_ns(), pts_ns=None)
+            planner.plan(
+                PerceptionState(
+                    timestamp_monotonic_s=time.monotonic(),
+                    primary_person=BBoxNorm(cx=0.4, cy=0.5, w=0.2, h=0.4),
+                    primary_person_conf=0.8,
+                    debug={"zone_hint": "left"},
+                )
+            )
+            time.sleep(0.02)
+        assert captured["payload"] is not None
+        system = captured["payload"]["messages"][0]["content"]
+        assert system == "You are a helpful assistant."
+        user_items = captured["payload"]["messages"][1]["content"]
+        assert user_items[0]["type"] == "image_url"
+        user_text = next(item["text"] for item in user_items if item.get("type") == "text")
+        assert '"policy":{"version":"vtest"' in user_text
+    finally:
+        planner.shutdown()
+
+
+def test_transcript_window_applies_role_and_char_caps():
+    planner = AsyncOrchestratorPlanner(
+        frame_cache=LatestFrameCache(),
+        provider="local",
+        context_transcript_max_items=4,
+        context_transcript_per_type_max_items=2,
+        context_transcript_max_chars=120,
+    )
+    try:
+        planner._append_transcript("observation", "obs1 " + ("x" * 40))
+        planner._append_transcript("observation", "obs2 " + ("x" * 40))
+        planner._append_transcript("observation", "obs3 " + ("x" * 40))
+        planner._append_transcript("reasoning", "reason1 " + ("y" * 40))
+        planner._append_transcript("decision", "dec1 " + ("z" * 40))
+        window = planner._build_transcript_window()
+        assert len(window) <= 4
+        assert sum(len(line) + 1 for line in window) <= 120
+        assert sum("observation:" in line for line in window) <= 2
+    finally:
+        planner.shutdown()
+
+
+def test_inflight_guard_prevents_request_pileup(monkeypatch):
+    call_count = {"n": 0}
+
+    def _fake_post(url, payload, *, timeout_s, api_key):
+        call_count["n"] += 1
+        time.sleep(0.12)
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            '{"target_state":"tracking","intent":"track_transition","style":"curious",'
+                            '"primitive_hint":"orient_to_zone","target_zone":"left","allow_interrupt":true,'
+                            '"urgency":"medium","confidence":0.7,"rationale":"follow movement"}'
+                        )
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr("pala.planner.orchestrator_async._post_json", _fake_post)
+    cache = LatestFrameCache()
+    planner = AsyncOrchestratorPlanner(
+        frame_cache=cache,
+        provider="brev",
+        base_url="http://127.0.0.1:8000",
+        orchestrator_hz=200.0,
+        inflight_guard_enabled=True,
+    )
+    try:
+        start = time.monotonic()
+        while time.monotonic() - start < 0.35:
+            cache.set(np.full((6, 6, 3), 9, dtype=np.uint8), mono_ns=time.monotonic_ns(), pts_ns=None)
+            planner.plan(
+                PerceptionState(
+                    timestamp_monotonic_s=time.monotonic(),
+                    primary_person=BBoxNorm(cx=0.4, cy=0.5, w=0.2, h=0.4),
+                    primary_person_conf=0.8,
+                    debug={"zone_hint": "left"},
+                )
+            )
+            time.sleep(0.005)
+        # We spammed plan calls; guarded submission should still keep remote calls low.
+        assert call_count["n"] <= 4
+    finally:
+        planner.shutdown()
+
+
+def test_timeline_writes_request_lifecycle(monkeypatch, tmp_path):
+    timeline_path = tmp_path / "timeline.jsonl"
+
+    def _fake_post(url, payload, *, timeout_s, api_key):
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            '{"target_state":"tracking","intent":"track_transition","style":"curious",'
+                            '"primitive_hint":"orient_to_zone","target_zone":"left","allow_interrupt":true,'
+                            '"urgency":"medium","confidence":0.7,"rationale":"follow movement"}'
+                        )
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr("pala.planner.orchestrator_async._post_json", _fake_post)
+
+    cache = LatestFrameCache()
+    planner = AsyncOrchestratorPlanner(
+        frame_cache=cache,
+        provider="brev",
+        base_url="http://127.0.0.1:8000",
+        orchestrator_hz=50.0,
+        timeline_jsonl_path=str(timeline_path),
+    )
+    try:
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            cache.set(np.full((6, 6, 3), 6, dtype=np.uint8), mono_ns=time.monotonic_ns(), pts_ns=None)
+            planner.plan(
+                PerceptionState(
+                    timestamp_monotonic_s=time.monotonic(),
+                    primary_person=BBoxNorm(cx=0.4, cy=0.5, w=0.2, h=0.4),
+                    primary_person_conf=0.8,
+                    debug={"zone_hint": "left"},
+                )
+            )
+            if timeline_path.exists():
+                rows = [json.loads(line) for line in timeline_path.read_text().splitlines() if line.strip()]
+                if rows and any(r.get("type") == "decision_event" for r in rows):
+                    break
+            time.sleep(0.02)
+        rows = [json.loads(line) for line in timeline_path.read_text().splitlines() if line.strip()]
+        kinds = {row.get("type") for row in rows}
+        assert "request_start" in kinds
+        assert "request_end" in kinds
+        assert "decision_event" in kinds
     finally:
         planner.shutdown()

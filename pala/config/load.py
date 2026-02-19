@@ -58,6 +58,23 @@ class CosmosConfig:
         "Prioritize calm, safe, desk-companion behavior with minimal sudden motion. "
         "Prefer hold or gentle breath unless confidence is high."
     )
+    policy_version: str = "v1"
+    policy_identity: str = (
+        "You are PALA, a social desk companion lamp that should feel alive, expressive, and safe."
+    )
+    policy_capabilities: str = (
+        "You can move head/neck joints via primitives: hold, breath, glance, nod, orient_to_zone. "
+        "You cannot manipulate external objects, move base position, or physically touch users."
+    )
+    policy_safety: str = (
+        "Avoid sudden aggressive motion. Prefer stable behavior. If uncertain, choose conservative actions."
+    )
+    policy_style: str = (
+        "Default style is calm; use curious for gentle tracking and focused for attentive task support."
+    )
+    policy_output_contract: str = (
+        "Return JSON only with target_state,intent,style,primitive_hint,target_zone,allow_interrupt,urgency,confidence,rationale."
+    )
     max_hz: float = 1.0
     max_frame_age_ms: int = 500
     video_window_s: float = 8.0
@@ -72,7 +89,14 @@ class CosmosConfig:
     memory_digest_items: int = 3
     memory_distill_every_n_events: int = 20
     context_max_transcript_items: int = 0
+    context_transcript_max_items: int = 24
+    context_transcript_per_type_max_items: int = 8
+    context_transcript_max_chars: int = 4000
+    context_memory_digest_max_items: int = 3
     decision_repeat_detector_window: int = 6
+    orchestrator_timeline_jsonl_path: str = "logs/orchestrator_timeline.jsonl"
+    inflight_guard_enabled: bool = True
+    request_min_fresh_frames: int = 1
     reasoning_probe_enabled: bool = False
     reasoning_probe_hz: float = 0.1
     reasoning_probe_timeout_ms: int = 8000
@@ -233,6 +257,40 @@ def load_config(path: str) -> RobotConfig:
                 ),
             )
         ),
+        policy_version=str(cosmos_raw.get("policy_version", "v1")),
+        policy_identity=str(
+            cosmos_raw.get(
+                "policy_identity",
+                "You are PALA, a social desk companion lamp that should feel alive, expressive, and safe.",
+            )
+        ),
+        policy_capabilities=str(
+            cosmos_raw.get(
+                "policy_capabilities",
+                (
+                    "You can move head/neck joints via primitives: hold, breath, glance, nod, orient_to_zone. "
+                    "You cannot manipulate external objects, move base position, or physically touch users."
+                ),
+            )
+        ),
+        policy_safety=str(
+            cosmos_raw.get(
+                "policy_safety",
+                "Avoid sudden aggressive motion. Prefer stable behavior. If uncertain, choose conservative actions.",
+            )
+        ),
+        policy_style=str(
+            cosmos_raw.get(
+                "policy_style",
+                "Default style is calm; use curious for gentle tracking and focused for attentive task support.",
+            )
+        ),
+        policy_output_contract=str(
+            cosmos_raw.get(
+                "policy_output_contract",
+                "Return JSON only with target_state,intent,style,primitive_hint,target_zone,allow_interrupt,urgency,confidence,rationale.",
+            )
+        ),
         max_hz=_as_float(cosmos_raw.get("max_hz", 1.0), "cosmos.max_hz"),
         max_frame_age_ms=_as_int(cosmos_raw.get("max_frame_age_ms", 500), "cosmos.max_frame_age_ms"),
         video_window_s=_as_float(cosmos_raw.get("video_window_s", 8.0), "cosmos.video_window_s"),
@@ -253,9 +311,33 @@ def load_config(path: str) -> RobotConfig:
             cosmos_raw.get("context_max_transcript_items", 0),
             "cosmos.context_max_transcript_items",
         ),
+        context_transcript_max_items=_as_int(
+            cosmos_raw.get("context_transcript_max_items", 24),
+            "cosmos.context_transcript_max_items",
+        ),
+        context_transcript_per_type_max_items=_as_int(
+            cosmos_raw.get("context_transcript_per_type_max_items", 8),
+            "cosmos.context_transcript_per_type_max_items",
+        ),
+        context_transcript_max_chars=_as_int(
+            cosmos_raw.get("context_transcript_max_chars", 4000),
+            "cosmos.context_transcript_max_chars",
+        ),
+        context_memory_digest_max_items=_as_int(
+            cosmos_raw.get("context_memory_digest_max_items", 3),
+            "cosmos.context_memory_digest_max_items",
+        ),
         decision_repeat_detector_window=_as_int(
             cosmos_raw.get("decision_repeat_detector_window", 6),
             "cosmos.decision_repeat_detector_window",
+        ),
+        orchestrator_timeline_jsonl_path=str(
+            cosmos_raw.get("orchestrator_timeline_jsonl_path", "logs/orchestrator_timeline.jsonl")
+        ),
+        inflight_guard_enabled=bool(cosmos_raw.get("inflight_guard_enabled", True)),
+        request_min_fresh_frames=_as_int(
+            cosmos_raw.get("request_min_fresh_frames", 1),
+            "cosmos.request_min_fresh_frames",
         ),
         reasoning_probe_enabled=bool(cosmos_raw.get("reasoning_probe_enabled", False)),
         reasoning_probe_hz=_as_float(cosmos_raw.get("reasoning_probe_hz", 0.1), "cosmos.reasoning_probe_hz"),
