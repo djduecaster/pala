@@ -6,13 +6,15 @@ import collections
 import io
 import os
 import queue
+import select
 import shlex
 import signal
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Deque, Dict, Optional
+from typing import Any, Deque, Dict, List, Optional
 
 from PIL import Image, ImageDraw
 
@@ -31,7 +33,16 @@ from tools.telemetry.filters import matches_field_filters, parse_field_filters
 from tools.telemetry.packs import apply_pack_overrides, list_packs, resolve_packs
 from tools.telemetry.protocol import decode_message
 from tools.telemetry.lamp_viz import draw_lamp_panel
+from tools.telemetry.reasoning import ReasoningEvent, format_reasoning_snippet, normalize_reasoning_message
 from tools.telemetry.replay import SessionReplayReader
+from tools.telemetry.trace_graph import TraceGraphBuilder, TraceRecord, resolve_trace_index_path, load_trace_index
+
+try:
+    import termios
+    import tty
+except Exception:  # pragma: no cover - depends on platform.
+    termios = None
+    tty = None
 
 
 def _resample_filter() -> int:
@@ -99,6 +110,24 @@ class DashboardState:
     last_video_wall_s: Optional[float] = None
     last_agent_wall_s: Optional[float] = None
     max_frame_bytes: int = 2_000_000
+    reasoning_events: Deque[ReasoningEvent] = field(default_factory=lambda: collections.deque(maxlen=400))
+    reasoning_selected_seq: Optional[int] = None
+    reasoning_filter_mode: str = "all"  # all | errors | slow
+    reasoning_show_help: bool = False
+    focus_panel: str = "reasoning_stream"
+    key_reader_enabled: bool = False
+    reasoning_seq_counter: int = 0
+    active_panels: List[str] = field(default_factory=list)
+    trace_records: List[TraceRecord] = field(default_factory=list)
+    trace_selected_id: Optional[str] = None
+    trace_pinned_id: Optional[str] = None
+
+    def configure_panels(self, panels: List[str], *, focus_panel: str = "") -> None:
+        self.active_panels = list(panels)
+        if focus_panel and focus_panel in self.active_panels:
+            self.focus_panel = focus_panel
+        elif self.focus_panel not in self.active_panels:
+            self.focus_panel = self.active_panels[0] if self.active_panels else "summary"
 
     def apply(self, msg: Dict[str, Any]) -> None:
         source = str(msg.get("source", "unknown"))
@@ -108,6 +137,7 @@ class DashboardState:
         payload = msg.get("payload", {})
         if not isinstance(payload, dict):
             return
+        self._ingest_reasoning_event(msg)
 
         if source == "perception_log":
             data = payload.get("data")
@@ -216,6 +246,130 @@ class DashboardState:
         if "error" in payload:
             self.warnings.append(f"{source}: {payload['error']}")
 
+    def _ingest_reasoning_event(self, msg: Dict[str, Any]) -> None:
+        event = normalize_reasoning_message(msg)
+        if event is None:
+            return
+        self.reasoning_seq_counter += 1
+        # Keep seq in-band using phase prefix so rendering can still show it.
+        enriched = ReasoningEvent(
+            source=event.source,
+            ts_wall_s=event.ts_wall_s,
+            req_id=event.req_id,
+            phase=f"{event.phase}",
+            status=event.status,
+            latency_ms=event.latency_ms,
+            primitive=event.primitive,
+            confidence=event.confidence,
+            target_zone=event.target_zone,
+            model=event.model,
+            provider=event.provider,
+            snippet=event.snippet,
+            severity=event.severity,
+        )
+        self.reasoning_events.append(enriched)
+        if self.reasoning_selected_seq is None:
+            self.reasoning_selected_seq = self.reasoning_seq_counter
+
+    def _iter_reasoning_with_seq(self) -> List[tuple[int, ReasoningEvent]]:
+        start_seq = max(1, self.reasoning_seq_counter - len(self.reasoning_events) + 1)
+        out: List[tuple[int, ReasoningEvent]] = []
+        for idx, event in enumerate(self.reasoning_events):
+            out.append((start_seq + idx, event))
+        return out
+
+    def filtered_reasoning_events(self, *, slow_ms: float) -> List[tuple[int, ReasoningEvent]]:
+        mode = str(self.reasoning_filter_mode or "all")
+        events = self._iter_reasoning_with_seq()
+        if mode == "errors":
+            return [(seq, ev) for seq, ev in events if ev.severity in {"error", "warning"}]
+        if mode == "slow":
+            threshold = max(1.0, float(slow_ms))
+            return [(seq, ev) for seq, ev in events if ev.latency_ms is not None and ev.latency_ms >= threshold]
+        return events
+
+    def selected_reasoning_event(self, *, slow_ms: float) -> Optional[tuple[int, ReasoningEvent]]:
+        events = self.filtered_reasoning_events(slow_ms=slow_ms)
+        if not events:
+            return None
+        if self.reasoning_selected_seq is None:
+            self.reasoning_selected_seq = events[-1][0]
+            return events[-1]
+        for seq, event in events:
+            if seq == self.reasoning_selected_seq:
+                return seq, event
+        self.reasoning_selected_seq = events[-1][0]
+        return events[-1]
+
+    def move_reasoning_selection(self, *, delta: int, slow_ms: float) -> None:
+        events = self.filtered_reasoning_events(slow_ms=slow_ms)
+        if not events:
+            self.reasoning_selected_seq = None
+            return
+        current_idx = len(events) - 1
+        if self.reasoning_selected_seq is not None:
+            for idx, (seq, _) in enumerate(events):
+                if seq == self.reasoning_selected_seq:
+                    current_idx = idx
+                    break
+        target_idx = max(0, min(len(events) - 1, current_idx + int(delta)))
+        self.reasoning_selected_seq = events[target_idx][0]
+
+    def cycle_focus_panel(self, *, delta: int) -> None:
+        if not self.active_panels:
+            return
+        if self.focus_panel not in self.active_panels:
+            self.focus_panel = self.active_panels[0]
+            return
+        idx = self.active_panels.index(self.focus_panel)
+        self.focus_panel = self.active_panels[(idx + int(delta)) % len(self.active_panels)]
+
+    def set_traces(self, traces: List[TraceRecord]) -> None:
+        self.trace_records = list(traces)
+        trace_ids = {trace.trace_id for trace in self.trace_records}
+        if self.trace_pinned_id not in trace_ids:
+            self.trace_pinned_id = None
+        if self.trace_selected_id not in trace_ids:
+            self.trace_selected_id = self.trace_records[0].trace_id if self.trace_records else None
+
+    def selected_trace(self) -> Optional[TraceRecord]:
+        if not self.trace_records:
+            return None
+        if self.trace_pinned_id:
+            for trace in self.trace_records:
+                if trace.trace_id == self.trace_pinned_id:
+                    return trace
+        if self.trace_selected_id:
+            for trace in self.trace_records:
+                if trace.trace_id == self.trace_selected_id:
+                    return trace
+        self.trace_selected_id = self.trace_records[0].trace_id
+        return self.trace_records[0]
+
+    def move_trace_selection(self, delta: int) -> None:
+        if not self.trace_records:
+            self.trace_selected_id = None
+            return
+        current_idx = 0
+        if self.trace_selected_id:
+            for idx, trace in enumerate(self.trace_records):
+                if trace.trace_id == self.trace_selected_id:
+                    current_idx = idx
+                    break
+        target_idx = max(0, min(len(self.trace_records) - 1, current_idx + int(delta)))
+        self.trace_selected_id = self.trace_records[target_idx].trace_id
+
+    def toggle_trace_pin(self) -> None:
+        selected = self.selected_trace()
+        if selected is None:
+            return
+        if self.trace_pinned_id == selected.trace_id:
+            self.trace_pinned_id = None
+            self.logs.append("trace pin cleared")
+            return
+        self.trace_pinned_id = selected.trace_id
+        self.logs.append(f"trace pinned: {selected.trace_id}")
+
 
 @dataclass
 class _VideoWindow:
@@ -224,6 +378,88 @@ class _VideoWindow:
     label: Any
     photo: Any = None
     last_frame_id: int = -1
+
+
+PANEL_PRESETS: Dict[str, List[str]] = {
+    "1": ["summary", "trace_list", "trace_detail", "reasoning_stream", "request_detail", "reasoning_health", "video"],
+    "2": ["summary", "trace_list", "trace_detail", "reasoning_stream", "request_detail", "logs", "warnings", "transport"],
+    "3": ["summary", "trace_list", "trace_detail", "video", "perception", "action", "system", "events"],
+}
+
+
+def _apply_panel_preset(state: DashboardState, args: argparse.Namespace, key: str) -> None:
+    panels = PANEL_PRESETS.get(str(key))
+    if not panels:
+        return
+    args.panel = list(panels)
+    state.configure_panels(args.panel, focus_panel=state.focus_panel)
+    state.logs.append(f"panel preset {key} applied")
+
+
+def _cycle_reasoning_filter(state: DashboardState) -> None:
+    modes = ["all", "errors", "slow"]
+    current = str(state.reasoning_filter_mode or "all")
+    try:
+        idx = modes.index(current)
+    except ValueError:
+        idx = 0
+    state.reasoning_filter_mode = modes[(idx + 1) % len(modes)]
+    state.logs.append(f"reasoning filter={state.reasoning_filter_mode}")
+
+
+class _KeyboardReader:
+    def __init__(self) -> None:
+        self.enabled = False
+        self._fd: Optional[int] = None
+        self._saved_termios = None
+
+    def start(self) -> bool:
+        if termios is None or tty is None:
+            return False
+        if not sys.stdin.isatty():
+            return False
+        try:
+            fd = sys.stdin.fileno()
+            saved = termios.tcgetattr(fd)
+            tty.setcbreak(fd)
+        except Exception:
+            return False
+        self._fd = fd
+        self._saved_termios = saved
+        self.enabled = True
+        return True
+
+    def stop(self) -> None:
+        if not self.enabled:
+            return
+        self.enabled = False
+        if self._fd is not None and self._saved_termios is not None and termios is not None:
+            try:
+                termios.tcsetattr(self._fd, termios.TCSADRAIN, self._saved_termios)
+            except Exception:
+                pass
+
+    def poll(self) -> str:
+        if not self.enabled or self._fd is None:
+            return ""
+        chars: List[str] = []
+        while True:
+            try:
+                ready, _, _ = select.select([self._fd], [], [], 0.0)
+            except Exception:
+                break
+            if not ready:
+                break
+            try:
+                buf = os.read(self._fd, 64)
+            except Exception:
+                break
+            if not buf:
+                break
+            chars.append(buf.decode("utf-8", errors="ignore"))
+            if len(chars) >= 4:
+                break
+        return "".join(chars)
 
 
 def _build_remote_agent_command(args: argparse.Namespace) -> str:
@@ -251,6 +487,8 @@ def _build_remote_agent_command(args: argparse.Namespace) -> str:
         str(float(args.warning_throttle_s)),
         "--worker-restart-delay-s",
         str(float(args.worker_restart_delay_s)),
+        "--trace-match-window-s",
+        str(float(args.trace_match_window_s)),
     ]
     for pack in args.pack:
         agent_args.extend(["--pack", str(pack)])
@@ -687,6 +925,159 @@ def _pump_video_window(
     return window
 
 
+def _focus_prefix(state: DashboardState, panel: str) -> str:
+    if state.focus_panel == panel:
+        return "> "
+    return "  "
+
+
+def _percentile(values: List[float], pct: float) -> Optional[float]:
+    if not values:
+        return None
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    idx = int(round((max(0.0, min(100.0, pct)) / 100.0) * (len(ordered) - 1)))
+    return ordered[idx]
+
+
+def _render_reasoning_stream(lines: List[str], state: DashboardState, args: argparse.Namespace) -> None:
+    lines.append(f"{_focus_prefix(state, 'reasoning_stream')}Reasoning Stream")
+    filtered = state.filtered_reasoning_events(slow_ms=float(args.reasoning_slow_ms))
+    if not filtered:
+        lines.append("  no reasoning events yet")
+        lines.append("")
+        return
+    selected = state.selected_reasoning_event(slow_ms=float(args.reasoning_slow_ms))
+    selected_seq = selected[0] if selected is not None else None
+    max_rows = max(4, int(args.max_log_lines))
+    for seq, event in filtered[-max_rows:]:
+        mark = "*" if seq == selected_seq else " "
+        latency = f"{event.latency_ms:.0f}ms" if event.latency_ms is not None else "-"
+        req = event.req_id if event.req_id is not None else "-"
+        snippet = format_reasoning_snippet(
+            event.snippet,
+            max_chars=int(args.reasoning_snippet_max_chars),
+            redact=str(args.reasoning_redact) == "on",
+        )
+        lines.append(
+            f" {mark} #{seq} req={req} phase={event.phase} status={event.status or '-'} "
+            f"lat={latency} sev={event.severity}"
+        )
+        if snippet:
+            lines.append(f"    {_shorten(snippet, 180)}")
+    lines.append("")
+
+
+def _render_request_detail(lines: List[str], state: DashboardState, args: argparse.Namespace) -> None:
+    lines.append(f"{_focus_prefix(state, 'request_detail')}Request Detail")
+    selected = state.selected_reasoning_event(slow_ms=float(args.reasoning_slow_ms))
+    if selected is None:
+        lines.append("  no selection")
+        lines.append("")
+        return
+    seq, event = selected
+    lines.append(
+        f"  seq={seq} source={event.source} req_id={event.req_id} phase={event.phase} status={event.status or '-'}"
+    )
+    lines.append(
+        "  "
+        f"latency_ms={event.latency_ms} primitive={event.primitive} confidence={event.confidence} "
+        f"target_zone={event.target_zone}"
+    )
+    lines.append(f"  model={event.model} provider={event.provider} severity={event.severity}")
+    snippet = format_reasoning_snippet(
+        event.snippet,
+        max_chars=int(args.reasoning_snippet_max_chars),
+        redact=str(args.reasoning_redact) == "on",
+    )
+    if snippet:
+        lines.append(f"  snippet={_shorten(snippet, 240)}")
+    lines.append("")
+
+
+def _render_reasoning_health(lines: List[str], state: DashboardState, args: argparse.Namespace, now_wall_s: float) -> None:
+    lines.append(f"{_focus_prefix(state, 'reasoning_health')}Reasoning Health")
+    window_s = max(1.0, float(args.reasoning_kpi_window_s))
+    recent: List[ReasoningEvent] = []
+    for _, event in state.filtered_reasoning_events(slow_ms=float(args.reasoning_slow_ms)):
+        if event.ts_wall_s is None:
+            continue
+        if (now_wall_s - float(event.ts_wall_s)) <= window_s:
+            recent.append(event)
+
+    if not recent:
+        lines.append(f"  no events in last {window_s:.0f}s")
+        lines.append("")
+        return
+    total = len(recent)
+    error_count = sum(1 for ev in recent if ev.severity == "error")
+    parse_fail = sum(1 for ev in recent if "parse_fail" in ev.phase)
+    no_content = sum(1 for ev in recent if (ev.status or "").lower() == "no_content")
+    stale = sum(1 for ev in recent if "stale" in ev.phase or "stale" in (ev.status or "").lower())
+    latencies = [float(ev.latency_ms) for ev in recent if ev.latency_ms is not None]
+    p50 = _percentile(latencies, 50.0)
+    p95 = _percentile(latencies, 95.0)
+    ok_rate = (100.0 * max(0, total - error_count) / total) if total > 0 else 0.0
+    lines.append(f"  window={window_s:.0f}s events={total} ok_rate={ok_rate:.1f}% errors={error_count}")
+    lines.append(f"  parse_fail={parse_fail} no_content={no_content} stale_markers={stale}")
+    lines.append(f"  latency_ms p50={p50:.0f} p95={p95:.0f}" if p50 is not None and p95 is not None else "  latency_ms n/a")
+    lines.append("")
+
+
+def _render_trace_list(lines: List[str], state: DashboardState, args: argparse.Namespace) -> None:
+    lines.append(f"{_focus_prefix(state, 'trace_list')}Trace List")
+    if not state.trace_records:
+        lines.append("  no traces yet")
+        lines.append("")
+        return
+    selected = state.selected_trace()
+    selected_id = selected.trace_id if selected is not None else None
+    max_rows = max(4, int(args.max_log_lines))
+    for trace in state.trace_records[:max_rows]:
+        sel = "*" if trace.trace_id == selected_id else " "
+        pin = "P" if state.trace_pinned_id == trace.trace_id else " "
+        duration = f"{trace.duration_ms:.0f}ms" if trace.duration_ms is not None else "n/a"
+        req = trace.req_id if trace.req_id is not None else "-"
+        lines.append(
+            f" {sel}{pin} {trace.trace_id} req={req} status={trace.status} "
+            f"sev={trace.severity} dur={duration}"
+        )
+        lines.append(f"    {_shorten(trace.summary, 160)}")
+    lines.append("")
+
+
+def _render_trace_detail(lines: List[str], state: DashboardState, args: argparse.Namespace) -> None:
+    lines.append(f"{_focus_prefix(state, 'trace_detail')}Trace Detail")
+    trace = state.selected_trace()
+    if trace is None:
+        lines.append("  no trace selected")
+        lines.append("")
+        return
+    pin_state = "pinned" if state.trace_pinned_id == trace.trace_id else "unpinned"
+    lines.append(
+        f"  trace_id={trace.trace_id} req_id={trace.req_id} status={trace.status} "
+        f"severity={trace.severity} {pin_state}"
+    )
+    lines.append(
+        f"  start={trace.start_ts_wall_s} end={trace.end_ts_wall_s} duration_ms={trace.duration_ms}"
+    )
+    lines.append(f"  summary={_shorten(trace.summary, 220)}")
+    refs = list(trace.event_refs)[-max(4, int(args.max_log_lines)) :]
+    if not refs:
+        lines.append("  no events")
+        lines.append("")
+        return
+    lines.append("  events:")
+    for ref in refs:
+        latency = f"{ref.latency_ms:.0f}ms" if ref.latency_ms is not None else "-"
+        lines.append(
+            f"    #{ref.event_index} {ref.source} phase={ref.phase or '-'} "
+            f"status={ref.status or '-'} lat={latency}"
+        )
+    lines.append("")
+
+
 def _panel_enabled(args: argparse.Namespace, panel: str) -> bool:
     selected = getattr(args, "panel", None)
     if not selected:
@@ -712,10 +1103,35 @@ def _render(state: DashboardState, *, now_wall_s: float, args: argparse.Namespac
             lines.append(f"Packs: {', '.join(args.pack)}")
         if args.field_filter:
             lines.append(f"Field filters: {', '.join(args.field_filter)}")
+        lines.append(
+            f"Reasoning filter={state.reasoning_filter_mode} | focus={state.focus_panel} | "
+            f"hotkeys={'on' if state.key_reader_enabled else 'off'}"
+        )
+        selected_trace = state.selected_trace()
+        lines.append(
+            "Traces: "
+            f"count={len(state.trace_records)} selected={(selected_trace.trace_id if selected_trace else 'n/a')} "
+            f"pinned={(state.trace_pinned_id or 'none')}"
+        )
         lines.append("")
 
+    if _panel_enabled(args, "reasoning_stream"):
+        _render_reasoning_stream(lines, state, args)
+
+    if _panel_enabled(args, "request_detail"):
+        _render_request_detail(lines, state, args)
+
+    if _panel_enabled(args, "reasoning_health"):
+        _render_reasoning_health(lines, state, args, now_wall_s)
+
+    if _panel_enabled(args, "trace_list"):
+        _render_trace_list(lines, state, args)
+
+    if _panel_enabled(args, "trace_detail"):
+        _render_trace_detail(lines, state, args)
+
     if _panel_enabled(args, "video"):
-        lines.append("Video")
+        lines.append(f"{_focus_prefix(state, 'video')}Video")
         if args.no_video:
             lines.append("  disabled")
         elif state.video_frame_meta is None:
@@ -731,7 +1147,7 @@ def _render(state: DashboardState, *, now_wall_s: float, args: argparse.Namespac
         lines.append("")
 
     if _panel_enabled(args, "perception"):
-        lines.append("Perception")
+        lines.append(f"{_focus_prefix(state, 'perception')}Perception")
         if state.perception is None:
             lines.append("  no data yet")
         else:
@@ -748,7 +1164,7 @@ def _render(state: DashboardState, *, now_wall_s: float, args: argparse.Namespac
         lines.append("")
 
     if _panel_enabled(args, "action"):
-        lines.append("Action")
+        lines.append(f"{_focus_prefix(state, 'action')}Action")
         if state.action is None:
             lines.append("  no data yet")
         else:
@@ -760,7 +1176,7 @@ def _render(state: DashboardState, *, now_wall_s: float, args: argparse.Namespac
         lines.append("")
 
     if _panel_enabled(args, "command"):
-        lines.append("Command")
+        lines.append(f"{_focus_prefix(state, 'command')}Command")
         if state.command is None:
             lines.append("  no data yet")
         else:
@@ -780,7 +1196,7 @@ def _render(state: DashboardState, *, now_wall_s: float, args: argparse.Namespac
         lines.append("")
 
     if _panel_enabled(args, "system"):
-        lines.append("System (tegrastats)")
+        lines.append(f"{_focus_prefix(state, 'system')}System (tegrastats)")
         if state.tegrastats is None:
             lines.append("  no data yet")
         else:
@@ -795,7 +1211,7 @@ def _render(state: DashboardState, *, now_wall_s: float, args: argparse.Namespac
         lines.append("")
 
     if _panel_enabled(args, "memory"):
-        lines.append("Memory")
+        lines.append(f"{_focus_prefix(state, 'memory')}Memory")
         if state.memory is None:
             lines.append("  no data yet")
         else:
@@ -810,7 +1226,7 @@ def _render(state: DashboardState, *, now_wall_s: float, args: argparse.Namespac
         lines.append("")
 
     if _panel_enabled(args, "timeline"):
-        lines.append("Timeline")
+        lines.append(f"{_focus_prefix(state, 'timeline')}Timeline")
         if state.timeline is None:
             lines.append("  no data yet")
         else:
@@ -824,7 +1240,7 @@ def _render(state: DashboardState, *, now_wall_s: float, args: argparse.Namespac
         lines.append("")
 
     if _panel_enabled(args, "transport"):
-        lines.append("Transport")
+        lines.append(f"{_focus_prefix(state, 'transport')}Transport")
         if state.transport is None:
             lines.append("  no data yet")
         else:
@@ -841,7 +1257,7 @@ def _render(state: DashboardState, *, now_wall_s: float, args: argparse.Namespac
         lines.append("")
 
     if _panel_enabled(args, "logs"):
-        lines.append("Recent Logs")
+        lines.append(f"{_focus_prefix(state, 'logs')}Recent Logs")
         if state.logs:
             for item in list(state.logs)[-args.max_log_lines :]:
                 lines.append(f"  {_shorten(item, 160)}")
@@ -850,13 +1266,13 @@ def _render(state: DashboardState, *, now_wall_s: float, args: argparse.Namespac
         lines.append("")
 
     if _panel_enabled(args, "warnings") and state.warnings:
-        lines.append("Warnings")
+        lines.append(f"{_focus_prefix(state, 'warnings')}Warnings")
         for item in state.warnings:
             lines.append(f"  {_shorten(item, 160)}")
         lines.append("")
 
     if _panel_enabled(args, "events"):
-        lines.append("Event Counts")
+        lines.append(f"{_focus_prefix(state, 'events')}Event Counts")
         if not state.event_counts:
             lines.append("  no events yet")
         else:
@@ -864,12 +1280,33 @@ def _render(state: DashboardState, *, now_wall_s: float, args: argparse.Namespac
                 lines.append(f"  {source}: {state.event_counts[source]}")
         lines.append("")
 
-    lines.append("Exit: Ctrl-C")
+    if state.reasoning_show_help:
+        lines.append("Hotkeys")
+        lines.append("  ?: toggle this help")
+        lines.append("  h/l: move focus panel")
+        lines.append("  j/k: previous/next reasoning event")
+        lines.append("  u/i: previous/next trace")
+        lines.append("  f: cycle reasoning filter (all/errors/slow)")
+        lines.append("  r: toggle reasoning redaction")
+        lines.append("  o: focus trace detail panel")
+        lines.append("  p: pin/unpin selected trace")
+        lines.append("  1/2/3: apply panel preset")
+        lines.append("  Ctrl-C: exit")
+        lines.append("")
+    lines.append(
+        "Cmd: [? help] [h/l focus] [j/k reasoning] [u/i trace] [o detail] [p pin] [f filter] [r redact] [1/2/3 presets] [Ctrl-C exit]"
+    )
     return "\n".join(lines)
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Mac-side telemetry dashboard for PALA.")
+    parser.add_argument(
+        "--ui-mode",
+        choices=["reasoning", "classic"],
+        default="reasoning",
+        help="Viewer layout mode. reasoning enables reasoning-first panels and hotkeys.",
+    )
     parser.add_argument("--list-packs", action="store_true", help="List built-in signal packs and exit.")
     parser.add_argument("--pack", action="append", default=[], help="Signal pack to enable (repeatable).")
     parser.add_argument(
@@ -888,9 +1325,28 @@ def _build_parser() -> argparse.ArgumentParser:
         "--panel",
         action="append",
         default=[],
-        choices=["summary", "video", "perception", "action", "command", "system", "memory", "timeline", "transport", "logs", "warnings", "events"],
+        choices=[
+            "summary",
+            "trace_list",
+            "trace_detail",
+            "reasoning_stream",
+            "request_detail",
+            "reasoning_health",
+            "video",
+            "perception",
+            "action",
+            "command",
+            "system",
+            "memory",
+            "timeline",
+            "transport",
+            "logs",
+            "warnings",
+            "events",
+        ],
         help="Restrict visible dashboard panels (repeatable). Default derives from active packs.",
     )
+    parser.add_argument("--focus-panel", default="", help="Initial focused panel for keyboard navigation.")
     parser.add_argument("--jetson-host", default="jetson")
     parser.add_argument("--jetson-dir", default="~/pala")
     parser.add_argument("--perception-log", default="logs/perception.jsonl")
@@ -947,6 +1403,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--replay-speed", type=float, default=1.0)
     parser.add_argument("--replay-no-timing", action="store_true")
     parser.add_argument("--max-log-lines", type=int, default=8)
+    parser.add_argument("--reasoning-snippet-max-chars", type=int, default=180)
+    parser.add_argument("--reasoning-redact", choices=["on", "off"], default="on")
+    parser.add_argument("--reasoning-kpi-window-s", type=float, default=120.0)
+    parser.add_argument("--reasoning-slow-ms", type=float, default=2000.0)
+    parser.add_argument("--trace-match-window-s", type=float, default=2.0)
+    parser.add_argument("--trace-max-events", type=int, default=1000)
     return parser
 
 
@@ -958,14 +1420,26 @@ def main() -> int:
             print(f"{pack.name}: {pack.description}")
         return 0
     if not args.pack:
-        args.pack = ["runtime_core"]
+        args.pack = ["reasoning_live"] if args.ui_mode == "reasoning" else ["runtime_core"]
     try:
         resolved_packs = resolve_packs(args.pack)
         resolved_packs = apply_pack_overrides(resolved_packs, args.pack_override)
     except ValueError as exc:
         parser.error(str(exc))
     if not args.panel:
-        args.panel = sorted(set(resolved_packs.panels) | {"summary"})
+        if args.ui_mode == "reasoning":
+            args.panel = [
+                "summary",
+                "trace_list",
+                "trace_detail",
+                "reasoning_stream",
+                "request_detail",
+                "reasoning_health",
+                "video",
+                "transport",
+            ]
+        else:
+            args.panel = sorted(set(resolved_packs.panels) | {"summary"})
     try:
         field_filters = parse_field_filters(args.field_filter)
     except ValueError as exc:
@@ -985,14 +1459,29 @@ def main() -> int:
     signal.signal(signal.SIGTERM, _stop_handler)
 
     state = DashboardState(host=args.jetson_host, max_frame_bytes=max(0, int(args.max_frame_bytes)))
+    state.configure_panels(args.panel, focus_panel=str(args.focus_panel or ""))
+    if args.ui_mode == "reasoning":
+        if "trace_list" in args.panel:
+            state.focus_panel = "trace_list"
+        elif "reasoning_stream" in args.panel:
+            state.focus_panel = "reasoning_stream"
     if map_note:
         state.logs.append(map_note)
     in_q: "queue.Queue[Dict[str, Any]]" = queue.Queue(maxsize=max(256, int(args.queue_size)))
+    trace_builder = TraceGraphBuilder(
+        match_window_s=max(0.1, float(args.trace_match_window_s)),
+        max_events=max(128, int(args.trace_max_events)),
+    )
+    key_reader = _KeyboardReader()
+    state.key_reader_enabled = key_reader.start()
+    if not state.key_reader_enabled:
+        state.logs.append("hotkeys unavailable (non-tty/platform)")
 
     proc: Optional[subprocess.Popen[str]] = None
     proc_started_wall_s: Optional[float] = None
     reader_thread: Optional[threading.Thread] = None
     replay_thread: Optional[threading.Thread] = None
+    using_preloaded_trace_index = False
     next_connect_time = 0.0
     reconnect_attempt = 0
     reconnect_base_s = max(0.5, float(args.reconnect_delay_s))
@@ -1009,6 +1498,7 @@ def main() -> int:
             frames_mode=args.capture_frames,
             max_seconds=max(0.0, float(args.capture_max_seconds)),
             manifest_version=int(args.capture_manifest_version),
+            trace_match_window_s=max(0.1, float(args.trace_match_window_s)),
             metadata={
                 "mode": "replay" if replay_mode else "live",
                 "packs": list(args.pack),
@@ -1037,6 +1527,17 @@ def main() -> int:
             parser.error(f"replay directory not found: {replay_dir}")
         state.connected = True
         state.connection_note = f"replay from {replay_dir}"
+        replay_reader = SessionReplayReader(replay_dir)
+        try:
+            trace_index_path = resolve_trace_index_path(replay_dir, replay_reader.manifest)
+            if os.path.exists(trace_index_path):
+                preloaded_traces = load_trace_index(trace_index_path)
+                state.set_traces(preloaded_traces)
+                if preloaded_traces:
+                    using_preloaded_trace_index = True
+                    state.logs.append(f"preloaded {len(preloaded_traces)} traces from trace index")
+        except Exception as exc:
+            state.warnings.append(f"trace_index_load_failed: {exc!r}")
         replay_thread = threading.Thread(
             target=_replay_loop,
             kwargs={
@@ -1052,6 +1553,45 @@ def main() -> int:
 
     while not stop.is_set():
         now = time.time()
+        for key in key_reader.poll():
+            if key == "?":
+                state.reasoning_show_help = not state.reasoning_show_help
+                continue
+            if key in PANEL_PRESETS:
+                _apply_panel_preset(state, args, key)
+                continue
+            if key == "h":
+                state.cycle_focus_panel(delta=-1)
+                continue
+            if key == "l":
+                state.cycle_focus_panel(delta=1)
+                continue
+            if key == "j":
+                state.move_reasoning_selection(delta=-1, slow_ms=float(args.reasoning_slow_ms))
+                continue
+            if key == "k":
+                state.move_reasoning_selection(delta=1, slow_ms=float(args.reasoning_slow_ms))
+                continue
+            if key == "u":
+                state.move_trace_selection(-1)
+                continue
+            if key == "i":
+                state.move_trace_selection(1)
+                continue
+            if key == "o":
+                if "trace_detail" in state.active_panels:
+                    state.focus_panel = "trace_detail"
+                continue
+            if key == "p":
+                state.toggle_trace_pin()
+                continue
+            if key == "f":
+                _cycle_reasoning_filter(state)
+                continue
+            if key == "r":
+                args.reasoning_redact = "off" if args.reasoning_redact == "on" else "on"
+                state.logs.append(f"reasoning redaction={args.reasoning_redact}")
+                continue
 
         if (not replay_mode) and proc is None and now >= next_connect_time:
             state.connection_note = "connecting via ssh"
@@ -1093,6 +1633,8 @@ def main() -> int:
             if not matches_field_filters(msg, field_filters):
                 continue
             state.apply(msg)
+            if (not using_preloaded_trace_index) and trace_builder.ingest(msg):
+                state.set_traces(trace_builder.traces())
             if capture_writer is not None:
                 keep_writing = capture_writer.write(msg)
                 if not keep_writing:
@@ -1152,6 +1694,7 @@ def main() -> int:
         replay_thread.join(timeout=1.0)
     if capture_writer is not None:
         capture_writer.close()
+    key_reader.stop()
 
     if video_window is not None:
         try:

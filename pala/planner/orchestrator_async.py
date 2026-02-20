@@ -6,7 +6,6 @@ from dataclasses import dataclass
 import io
 import json
 import logging
-import os
 import subprocess
 import threading
 import time
@@ -29,8 +28,11 @@ from ..types import (
     PerceptionState,
 )
 from .heuristic import HeuristicPlanner
+from .identity import load_identity_text
+from .memory_manager import MemoryManager, MemoryManagerConfig
 from .protocol import PlannerInterface
-from .state_models import OrchestratorDecision
+from .scene_summarizer import AsyncSceneSummarizer
+from .state_models import OrchestratorDecision, SceneSummary
 from .timeline import TimelineConfig, TimelineWriter
 
 logger = logging.getLogger(__name__)
@@ -39,6 +41,16 @@ _TARGET_STATES = {"idle", "user_detected", "engaging", "tracking", "acknowledgin
 _STYLES = {"calm", "curious", "focused"}
 _URGENCY = {"low", "medium", "high"}
 _PRIMITIVE_HINTS = {"hold", "breath", "glance", "nod", "orient_to_zone"}
+_ACTION_REQUIRED_FIELDS = {
+    "target_state",
+    "intent",
+    "style",
+    "primitive_hint",
+    "allow_interrupt",
+    "urgency",
+    "confidence",
+    "rationale",
+}
 
 
 @dataclass
@@ -48,10 +60,17 @@ class _OrchestratorRequest:
     frame_age_ms: Optional[float]
     control_active_primitive: Optional[str]
     control_active_age_s: Optional[float]
+    latest_summary: Optional[SceneSummary]
+    summary_age_ms: Optional[float]
+
+
+@dataclass
+class _FrameFetchRequest:
+    reason: str
 
 
 class AsyncOrchestratorPlanner(PlannerInterface):
-    """Async orchestrator with rolling transcript context and latest-only remote requests."""
+    """Remote-first orchestrator with summary-first planning and strict action parsing."""
 
     owns_semantic_behavior = True
 
@@ -60,6 +79,9 @@ class AsyncOrchestratorPlanner(PlannerInterface):
         *,
         frame_cache: LatestFrameCache,
         fallback: Optional[PlannerInterface] = None,
+        summarizer: Optional[AsyncSceneSummarizer] = None,
+        memory_manager: Optional[MemoryManager] = None,
+        timeline: Optional[TimelineWriter] = None,
         provider: str = "brev",
         base_url: Optional[str] = None,
         api_key: Optional[str] = None,
@@ -70,6 +92,7 @@ class AsyncOrchestratorPlanner(PlannerInterface):
         policy_identity: str = (
             "You are PALA, a social desk companion lamp that should feel alive, expressive, and safe."
         ),
+        identity_file_path: Optional[str] = "memory/identity.md",
         policy_capabilities: str = (
             "You can move head/neck joints via primitives: hold, breath, glance, nod, orient_to_zone. "
             "You cannot manipulate external objects, move base position, or physically touch users."
@@ -91,6 +114,10 @@ class AsyncOrchestratorPlanner(PlannerInterface):
         video_jpeg_quality: int = 60,
         request_timeout_ms: int = 5000,
         response_ttl_ms: int = 1500,
+        summary_ttl_ms: int = 6000,
+        planner_strict_schema: bool = True,
+        planner_allow_frame_fetch: bool = True,
+        planner_max_tool_calls_per_cycle: int = 1,
         transcript_max_items: int = 80,
         context_max_transcript_items: int = 0,
         context_transcript_max_items: int = 24,
@@ -99,9 +126,12 @@ class AsyncOrchestratorPlanner(PlannerInterface):
         context_memory_digest_max_items: int = 3,
         memory_enabled: bool = True,
         memory_jsonl_path: str = "logs/orchestrator_memory.jsonl",
-        memory_recent_events: int = 10,
-        memory_digest_items: int = 3,
-        memory_distill_every_n_events: int = 20,
+        memory_recent_events: int = 200,
+        memory_digest_items: int = 0,
+        memory_distill_every_n_events: int = 0,
+        memory_recent_decisions: int = 8,
+        memory_recent_summaries: int = 8,
+        memory_recent_reasoning: int = 8,
         decision_repeat_detector_window: int = 6,
         timeline_jsonl_path: str = "logs/orchestrator_timeline.jsonl",
         inflight_guard_enabled: bool = True,
@@ -110,9 +140,11 @@ class AsyncOrchestratorPlanner(PlannerInterface):
         reasoning_probe_hz: float = 0.1,
         reasoning_probe_timeout_ms: int = 8000,
         reasoning_probe_max_tokens: int = 1024,
+        commitment_ttl_ms: int = 12000,
     ) -> None:
         self._frame_cache = frame_cache
         self._fallback = fallback or HeuristicPlanner()
+        self._summarizer = summarizer
         self._provider = str(provider).strip().lower()
         self._chat_url = _normalize_chat_url(base_url)
         self._api_key = api_key
@@ -120,7 +152,7 @@ class AsyncOrchestratorPlanner(PlannerInterface):
         self._planner_prompt = (planner_prompt or "").strip()
         self._runtime_mode = str(runtime_mode or "unknown")
         self._policy_version = str(policy_version or "v1").strip() or "v1"
-        self._policy_identity = str(policy_identity or "").strip()
+        self._policy_identity = load_identity_text(identity_file_path, policy_identity)
         self._policy_capabilities = str(policy_capabilities or "").strip()
         self._policy_safety = str(policy_safety or "").strip()
         self._policy_style = str(policy_style or "").strip()
@@ -130,22 +162,42 @@ class AsyncOrchestratorPlanner(PlannerInterface):
         self._video_max_frames = max(1, int(video_max_frames))
         self._video_max_width = max(64, int(video_max_width))
         self._video_jpeg_quality = max(1, min(100, int(video_jpeg_quality)))
-        self._request_timeout_s = max(0.05, float(request_timeout_ms) / 1000.0)
+        self._request_timeout_s = max(0.1, float(request_timeout_ms) / 1000.0)
         self._response_ttl_s = max(0.1, float(response_ttl_ms) / 1000.0)
+        self._summary_ttl_s = max(0.1, float(summary_ttl_ms) / 1000.0)
         self._orchestrator_period_s = 1.0 / max(0.2, float(orchestrator_hz))
+        self._planner_strict_schema = bool(planner_strict_schema)
+        self._planner_allow_frame_fetch = bool(planner_allow_frame_fetch)
+        self._planner_max_tool_calls_per_cycle = max(0, int(planner_max_tool_calls_per_cycle))
         legacy_max_items = max(0, int(context_max_transcript_items))
         default_max_items = max(1, int(context_transcript_max_items))
         self._context_transcript_max_items = legacy_max_items if legacy_max_items > 0 else default_max_items
         self._context_transcript_per_type_max_items = max(1, int(context_transcript_per_type_max_items))
         self._context_transcript_max_chars = max(64, int(context_transcript_max_chars))
         self._context_memory_digest_max_items = max(1, int(context_memory_digest_max_items))
-        self._timeline = TimelineWriter(TimelineConfig(enabled=True, jsonl_path=str(timeline_jsonl_path)))
+        self._memory_recent_decisions = max(1, int(memory_recent_decisions))
+        self._memory_recent_summaries = max(1, int(memory_recent_summaries))
+        self._memory_recent_reasoning = max(1, int(memory_recent_reasoning))
+
+        self._timeline = timeline or TimelineWriter(
+            TimelineConfig(enabled=True, jsonl_path=str(timeline_jsonl_path)),
+        )
+        self._memory = memory_manager or MemoryManager(
+            MemoryManagerConfig(
+                enabled=bool(memory_enabled),
+                jsonl_path=str(memory_jsonl_path),
+                recent_events=max(64, int(memory_recent_events)),
+                digest_items=int(memory_digest_items),
+                distill_every_n_events=int(memory_distill_every_n_events),
+            )
+        )
         self._inflight_guard_enabled = bool(inflight_guard_enabled)
         self._request_min_fresh_frames = max(0, int(request_min_fresh_frames))
         self._reasoning_probe_enabled = bool(reasoning_probe_enabled)
         self._reasoning_probe_period_s = 1.0 / max(0.05, float(reasoning_probe_hz))
         self._reasoning_probe_timeout_s = max(0.1, float(reasoning_probe_timeout_ms) / 1000.0)
         self._reasoning_probe_max_tokens = max(128, int(reasoning_probe_max_tokens))
+        self._commitment_ttl_s = max(0.5, float(commitment_ttl_ms) / 1000.0)
         self._remote_enabled = self._provider in {"brev", "cosmos", "openai"} and self._chat_url is not None
         self._request_count = 0
         self._success_count = 0
@@ -179,13 +231,8 @@ class AsyncOrchestratorPlanner(PlannerInterface):
         self._latest_action_primitive: Optional[str] = None
         self._latest_latency_ms: Optional[float] = None
         self._latest_reasoning: Optional[str] = None
-        # Legacy memory knobs are currently accepted for config compatibility.
-        # Current architecture uses rolling transcript only for planner context.
-        self._memory_enabled = bool(memory_enabled)
-        self._memory_jsonl_path = str(memory_jsonl_path)
-        self._memory_recent_events = max(1, int(memory_recent_events))
-        self._memory_digest_items = max(1, int(memory_digest_items))
-        self._memory_distill_every_n_events = max(1, int(memory_distill_every_n_events))
+        self._active_commitment: Optional[dict[str, Any]] = None
+        self._active_commitment_expires_mono_s: Optional[float] = None
 
         if self._remote_enabled:
             logger.info(
@@ -205,10 +252,11 @@ class AsyncOrchestratorPlanner(PlannerInterface):
                 "base_url": self._chat_url,
                 "model": self._model,
                 "policy_version": self._policy_version,
-                "reasoning_probe_enabled": self._reasoning_probe_enabled,
-                "orchestrator_hz": 1.0 / self._orchestrator_period_s,
+                "planner_hz": 1.0 / self._orchestrator_period_s,
+                "summary_ttl_s": self._summary_ttl_s,
                 "video_max_frames": self._video_max_frames,
-                "video_max_width": self._video_max_width,
+                "frame_fetch_enabled": self._planner_allow_frame_fetch,
+                "strict_schema": self._planner_strict_schema,
                 "git_sha": _resolve_git_sha(),
             },
         )
@@ -222,10 +270,13 @@ class AsyncOrchestratorPlanner(PlannerInterface):
 
     def plan(self, st: PerceptionState) -> ActionPlan:
         now = time.monotonic()
+        if self._summarizer is not None:
+            self._summarizer.observe(st)
         frame_age_ms = self._update_frame_history(now)
         active_age_s = None
         if self._latest_action_ts_s is not None:
             active_age_s = max(0.0, now - self._latest_action_ts_s)
+        latest_summary, summary_age_ms = self._read_latest_summary(now)
 
         if (now - self._last_submit_s) >= self._orchestrator_period_s:
             frames = self._sample_frame_history()
@@ -239,6 +290,8 @@ class AsyncOrchestratorPlanner(PlannerInterface):
                             frame_age_ms=frame_age_ms,
                             control_active_primitive=self._latest_action_primitive,
                             control_active_age_s=active_age_s,
+                            latest_summary=latest_summary,
+                            summary_age_ms=summary_age_ms,
                         )
                         self._last_submit_s = now
                         self._cond.notify_all()
@@ -255,6 +308,8 @@ class AsyncOrchestratorPlanner(PlannerInterface):
                     frame_age_ms=frame_age_ms,
                     control_active_primitive=self._latest_action_primitive,
                     control_active_age_s=active_age_s,
+                    latest_summary=latest_summary,
+                    summary_age_ms=summary_age_ms,
                 )
                 self._last_probe_submit_s = now
                 self._probe_cond.notify_all()
@@ -264,7 +319,6 @@ class AsyncOrchestratorPlanner(PlannerInterface):
             action_ts = self._latest_action_ts_s
 
         if self._remote_enabled:
-            # Remote-first mode: never synthesize semantic local decisions when remote is configured.
             if action is None or action_ts is None:
                 return _neutral_remote_wait_action()
             if (now - action_ts) <= self._response_ttl_s:
@@ -280,10 +334,11 @@ class AsyncOrchestratorPlanner(PlannerInterface):
 
         return self._fallback.plan(st)
 
-    def snapshot(self) -> tuple[None, list[str], Optional[OrchestratorDecision]]:
+    def snapshot(self) -> tuple[dict[str, Any], list[str], Optional[OrchestratorDecision]]:
+        memory_stats = self._memory.stats()
         with self._transcript_lock:
             transcript = [entry.get("line", "") for entry in self._transcript]
-        return None, transcript, self._latest_decision
+        return memory_stats, transcript, self._latest_decision
 
     def shutdown(self) -> None:
         self._stop.set()
@@ -294,6 +349,8 @@ class AsyncOrchestratorPlanner(PlannerInterface):
         self._thread.join(timeout=1.0)
         if self._probe_thread is not None:
             self._probe_thread.join(timeout=1.0)
+        if self._summarizer is not None:
+            self._summarizer.shutdown()
 
     def _run(self) -> None:
         while not self._stop.is_set():
@@ -319,8 +376,6 @@ class AsyncOrchestratorPlanner(PlannerInterface):
                             {
                                 "request_id": self._request_seq,
                                 "source": "remote_none",
-                                "state": None,
-                                "zone_hint": None,
                                 "latency_ms": self._latest_latency_ms,
                                 "policy_version": self._policy_version,
                             },
@@ -350,8 +405,6 @@ class AsyncOrchestratorPlanner(PlannerInterface):
                         {
                             "request_id": self._request_seq,
                             "source": "remote_error",
-                            "state": None,
-                            "zone_hint": None,
                             "latency_ms": self._latest_latency_ms,
                             "error": str(exc),
                             "policy_version": self._policy_version,
@@ -381,29 +434,33 @@ class AsyncOrchestratorPlanner(PlannerInterface):
                     f"source={decision.source} target_state={decision.target_state} intent={decision.intent} "
                     f"style={decision.style} urgency={decision.urgency} allow_interrupt={decision.allow_interrupt} "
                     f"primitive={decision.primitive_hint or 'breath'} target_zone={decision.target_zone or '-'} "
-                    f"confidence={decision.confidence:.2f} frames={len(req.frames)} rationale={decision.rationale}"
+                    f"confidence={decision.confidence:.2f} rationale={decision.rationale}"
                 ),
             )
+            decision_payload = {
+                "source": decision.source,
+                "state": decision.target_state,
+                "intent": decision.intent,
+                "style": decision.style,
+                "primitive": decision.primitive_hint,
+                "target_zone": decision.target_zone,
+                "confidence": decision.confidence,
+                "allow_interrupt": decision.allow_interrupt,
+                "urgency": decision.urgency,
+                "latency_ms": self._latest_latency_ms,
+            }
+            self._memory.append_event("decision_event", decision_payload)
             self._timeline.write(
                 "decision_event",
                 {
                     "request_id": self._request_seq,
-                    "source": decision.source,
-                    "state": decision.target_state,
-                    "intent": decision.intent,
-                    "style": decision.style,
-                    "primitive": decision.primitive_hint,
-                    "target_zone": decision.target_zone,
-                    "confidence": decision.confidence,
-                    "allow_interrupt": decision.allow_interrupt,
-                    "urgency": decision.urgency,
-                    "zone_hint": None,
-                    "latency_ms": self._latest_latency_ms,
+                    **decision_payload,
                     "policy_version": self._policy_version,
                 },
             )
             self._track_repetition(decision)
             self._latest_decision = decision
+            self._update_active_commitment(decision, time.monotonic())
             with self._lock:
                 self._latest_action = action
                 self._latest_action_ts_s = time.monotonic()
@@ -412,7 +469,7 @@ class AsyncOrchestratorPlanner(PlannerInterface):
             now = time.monotonic()
             if now - self._last_stats_log_s >= 10.0:
                 logger.info(
-                    "orchestrator stats requests=%d successes=%d probe_requests=%d probe_successes=%d source=%s state=%s intent=%s style=%s transcript_items=%d",
+                    "orchestrator stats requests=%d successes=%d probe_requests=%d probe_successes=%d source=%s state=%s intent=%s style=%s",
                     self._request_count,
                     self._success_count,
                     self._probe_request_count,
@@ -421,7 +478,6 @@ class AsyncOrchestratorPlanner(PlannerInterface):
                     decision.target_state,
                     decision.intent,
                     decision.style,
-                    len(self._transcript),
                 )
                 self._last_stats_log_s = now
 
@@ -460,20 +516,42 @@ class AsyncOrchestratorPlanner(PlannerInterface):
                 self._probe_success_count += 1
                 self._latest_reasoning = reasoning
                 self._append_transcript("reasoning", _preview(reasoning, 240))
-                logger.debug("orchestrator probe_end id=%d status=ok latency_ms=%.1f", req_id, latency_ms)
-                logger.debug("orchestrator reasoning id=%d text=%s", req_id, _preview(reasoning, 600))
-                self._timeline.write(
+                self._memory.append_event(
                     "reasoning_event",
                     {
                         "request_id": req_id,
                         "latency_ms": latency_ms,
                         "reasoning": _preview(reasoning, 1200),
                         "source": "probe",
-                        "policy_version": self._policy_version,
                     },
                 )
+                logger.debug("orchestrator probe_end id=%d status=ok latency_ms=%.1f", req_id, latency_ms)
             except Exception as exc:
                 logger.debug("orchestrator probe_end id=%d status=error detail=%s", req_id, exc)
+
+    def _read_latest_summary(self, now_s: float) -> tuple[Optional[SceneSummary], Optional[float]]:
+        if self._summarizer is None:
+            return None, None
+        summary = self._summarizer.latest_summary()
+        if summary is None:
+            return None, None
+        age_ms = max(0.0, (now_s - summary.ts_mono_s) * 1000.0)
+        return summary, age_ms
+
+    def _build_summary_window(self, now_s: float) -> tuple[list[dict[str, Any]], bool]:
+        if self._summarizer is None:
+            return [], False
+        out: list[dict[str, Any]] = []
+        stale = False
+        for summary in self._summarizer.recent_summaries(self._memory_recent_summaries):
+            age_ms = max(0.0, (now_s - summary.ts_mono_s) * 1000.0)
+            if age_ms > (self._summary_ttl_s * 1000.0):
+                stale = True
+                continue
+            payload = summary.to_payload()
+            payload["age_ms"] = age_ms
+            out.append(payload)
+        return out, stale
 
     def _update_frame_history(self, now_s: float) -> Optional[float]:
         self._prune_frame_history(now_s)
@@ -510,41 +588,42 @@ class AsyncOrchestratorPlanner(PlannerInterface):
         assert self._chat_url is not None
         req_id = self._next_request_id()
         self._request_count += 1
-        with self._transcript_lock:
-            transcript_len = len(self._transcript)
+        summary_state = "none"
+        if req.latest_summary is not None:
+            summary_state = req.latest_summary.scene_state
         logger.debug(
-            "orchestrator req_start id=%d frames=%d transcript=%d frame_age_ms=%s active_primitive=%s",
+            "orchestrator req_start id=%d frames=%d summary=%s summary_age_ms=%s active_primitive=%s",
             req_id,
             len(req.frames),
-            transcript_len,
-            req.frame_age_ms,
+            summary_state,
+            req.summary_age_ms,
             req.control_active_primitive,
         )
         self._timeline.write(
             "request_start",
             {
                 "request_id": req_id,
-                "frames": len(req.frames),
-                "transcript_items": transcript_len,
-                "frame_age_ms": req.frame_age_ms,
+                "frames_available": len(req.frames),
+                "summary_state": summary_state,
+                "summary_age_ms": req.summary_age_ms,
                 "control_active_primitive": req.control_active_primitive,
                 "control_active_age_s": req.control_active_age_s,
                 "policy_version": self._policy_version,
             },
         )
-        payload = self._build_payload(req)
+
         t0 = time.monotonic()
+        payload = self._build_payload(req, include_images=False, frame_fetch_reason=None)
         response = _post_json(
             self._chat_url,
             payload,
             timeout_s=self._request_timeout_s,
             api_key=self._api_key,
         )
-        latency_ms = (time.monotonic() - t0) * 1000.0
-        self._latest_latency_ms = latency_ms
         content = _extract_content(response)
         if content is None:
-            logger.warning("orchestrator req_end id=%d status=no_content latency_ms=%.1f", req_id, latency_ms)
+            latency_ms = (time.monotonic() - t0) * 1000.0
+            self._latest_latency_ms = latency_ms
             self._timeline.write(
                 "request_end",
                 {
@@ -555,29 +634,50 @@ class AsyncOrchestratorPlanner(PlannerInterface):
                 },
             )
             return None
-        reasoning = _extract_reasoning(response)
-        if not reasoning and content:
-            reasoning = _extract_think_block(content)
-        if reasoning:
-            self._latest_reasoning = reasoning
-            logger.debug("orchestrator reasoning id=%d text=%s", req_id, _preview(reasoning, 600))
-            self._append_transcript("reasoning", _preview(reasoning, 240))
+        self._capture_reasoning(response, req_id, latency_ms=(time.monotonic() - t0) * 1000.0)
+
+        final_content = content
+        tool_calls = 0
+        while self._planner_allow_frame_fetch and tool_calls < self._planner_max_tool_calls_per_cycle:
+            tool_req = _parse_frame_fetch_request(final_content)
+            if tool_req is None:
+                break
+            if not req.frames:
+                logger.warning("orchestrator frame_fetch requested but no frames available")
+                break
+            tool_calls += 1
             self._timeline.write(
-                "reasoning_event",
+                "frame_fetch_event",
                 {
                     "request_id": req_id,
-                    "latency_ms": latency_ms,
-                    "reasoning": _preview(reasoning, 1200),
+                    "tool_calls": tool_calls,
+                    "reason": tool_req.reason,
+                    "frames_sent": len(req.frames),
                     "policy_version": self._policy_version,
                 },
             )
-        decision = _parse_decision_content(content)
+            payload = self._build_payload(req, include_images=True, frame_fetch_reason=tool_req.reason)
+            response = _post_json(
+                self._chat_url,
+                payload,
+                timeout_s=self._request_timeout_s,
+                api_key=self._api_key,
+            )
+            content = _extract_content(response)
+            if content is None:
+                break
+            self._capture_reasoning(response, req_id, latency_ms=(time.monotonic() - t0) * 1000.0)
+            final_content = content
+
+        latency_ms = (time.monotonic() - t0) * 1000.0
+        self._latest_latency_ms = latency_ms
+        decision = _parse_decision_content(final_content)
         if decision is None:
             logger.warning(
                 "orchestrator req_end id=%d status=parse_fail latency_ms=%.1f preview=%s",
                 req_id,
                 latency_ms,
-                _preview(content),
+                _preview(final_content),
             )
             self._timeline.write(
                 "request_end",
@@ -585,31 +685,23 @@ class AsyncOrchestratorPlanner(PlannerInterface):
                     "request_id": req_id,
                     "status": "parse_fail",
                     "latency_ms": latency_ms,
-                    "preview": _preview(content, 400),
+                    "preview": _preview(final_content, 400),
                     "policy_version": self._policy_version,
                 },
             )
             return None
-        if not _is_valid_canonical_decision(decision):
-            logger.warning(
-                "orchestrator req_end id=%d status=invalid_canonical latency_ms=%.1f intent=%s primitive=%s",
-                req_id,
-                latency_ms,
-                decision.intent,
-                decision.primitive_hint,
-            )
+        if self._planner_strict_schema and not _is_valid_canonical_decision(decision):
             self._timeline.write(
                 "request_end",
                 {
                     "request_id": req_id,
                     "status": "invalid_canonical",
                     "latency_ms": latency_ms,
-                    "intent": decision.intent,
-                    "primitive_hint": decision.primitive_hint,
                     "policy_version": self._policy_version,
                 },
             )
             return None
+
         self._success_count += 1
         logger.debug(
             "orchestrator req_end id=%d status=ok latency_ms=%.1f state=%s intent=%s style=%s primitive=%s target_zone=%s",
@@ -632,18 +724,64 @@ class AsyncOrchestratorPlanner(PlannerInterface):
                 "style": decision.style,
                 "primitive_hint": decision.primitive_hint,
                 "target_zone": decision.target_zone,
+                "tool_calls": tool_calls,
                 "policy_version": self._policy_version,
             },
         )
         return decision
 
-    def _build_payload(self, req: _OrchestratorRequest) -> dict[str, Any]:
-        transcript_tail = self._build_transcript_window()
-        image_data_urls, _, _ = _encode_frames_to_data_urls(
-            req.frames,
-            max_width=self._video_max_width,
-            jpeg_quality=self._video_jpeg_quality,
+    def _capture_reasoning(self, response: dict[str, Any], req_id: int, *, latency_ms: float) -> None:
+        reasoning = _extract_reasoning(response)
+        if not reasoning:
+            content = _extract_content(response)
+            if content:
+                reasoning = _extract_think_block(content)
+        if not reasoning:
+            return
+        self._latest_reasoning = reasoning
+        self._latest_latency_ms = latency_ms
+        preview = _preview(reasoning, 1200)
+        self._append_transcript("reasoning", _preview(reasoning, 240))
+        self._memory.append_event(
+            "reasoning_event",
+            {
+                "request_id": req_id,
+                "latency_ms": latency_ms,
+                "reasoning": preview,
+                "source": "remote",
+            },
         )
+        self._timeline.write(
+            "reasoning_event",
+            {
+                "request_id": req_id,
+                "latency_ms": latency_ms,
+                "reasoning": preview,
+                "policy_version": self._policy_version,
+            },
+        )
+
+    def _build_payload(
+        self,
+        req: _OrchestratorRequest,
+        *,
+        include_images: bool,
+        frame_fetch_reason: Optional[str],
+    ) -> dict[str, Any]:
+        now = time.monotonic()
+        summary_window, summary_stale = self._build_summary_window(now)
+        transcript_tail = self._build_transcript_window()
+        decision_memory = self._memory.recent_payloads("decision_event", self._memory_recent_decisions)
+        reasoning_memory = self._memory.recent_payloads("reasoning_event", self._memory_recent_reasoning)
+        latest_summary_payload = None
+        if (
+            req.latest_summary is not None
+            and req.summary_age_ms is not None
+            and req.summary_age_ms <= (self._summary_ttl_s * 1000.0)
+        ):
+            latest_summary_payload = req.latest_summary.to_payload()
+            latest_summary_payload["age_ms"] = req.summary_age_ms
+
         context = {
             "control_state": {
                 "active_primitive": req.control_active_primitive,
@@ -659,11 +797,35 @@ class AsyncOrchestratorPlanner(PlannerInterface):
                     "confidence": self._latest_decision.confidence,
                 },
             },
-            "transcript_tail": transcript_tail,
-            "frame_meta": {
-                "frames_sent": len(image_data_urls),
-                "frame_age_ms": req.frame_age_ms,
+            "summary_memory": {
+                "latest_summary": latest_summary_payload,
+                "recent_summaries": summary_window,
+                "summary_stale": summary_stale,
             },
+            "memory": {
+                "active_commitment": self._current_active_commitment(),
+                "recent_decisions": decision_memory,
+                "recent_reasoning": reasoning_memory,
+                "transcript_tail": transcript_tail,
+            },
+            "frame_meta": {
+                "frames_available": len(req.frames),
+                "images_included": include_images,
+                "frame_age_ms": req.frame_age_ms,
+                "frame_fetch_reason": frame_fetch_reason,
+            },
+        }
+        action_schema = {
+            "target_state": "idle|user_detected|engaging|tracking|acknowledging|reacquiring",
+            "intent": "string",
+            "style": "calm|curious|focused",
+            "primitive_hint": "hold|breath|glance|nod|orient_to_zone",
+            "target_zone": "left|center|right|null",
+            "allow_interrupt": "boolean",
+            "urgency": "low|medium|high",
+            "confidence": "number 0..1",
+            "rationale": "short string",
+            "act_now": "boolean (optional)",
         }
         user_text = (
             f"[policy_version={self._policy_version}]\n"
@@ -671,34 +833,53 @@ class AsyncOrchestratorPlanner(PlannerInterface):
             f"Capabilities:\n{self._policy_capabilities}\n\n"
             f"Safety:\n{self._policy_safety}\n\n"
             f"Style:\n{self._policy_style}\n\n"
-            f"Output contract:\n{self._policy_output_contract}\n\n"
-            "Rely primarily on visual evidence from frames and robot context.\n"
-            "Answer the request using the following format:\n"
+            "You are planning physical behavior for an embodied desk lamp.\n"
+            "Use summary memory first. Request frame_fetch only when uncertainty is high or state changed too quickly.\n"
+            "Do not keep holding only because previous action was hold.\n\n"
+            "Decision process:\n"
+            "1) Safety gate.\n"
+            "2) Detect meaningful change from summary + memory.\n"
+            "3) Determine user-helpful opportunity.\n"
+            "4) Pick one allowed primitive.\n"
+            "5) Decide if interrupt is required.\n\n"
+            "If more visual detail is required, you may return exactly:\n"
+            '{"tool_call":{"name":"frame_fetch","reason":"short reason"}}\n\n'
+            "Otherwise return strict action JSON matching this schema:\n"
+            + json.dumps(action_schema, separators=(",", ":"), ensure_ascii=True)
+            + "\n\n"
+            "Answer the question using the following format:\n"
             "<think>\n"
             "Your reasoning.\n"
             "</think>\n"
-            "{\"target_state\":\"...\",\"intent\":\"...\",\"style\":\"...\",\"primitive_hint\":\"...\",\"target_zone\":\"...\",\"allow_interrupt\":true,\"urgency\":\"...\",\"confidence\":0.0,\"rationale\":\"...\"}\n\n"
-            "Use the provided context and frame sequence to decide next action.\n"
+            "Write your final answer immediately after the </think> tag.\n\n"
             "Decision Context JSON:\n"
             + json.dumps(context, separators=(",", ":"), ensure_ascii=True)
         )
-
-        system_prompt = "You are a helpful assistant."
         if self._planner_prompt:
             user_text += f"\n\nOperator guidance:\n{self._planner_prompt}"
+
+        image_items: list[dict[str, Any]] = []
+        if include_images and req.frames:
+            image_data_urls, _, _ = _encode_frames_to_data_urls(
+                req.frames,
+                max_width=self._video_max_width,
+                jpeg_quality=self._video_jpeg_quality,
+            )
+            image_items = [{"type": "image_url", "image_url": {"url": u}} for u in image_data_urls]
 
         return {
             "model": self._model,
             "messages": [
-                {"role": "system", "content": system_prompt},
+                {"role": "system", "content": "You are a helpful assistant."},
                 {
                     "role": "user",
                     "content": [
-                        *[{"type": "image_url", "image_url": {"url": u}} for u in image_data_urls],
+                        *image_items,
                         {"type": "text", "text": user_text},
                     ],
                 },
             ],
+            "response_format": {"type": "json_object"},
             "temperature": 0.1,
             "max_tokens": 700,
             "stream": False,
@@ -725,7 +906,11 @@ class AsyncOrchestratorPlanner(PlannerInterface):
                 "active_primitive": req.control_active_primitive,
                 "active_age_s": req.control_active_age_s,
             },
-            "transcript_tail": transcript_tail,
+            "memory": {
+                "working_memory": transcript_tail,
+                "active_commitment": self._current_active_commitment(),
+            },
+            "summary_state": None if req.latest_summary is None else req.latest_summary.to_payload(),
         }
         user_text = (
             "Analyze the short frame sequence and context.\n"
@@ -737,12 +922,11 @@ class AsyncOrchestratorPlanner(PlannerInterface):
             "Context JSON:\n"
             + json.dumps(probe_context, separators=(",", ":"), ensure_ascii=True)
         )
-        system_prompt = "You are a helpful assistant."
 
         return {
             "model": self._model,
             "messages": [
-                {"role": "system", "content": system_prompt},
+                {"role": "system", "content": "You are a helpful assistant."},
                 {
                     "role": "user",
                     "content": [
@@ -772,11 +956,17 @@ class AsyncOrchestratorPlanner(PlannerInterface):
         logger.debug("orchestrator transcript %s", line)
 
     def _build_transcript_window(self) -> list[str]:
+        memory_lines = self._memory.recent_lines(
+            event_types=("decision_event", "reasoning_event"),
+            limit=self._context_transcript_max_items,
+            max_chars=self._context_transcript_max_chars,
+        )
+        if memory_lines:
+            return memory_lines
         with self._transcript_lock:
             entries = list(self._transcript)
         if not entries:
             return []
-
         allowed_roles = {"decision", "reasoning"}
         selected: list[dict[str, Any]] = []
         per_role: dict[str, int] = {}
@@ -793,10 +983,6 @@ class AsyncOrchestratorPlanner(PlannerInterface):
                 break
         selected.reverse()
         lines = [str(item.get("line", "")).strip() for item in selected if str(item.get("line", "")).strip()]
-        if not lines:
-            return []
-
-        # Preserve newest lines under character budget.
         while lines and sum(len(line) + 1 for line in lines) > self._context_transcript_max_chars:
             lines.pop(0)
         return lines
@@ -816,7 +1002,6 @@ class AsyncOrchestratorPlanner(PlannerInterface):
         self._decision_signature_history.append(signature)
         if len(self._decision_signature_history) < self._decision_signature_history.maxlen:
             return
-
         unique_count = len(set(self._decision_signature_history))
         if unique_count == 1:
             logger.warning(
@@ -825,14 +1010,37 @@ class AsyncOrchestratorPlanner(PlannerInterface):
                 signature,
             )
 
+    def _current_active_commitment(self) -> Optional[dict[str, Any]]:
+        expires = self._active_commitment_expires_mono_s
+        if self._active_commitment is None or expires is None:
+            return None
+        remaining = expires - time.monotonic()
+        if remaining <= 0.0:
+            self._active_commitment = None
+            self._active_commitment_expires_mono_s = None
+            return None
+        out = dict(self._active_commitment)
+        out["expires_in_ms"] = int(max(0.0, remaining) * 1000.0)
+        return out
+
+    def _update_active_commitment(self, decision: OrchestratorDecision, now_mono_s: float) -> None:
+        self._active_commitment = {
+            "target_state": decision.target_state,
+            "intent": decision.intent,
+            "style": decision.style,
+            "primitive_hint": decision.primitive_hint,
+            "target_zone": decision.target_zone,
+            "confidence": decision.confidence,
+        }
+        self._active_commitment_expires_mono_s = now_mono_s + self._commitment_ttl_s
+
 
 def _decision_to_action(decision: OrchestratorDecision) -> ActionPlan:
     hint = (decision.primitive_hint or "").strip().lower()
-    if hint not in {"hold", "breath", "glance", "nod", "orient_to_zone"}:
+    if hint not in _PRIMITIVE_HINTS:
         hint = _default_primitive_for_state(decision.target_state)
 
     zone = decision.target_zone if decision.target_zone in {"left", "center", "right"} else None
-
     cancel_current = bool(decision.allow_interrupt or decision.urgency == "high")
     if hint == "nod":
         return ActionPlan(
@@ -844,13 +1052,7 @@ def _decision_to_action(decision: OrchestratorDecision) -> ActionPlan:
             cancel_current=cancel_current,
         )
     if hint == "glance":
-        direction = "left"
-        if zone == "right":
-            direction = "right"
-        elif zone == "left":
-            direction = "left"
-        elif "right" in decision.rationale:
-            direction = "right"
+        direction = "left" if zone != "right" else "right"
         return ActionPlan(
             primitive=PrimitiveKind.GLANCE,
             command=GlanceCommand(direction=direction, amp_rad=0.24, duration_s=0.55, rate_rad_s=1.6),
@@ -860,10 +1062,9 @@ def _decision_to_action(decision: OrchestratorDecision) -> ActionPlan:
             cancel_current=cancel_current,
         )
     if hint == "orient_to_zone":
-        zone_value = zone or "center"
         return ActionPlan(
             primitive=PrimitiveKind.ORIENT_TO_ZONE,
-            command=OrientToZoneCommand(zone=zone_value, amp_rad=0.2, rate_rad_s=1.4),
+            command=OrientToZoneCommand(zone=zone or "center", amp_rad=0.2, rate_rad_s=1.4),
             confidence=decision.confidence,
             explanation=f"{decision.source}:{decision.rationale}",
             style=decision.style,
@@ -920,6 +1121,119 @@ def _default_primitive_for_state(state: str) -> str:
         "reacquiring": "orient_to_zone",
     }
     return defaults.get(state, "breath")
+
+
+def _is_valid_canonical_decision(decision: OrchestratorDecision) -> bool:
+    if decision.target_state not in _TARGET_STATES:
+        return False
+    if decision.style not in _STYLES:
+        return False
+    if decision.urgency not in _URGENCY:
+        return False
+    if decision.primitive_hint not in _PRIMITIVE_HINTS:
+        return False
+    if decision.target_zone not in {None, "left", "center", "right"}:
+        return False
+    return True
+
+
+def _parse_frame_fetch_request(content: str) -> Optional[_FrameFetchRequest]:
+    data = _parse_json_content(content)
+    if data is None:
+        return None
+    tool_call = data.get("tool_call")
+    if isinstance(tool_call, dict):
+        name = _clean_text(tool_call.get("name"))
+        if name and name.lower() == "frame_fetch":
+            reason = _clean_text(tool_call.get("reason")) or "visual uncertainty"
+            return _FrameFetchRequest(reason=reason)
+    tool = _clean_text(data.get("tool"))
+    if tool and tool.lower() == "frame_fetch":
+        reason = _clean_text(data.get("reason")) or "visual uncertainty"
+        return _FrameFetchRequest(reason=reason)
+    return None
+
+
+def _parse_decision_content(content: str) -> Optional[OrchestratorDecision]:
+    data = _parse_json_content(content)
+    if data is None:
+        return None
+    missing = [field for field in _ACTION_REQUIRED_FIELDS if field not in data]
+    if missing:
+        return None
+
+    target_state_raw = _clean_text(data.get("target_state"))
+    intent_raw = _clean_text(data.get("intent"))
+    style_raw = _clean_text(data.get("style"))
+    primitive_raw = _clean_text(data.get("primitive_hint"))
+    urgency_raw = _clean_text(data.get("urgency"))
+    rationale_raw = _clean_text(data.get("rationale"))
+    if None in {target_state_raw, intent_raw, style_raw, primitive_raw, urgency_raw, rationale_raw}:
+        return None
+    target_state = target_state_raw.lower()
+    intent = intent_raw
+    style = style_raw.lower()
+    primitive_hint = primitive_raw.lower()
+    urgency = urgency_raw.lower()
+    if target_state not in _TARGET_STATES:
+        return None
+    if style not in _STYLES:
+        return None
+    if primitive_hint not in _PRIMITIVE_HINTS:
+        return None
+    if urgency not in _URGENCY:
+        return None
+    if intent.strip().lower() in {"none", "null", "n/a", "na"}:
+        return None
+
+    allow_interrupt_value = _coerce_bool_value(data.get("allow_interrupt"), default=False)
+    if allow_interrupt_value is None:
+        return None
+    try:
+        confidence = float(data.get("confidence"))
+    except Exception:
+        return None
+    confidence = max(0.0, min(1.0, confidence))
+
+    zone_value = _clean_text(data.get("target_zone"))
+    target_zone = None
+    if zone_value is not None:
+        zone = zone_value.lower()
+        if zone in {"left", "center", "right"}:
+            target_zone = zone
+
+    act_now = _coerce_bool_value(data.get("act_now", True), default=True)
+    if act_now is None:
+        return None
+    if not act_now:
+        primitive_hint = "hold"
+        allow_interrupt_value = False
+        if target_state not in _TARGET_STATES:
+            target_state = "idle"
+
+    return OrchestratorDecision(
+        target_state=target_state,
+        intent=intent,
+        style=style,
+        primitive_hint=primitive_hint,
+        target_zone=target_zone,
+        allow_interrupt=allow_interrupt_value,
+        urgency=urgency,
+        confidence=confidence,
+        rationale=rationale_raw,
+        source="remote",
+    )
+
+
+def _parse_json_content(content: str) -> Optional[dict[str, Any]]:
+    cleaned = _strip_markdown_fences(content.strip())
+    data = _parse_json_obj(cleaned)
+    if data is not None:
+        return data
+    candidate = _extract_first_json_object(cleaned)
+    if candidate is None:
+        return None
+    return _parse_json_obj(candidate)
 
 
 def _encode_frames_to_data_urls(
@@ -1079,120 +1393,15 @@ def _strip_markdown_fences(raw: str) -> str:
     return "\n".join(lines).strip()
 
 
-def _parse_decision_content(content: str) -> Optional[OrchestratorDecision]:
-    cleaned = _strip_markdown_fences(content.strip())
-    data = _parse_json_obj(cleaned)
-    if data is None:
-        candidate = _extract_first_json_object(cleaned)
-        data = None if candidate is None else _parse_json_obj(candidate)
-    if data is None or not isinstance(data, dict):
-        return None
-
-    explicit_intent_present = "intent" in data
-    data = _normalize_decision_payload(data)
-
-    target_state = str(data.get("target_state", "")).strip().lower()
-    intent_raw = data.get("intent")
-    intent = _clean_text(intent_raw)
-    if explicit_intent_present and intent is None:
-        return None
-    if intent is None:
-        intent = _derive_intent(data)
-    if intent is None:
-        return None
-    style = str(data.get("style", "calm")).strip().lower()
-    primitive_hint = data.get("primitive_hint")
-    primitive_hint_str = None if primitive_hint in (None, "") else str(primitive_hint).strip().lower()
-    if primitive_hint_str not in _PRIMITIVE_HINTS:
-        primitive_hint_str = None
-    target_zone_raw = data.get("target_zone", data.get("zone_hint"))
-    target_zone = None if target_zone_raw in (None, "") else str(target_zone_raw).strip().lower()
-    if target_zone not in {None, "left", "center", "right"}:
-        target_zone = None
-    allow_interrupt = _coerce_bool_value(data.get("allow_interrupt", False), default=False)
-    urgency = str(data.get("urgency", "medium")).strip().lower()
-    rationale = _derive_rationale(data)
-    if rationale is None:
-        return None
+def _parse_json_obj(raw: str) -> Optional[dict[str, Any]]:
     try:
-        confidence = float(data.get("confidence", 0.5))
-    except Exception:
-        confidence = 0.5
-    confidence = max(0.0, min(1.0, confidence))
-    if style not in _STYLES:
-        style = "calm"
-    if urgency not in _URGENCY:
-        urgency = "medium"
-    if target_state not in _TARGET_STATES:
-        target_state = _infer_target_state(intent=intent, primitive_hint=primitive_hint_str)
-    return OrchestratorDecision(
-        target_state=target_state,
-        intent=intent,
-        style=style,
-        primitive_hint=primitive_hint_str,
-        target_zone=target_zone,
-        allow_interrupt=allow_interrupt,
-        urgency=urgency,
-        confidence=confidence,
-        rationale=rationale,
-        source="remote",
-    )
-
-
-def _normalize_decision_payload(data: dict[str, Any]) -> dict[str, Any]:
-    merged: dict[str, Any] = {}
-    candidates: list[dict[str, Any]] = [data]
-    for key in ("decision", "prediction", "action", "action_details"):
-        nested = data.get(key)
-        if isinstance(nested, dict):
-            candidates.append(nested)
-
-    for item in candidates:
-        for k, v in item.items():
-            merged.setdefault(k, v)
-
-    if isinstance(data.get("prediction"), str):
-        merged.setdefault("primitive_hint", data["prediction"])
-        merged.setdefault("intent", data["prediction"])
-    if isinstance(data.get("primitive"), str):
-        merged.setdefault("primitive_hint", data["primitive"])
-    if isinstance(data.get("action"), str):
-        merged.setdefault("primitive_hint", data["action"])
-    if isinstance(data.get("zone"), str):
-        merged.setdefault("target_zone", data["zone"])
-    if isinstance(data.get("state"), str):
-        merged.setdefault("target_state", data["state"])
-    if isinstance(data.get("inference_confidence"), (int, float, str)):
-        merged.setdefault("confidence", data["inference_confidence"])
-    if "interruptible" in data:
-        merged.setdefault("allow_interrupt", _coerce_bool_value(data.get("interruptible"), default=False))
-    if "should_interrupt" in data:
-        merged.setdefault("allow_interrupt", _coerce_bool_value(data.get("should_interrupt"), default=False))
-    if isinstance(data.get("priority"), str):
-        merged.setdefault("urgency", data["priority"])
-    if isinstance(data.get("reason"), str):
-        merged.setdefault("rationale", data["reason"])
-    if isinstance(data.get("explanation"), str):
-        merged.setdefault("rationale", data["explanation"])
-    if isinstance(data.get("analysis"), str):
-        merged.setdefault("rationale", data["analysis"])
-    if isinstance(data.get("inference"), str):
-        merged.setdefault("rationale", data["inference"])
-    return merged
-
-
-def _clean_text(value: Any) -> Optional[str]:
-    if not isinstance(value, str):
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
         return None
-    cleaned = value.strip()
-    if not cleaned:
-        return None
-    if cleaned.lower() in {"none", "null", "n/a", "na"}:
-        return None
-    return cleaned
+    return parsed if isinstance(parsed, dict) else None
 
 
-def _coerce_bool_value(value: Any, *, default: bool) -> bool:
+def _coerce_bool_value(value: Any, *, default: bool) -> Optional[bool]:
     if isinstance(value, bool):
         return value
     if value is None:
@@ -1205,51 +1414,18 @@ def _coerce_bool_value(value: Any, *, default: bool) -> bool:
             return True
         if token in {"false", "0", "no", "n", "off", "", "none", "null"}:
             return False
-    return default
-
-
-def _derive_intent(data: dict[str, Any]) -> Optional[str]:
-    for key in ("prediction", "primitive_hint", "primitive", "action"):
-        intent = _clean_text(data.get(key))
-        if intent is not None:
-            return intent
     return None
 
 
-def _derive_rationale(data: dict[str, Any]) -> Optional[str]:
-    for key in ("rationale", "reason", "explanation", "analysis", "inference"):
-        rationale = _clean_text(data.get(key))
-        if rationale is not None:
-            return rationale
-    return None
-
-
-def _parse_json_obj(raw: str) -> Optional[dict[str, Any]]:
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
+def _clean_text(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
         return None
-    return parsed if isinstance(parsed, dict) else None
-
-
-def _infer_target_state(*, intent: str, primitive_hint: Optional[str]) -> str:
-    intent_token = intent.strip().lower()
-    hint = (primitive_hint or "").strip().lower()
-    if "reacquire" in intent_token:
-        return "reacquiring"
-    if "track" in intent_token:
-        return "tracking"
-    if "ack" in intent_token:
-        return "acknowledging"
-    if "idle" in intent_token:
-        return "idle"
-    if hint == "nod":
-        return "acknowledging"
-    if hint in {"orient_to_zone", "glance"}:
-        return "tracking"
-    if hint in {"hold", "breath"}:
-        return "idle"
-    return "user_detected"
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    if cleaned.lower() in {"none", "null", "n/a", "na"}:
+        return None
+    return cleaned
 
 
 def _extract_first_json_object(raw: str) -> Optional[str]:
@@ -1284,54 +1460,21 @@ def _extract_first_json_object(raw: str) -> Optional[str]:
 
 def _normalize_transcript_role(role: str) -> str:
     token = str(role or "").strip().lower()
-    if token in {"obs", "observation"}:
-        return "observation"
-    if token in {"decision", "action"}:
-        return "decision"
-    if token in {"reasoning", "think"}:
-        return "reasoning"
+    if token in {"decision", "reasoning"}:
+        return token
     return "system"
 
 
+def _preview(raw: str, max_chars: int = 200) -> str:
+    text = raw.strip().replace("\n", "\\n")
+    if len(text) <= max_chars:
+        return text
+    return text[: max_chars - 3] + "..."
+
+
 def _resolve_git_sha() -> Optional[str]:
-    env_sha = os.getenv("PALA_GIT_SHA")
-    if env_sha:
-        token = env_sha.strip()
-        return token or None
     try:
-        out = subprocess.check_output(
-            ["git", "rev-parse", "--short", "HEAD"],
-            stderr=subprocess.DEVNULL,
-            text=True,
-        )
-        token = out.strip()
-        return token or None
+        out = subprocess.check_output(["git", "rev-parse", "HEAD"], stderr=subprocess.DEVNULL, text=True).strip()
     except Exception:
         return None
-
-
-def _is_valid_canonical_decision(decision: OrchestratorDecision) -> bool:
-    if decision.target_state not in _TARGET_STATES:
-        return False
-    if decision.style not in _STYLES:
-        return False
-    if decision.urgency not in _URGENCY:
-        return False
-    if not isinstance(decision.intent, str) or not decision.intent.strip():
-        return False
-    if decision.primitive_hint is not None and decision.primitive_hint not in _PRIMITIVE_HINTS:
-        return False
-    if decision.target_zone is not None and decision.target_zone not in {"left", "center", "right"}:
-        return False
-    if not isinstance(decision.rationale, str) or not decision.rationale.strip():
-        return False
-    if not (0.0 <= float(decision.confidence) <= 1.0):
-        return False
-    return True
-
-
-def _preview(text: str, n: int = 180) -> str:
-    s = text.strip().replace("\n", "\\n")
-    if len(s) <= n:
-        return s
-    return s[:n] + "..."
+    return out if out else None

@@ -8,6 +8,7 @@ from pala.planner.orchestrator_async import (
     _decision_to_action,
     _extract_reasoning,
     _extract_think_content,
+    _parse_frame_fetch_request,
     _parse_decision_content,
 )
 from pala.perception.frame_cache import LatestFrameCache
@@ -40,8 +41,8 @@ def test_orchestrator_remote_payload_includes_multi_frame_sequence(monkeypatch):
                 {
                     "message": {
                         "content": (
-                            '{"intent":"maintain_presence","style":"curious","primitive_hint":"orient_to_zone",'
-                            '"target_zone":"left","confidence":0.7,"rationale":"test"}'
+                            '{"target_state":"tracking","intent":"maintain_presence","style":"curious","primitive_hint":"orient_to_zone",'
+                            '"target_zone":"left","allow_interrupt":false,"urgency":"low","confidence":0.7,"rationale":"test"}'
                         )
                     }
                 }
@@ -91,13 +92,13 @@ def test_orchestrator_remote_payload_includes_multi_frame_sequence(monkeypatch):
         user_content = captured["payload"]["messages"][1]["content"]
         assert isinstance(user_content, list)
         image_items = [item for item in user_content if isinstance(item, dict) and item.get("type") == "image_url"]
-        assert image_items
-        assert len(image_items) <= 3
+        assert image_items == []
         text_items = [item for item in user_content if isinstance(item, dict) and item.get("type") == "text"]
         assert text_items
         context = text_items[0]["text"]
         assert "\"control_state\"" in context
-        assert "\"transcript_tail\"" in context
+        assert "\"summary_memory\"" in context
+        assert "\"recent_decisions\"" in context
         assert "\"perception_state_raw\"" not in context
     finally:
         planner.shutdown()
@@ -226,12 +227,7 @@ def test_parse_decision_accepts_prediction_action_details_schema():
         '}'
     )
     decision = _parse_decision_content(content)
-    assert decision is not None
-    assert decision.target_state == "engaging"
-    assert decision.style == "focused"
-    assert decision.target_zone == "left"
-    assert decision.intent == "reach_for_object"
-    assert "needs assistance" in decision.rationale
+    assert decision is None
 
 
 def test_parse_decision_accepts_prediction_string_schema():
@@ -243,10 +239,7 @@ def test_parse_decision_accepts_prediction_string_schema():
         '}'
     )
     decision = _parse_decision_content(content)
-    assert decision is not None
-    assert decision.intent == "reach_for_object"
-    assert decision.target_zone == "left"
-    assert decision.style == "focused"
+    assert decision is None
 
 
 def test_reasoning_probe_writes_reasoning_event(monkeypatch):
@@ -355,11 +348,11 @@ def test_payload_includes_policy_version_and_blocks(monkeypatch):
         system = captured["payload"]["messages"][0]["content"]
         assert system == "You are a helpful assistant."
         user_items = captured["payload"]["messages"][1]["content"]
-        assert user_items[0]["type"] == "image_url"
+        assert user_items[0]["type"] == "text"
         user_text = next(item["text"] for item in user_items if item.get("type") == "text")
         assert "[policy_version=vtest]" in user_text
         assert '"control_state"' in user_text
-        assert '"transcript_tail"' in user_text
+        assert '"summary_memory"' in user_text
     finally:
         planner.shutdown()
 
@@ -409,6 +402,94 @@ def test_parse_decision_bool_string_false_is_false():
     decision = _parse_decision_content(content)
     assert decision is not None
     assert decision.allow_interrupt is False
+
+
+def test_parse_decision_uses_selected_action_schema():
+    content = (
+        '{'
+        '"rationale":"candidate scoring prefers orient",'
+        '"selected_action":{"primitive":"orient_to_zone","target_zone":"right","style":"curious","intent":"track_transition","target_state":"tracking","allow_interrupt":"false","urgency":"medium","confidence":0.82}'
+        '}'
+    )
+    decision = _parse_decision_content(content)
+    assert decision is None
+
+
+def test_parse_decision_act_now_false_forces_hold():
+    content = (
+        '{"target_state":"tracking","intent":"track_transition","style":"curious","primitive_hint":"orient_to_zone",'
+        '"target_zone":"right","allow_interrupt":true,"urgency":"medium","confidence":0.7,'
+        '"rationale":"pause actuation",'
+        '"act_now":"false"}'
+    )
+    decision = _parse_decision_content(content)
+    assert decision is not None
+    assert decision.primitive_hint == "hold"
+    assert decision.allow_interrupt is False
+
+
+def test_parse_frame_fetch_request():
+    content = '{"tool_call":{"name":"frame_fetch","reason":"need current visual detail"}}'
+    req = _parse_frame_fetch_request(content)
+    assert req is not None
+    assert "visual detail" in req.reason
+
+
+def test_orchestrator_frame_fetch_roundtrip(monkeypatch):
+    calls = {"n": 0, "payloads": []}
+
+    def _fake_post(url, payload, *, timeout_s, api_key):
+        calls["n"] += 1
+        calls["payloads"].append(payload)
+        if calls["n"] == 1:
+            return {"choices": [{"message": {"content": '{"tool_call":{"name":"frame_fetch","reason":"uncertain"}}'}}]}
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            '{"target_state":"tracking","intent":"track_transition","style":"curious",'
+                            '"primitive_hint":"orient_to_zone","target_zone":"left","allow_interrupt":true,'
+                            '"urgency":"medium","confidence":0.7,"rationale":"follow movement"}'
+                        )
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr("pala.planner.orchestrator_async._post_json", _fake_post)
+
+    cache = LatestFrameCache()
+    planner = AsyncOrchestratorPlanner(
+        frame_cache=cache,
+        provider="brev",
+        base_url="http://127.0.0.1:8000",
+        orchestrator_hz=40.0,
+        planner_allow_frame_fetch=True,
+        planner_max_tool_calls_per_cycle=1,
+    )
+    try:
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            cache.set(np.full((6, 6, 3), 3, dtype=np.uint8), mono_ns=time.monotonic_ns(), pts_ns=None)
+            action = planner.plan(
+                PerceptionState(
+                    timestamp_monotonic_s=time.monotonic(),
+                    primary_person=BBoxNorm(cx=0.4, cy=0.5, w=0.2, h=0.4),
+                    primary_person_conf=0.8,
+                    debug={"zone_hint": "left"},
+                )
+            )
+            if calls["n"] >= 2 and action.primitive == PrimitiveKind.ORIENT_TO_ZONE:
+                break
+            time.sleep(0.02)
+        assert calls["n"] >= 2
+        first_user_content = calls["payloads"][0]["messages"][1]["content"]
+        second_user_content = calls["payloads"][1]["messages"][1]["content"]
+        assert not any(item.get("type") == "image_url" for item in first_user_content if isinstance(item, dict))
+        assert any(item.get("type") == "image_url" for item in second_user_content if isinstance(item, dict))
+    finally:
+        planner.shutdown()
 
 
 def test_inflight_guard_prevents_request_pileup(monkeypatch):

@@ -27,24 +27,30 @@
 ## Planner Stack (Current)
 - **Heuristic planner**: local fallback when Cosmos is disabled.
 - **AsyncOrchestratorPlanner (Cosmos)**: remote-first semantic planner.
-  - Samples rolling frame window from latest-frame history.
-  - Builds media-first chat payload (images before user text).
-  - User text includes policy blocks, output contract, and compact context JSON.
-  - Expects `<think>...</think>` plus JSON decision payload.
-  - Parses plain JSON, fenced JSON, and mixed think+JSON responses.
+  - Ingests identity + summary memory + control state first.
+  - Uses strict action schema parsing for decision output.
+  - Supports optional `frame_fetch` tool request when additional visual detail is needed.
   - Converts canonical decision to core primitives (`hold`, `breath`, `glance`, `nod`, `orient_to_zone`).
+- **AsyncSceneSummarizer (Cosmos)**: low-rate scene understanding side loop.
+  - Samples rolling frame window and emits compact `SceneSummary`.
+  - Writes `summary_event` records into canonical memory stream.
+  - Runs independently from high-level planner cadence.
 
 ## Context Sent to Cosmos
 Current request context JSON includes:
 - `control_state` (active primitive, action age, latest accepted decision),
-- `transcript_tail` (recent `decision` and `reasoning` lines only),
-- `frame_meta` (frames sent and frame age).
+- `summary_memory.latest_summary` + `summary_memory.recent_summaries`,
+- `memory.recent_decisions` + `memory.recent_reasoning`,
+- `memory.active_commitment` + `memory.transcript_tail`,
+- `frame_meta` (frames available, whether images were included, optional frame-fetch reason).
 
-Current design intentionally does **not** send local semantic summaries (for example scene summary or belief packets) to remote planning.
+Planner context intentionally avoids feeding raw local detector belief packets directly into remote decisions.
 
 ## Remote/Local Behavior Contract
 - If Cosmos is enabled and reachable, planner runs in remote-first mode.
 - No local semantic substitute decision is generated when a remote response fails parse/validation; system keeps prior action (or initial neutral hold).
+- Decision prompt enforces a stepwise decision tree (safety -> change -> opportunity -> selection).
+- Planner may request `frame_fetch` before returning a strict action JSON.
 - Optional reasoning probe runs in a separate low-rate thread for diagnostics; default is disabled.
 
 ## Data Contracts
@@ -57,7 +63,9 @@ Current design intentionally does **not** send local semantic summaries (for exa
 - `logs/actions.jsonl`: behavior output actions.
 - `logs/runtime_debug.log`: request lifecycle, parse failures, reasoning previews.
 - `logs/orchestrator_timeline.jsonl`: structured orchestrator events:
-  - `run_start`, `request_start`, `request_end`, `reasoning_event`, `decision_event`, `fallback_event`.
+  - `run_start`, `request_start`, `request_end`, `reasoning_event`, `decision_event`, `fallback_event`,
+  - `summary_request_start`, `summary_request_end`, `summary_event`, `frame_fetch_event`.
+- `logs/orchestrator_memory.jsonl`: canonical append-only memory events (`summary_event`, `decision_event`, `reasoning_event`).
 - `logs/telemetry/preview/latest.jpg` + `latest.json`: optional preview tap for sidecar telemetry tools.
 
 ## Forward Plan: Memory Layers

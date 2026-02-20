@@ -72,25 +72,28 @@ class PerceptionNode:
         if primary is not None:
             primary_bbox, primary_conf = primary
 
-        used_fallback_bbox = primary_bbox is None
-        if primary_bbox is None:
-            if isinstance(self.source, DummyFrameSource):
-                cx = self.source.dummy_position()
-            else:
-                cx = 0.5
+        used_fallback_bbox = False
+        if primary_bbox is None and isinstance(self.source, DummyFrameSource):
+            cx = self.source.dummy_position()
             primary_bbox = BBoxNorm(cx=cx, cy=0.5, w=0.2, h=0.4)
             primary_conf = 0.5
+            used_fallback_bbox = True
 
         # Optional pointing target: when near right, point to top-right
         pointing = None
         pointing_conf = None
-        cx = primary_bbox.cx
-        if cx > 0.7:
-            pointing = PointNorm(x=0.85, y=0.2)
-            pointing_conf = 0.6
+        zone_hint = None
+        if primary_bbox is not None:
+            cx = primary_bbox.cx
+            zone_hint = _zone_from_cx(cx)
+            if cx > 0.7:
+                pointing = PointNorm(x=0.85, y=0.2)
+                pointing_conf = 0.6
+        step_end_mono_ns = time.monotonic_ns()
+        latency_ms = max(0.0, (step_end_mono_ns - packet.mono_ns) / 1_000_000.0)
 
         debug = {
-            "zone_hint": _zone_from_cx(cx),
+            "zone_hint": zone_hint,
             "num_detections": num_detections,
             "detector_alive": detector_alive,
             "used_fallback_bbox": used_fallback_bbox,
@@ -108,7 +111,7 @@ class PerceptionNode:
             timestamp_monotonic_s=ts_mono,
             timestamp_wall_s=ts_wall,
             fps=self._fps,
-            latency_ms=5.0,
+            latency_ms=latency_ms,
             primary_person=primary_bbox,
             primary_person_conf=primary_conf,
             pointing_target=pointing,

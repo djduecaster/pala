@@ -22,6 +22,57 @@ class ResolvedPacks:
 
 
 PACKS: Dict[str, SignalPack] = {
+    "reasoning_live": SignalPack(
+        name="reasoning_live",
+        description="Live orchestrator reasoning stream for on-call/demo monitoring.",
+        sources=("agent", "transport_stats", "timeline_log", "actions_log", "video", "video_frame", "tegrastats"),
+        journal_filters=(r"(orchestrator|cosmos|reasoning|parse_fail|timeout|inflight|fallback)",),
+        panels=(
+            "summary",
+            "trace_list",
+            "trace_detail",
+            "reasoning_stream",
+            "request_detail",
+            "reasoning_health",
+            "video",
+            "transport",
+        ),
+    ),
+    "reasoning_failures": SignalPack(
+        name="reasoning_failures",
+        description="Failure-centric reasoning and transport diagnostics.",
+        sources=("agent", "transport_stats", "timeline_log", "actions_log", "journal"),
+        journal_filters=(r"(fail|error|invalid|timeout|fallback|traceback)",),
+        panels=(
+            "summary",
+            "trace_list",
+            "trace_detail",
+            "reasoning_stream",
+            "request_detail",
+            "reasoning_health",
+            "logs",
+            "warnings",
+            "transport",
+        ),
+    ),
+    "demo_overview": SignalPack(
+        name="demo_overview",
+        description="Balanced demo view with behavior context and system health.",
+        sources=("agent", "transport_stats", "timeline_log", "actions_log", "video", "video_frame", "perception_log", "tegrastats"),
+        journal_filters=(r"(orchestrator|reasoning|camera|deepstream|error)",),
+        panels=(
+            "summary",
+            "trace_list",
+            "trace_detail",
+            "video",
+            "reasoning_stream",
+            "request_detail",
+            "perception",
+            "action",
+            "system",
+            "events",
+        ),
+    ),
     "runtime_core": SignalPack(
         name="runtime_core",
         description="Primary runtime loop visibility and health.",

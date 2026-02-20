@@ -4,11 +4,18 @@ This directory contains sidecar telemetry tooling for live debugging and demos.
 It is intentionally separate from core runtime control/safety logic.
 
 ## V2 Shipment Overview
-- Signal packs for role-based debugging (`runtime_core`, `perception_debug`, `planner_debug`, `memory_debug`, `hardware_safety`, `cosmos_io`).
+- Signal packs for role-based debugging (`reasoning_live`, `reasoning_failures`, `demo_overview`, plus legacy packs).
 - Field-level payload filtering (`--field-filter source.path<op>value` with `=`, `!=`, `<`, `>`, `~`).
 - Timeline and memory stream support:
   - `logs/orchestrator_timeline.jsonl` (primary)
   - `logs/orchestrator_memory.jsonl` (optional/legacy depending on planner mode)
+- Reasoning-first terminal UX:
+  - `Reasoning Stream`, `Request Detail`, `Reasoning Health` panels
+  - keyboard command bar and panel presets
+  - redacted/truncated reasoning snippets for safe live demos
+- Correlated request traces:
+  - `Trace List` and `Trace Detail` panels for req-level root-cause drill-down
+  - correlation by `req_id`, with bounded time-window fallback for missing ids
 - Transport health and robustness improvements:
   - warning coalescing
   - stale stream reconnect
@@ -50,15 +57,18 @@ It is intentionally separate from core runtime control/safety logic.
 cd ~/pala
 PALA_LOG_LEVEL=INFO uv run python -m pala.main
 ```
-2. On Mac, run viewer with the default V2 pack:
+2. On Mac, run viewer (default is reasoning-first UI + `reasoning_live` pack):
 ```bash
 cd /Users/djduecaster/development/pala
-UV_PYTHON=/opt/homebrew/bin/python3.10 uv run python -m tools.telemetry.mac_viewer --jetson-host jetson --pack runtime_core
+UV_PYTHON=/opt/homebrew/bin/python3.10 uv run python -m tools.telemetry.mac_viewer --jetson-host jetson
 ```
 3. Add targeted visibility as needed:
 ```bash
-# Add planner + memory focus
-uv run python -m tools.telemetry.mac_viewer --pack runtime_core --pack planner_debug --pack memory_debug
+# Reasoning-focused live view (explicit)
+uv run python -m tools.telemetry.mac_viewer --pack reasoning_live
+
+# Failure triage view
+uv run python -m tools.telemetry.mac_viewer --pack reasoning_failures
 
 # Show only low-confidence planner actions
 uv run python -m tools.telemetry.mac_viewer --pack planner_debug --field-filter 'actions_log.data.confidence<0.5'
@@ -68,7 +78,7 @@ uv run python -m tools.telemetry.mac_viewer --pack planner_debug --field-filter 
 Capture on Mac (recommended for post-training prep):
 ```bash
 uv run python -m tools.telemetry.mac_viewer \
-  --pack runtime_core --pack planner_debug --pack memory_debug \
+  --pack reasoning_live --pack planner_debug \
   --save-session logs/telemetry/session_001 \
   --capture-frames keyframes
 ```
@@ -90,6 +100,8 @@ Bundle contents:
 - `manifest.json` (schema/version + metadata)
 - `events.jsonl` (telemetry stream)
 - `index.json` (frame index)
+- `reasoning_index.json` (lightweight reasoning event index)
+- `trace_index.json` (correlated request trace index)
 - `frames/` (captured JPEG files when enabled)
 
 ## Prerequisites
@@ -193,6 +205,12 @@ uv run python -m tools.telemetry.jetson_agent --list-packs
 
 Useful flags:
 ```bash
+# Reasoning-first UI mode (default)
+uv run python -m tools.telemetry.mac_viewer --ui-mode reasoning
+
+# Classic layout mode
+uv run python -m tools.telemetry.mac_viewer --ui-mode classic
+
 # Lower update rate if terminal redraw is heavy
 uv run python -m tools.telemetry.mac_viewer --refresh-hz 2
 
@@ -200,7 +218,7 @@ uv run python -m tools.telemetry.mac_viewer --refresh-hz 2
 uv run python -m tools.telemetry.mac_viewer --no-journal
 
 # Choose signal packs (repeatable)
-uv run python -m tools.telemetry.mac_viewer --pack runtime_core --pack memory_debug
+uv run python -m tools.telemetry.mac_viewer --pack reasoning_live --pack demo_overview
 
 # Add field-level filters
 uv run python -m tools.telemetry.mac_viewer --field-filter 'actions_log.data.confidence<0.5'
@@ -242,6 +260,12 @@ uv run python -m tools.telemetry.mac_viewer --warning-throttle-s 3 --worker-rest
 # Limit dashboard to selected panels
 uv run python -m tools.telemetry.mac_viewer --panel system --panel transport --panel logs
 
+# Reasoning snippet controls
+uv run python -m tools.telemetry.mac_viewer --reasoning-redact on --reasoning-snippet-max-chars 200
+
+# Trace correlation tuning
+uv run python -m tools.telemetry.mac_viewer --trace-match-window-s 2.0 --trace-max-events 1000
+
 # Save a local reproducible session bundle on Mac (events + optional frame refs)
 uv run python -m tools.telemetry.mac_viewer --save-session logs/telemetry/session_001 --capture-frames keyframes
 
@@ -256,6 +280,17 @@ uv run python -m tools.telemetry.mac_viewer --no-lamp-panel
 # Set lamp panel width (pixels)
 uv run python -m tools.telemetry.mac_viewer --lamp-panel-width 300
 ```
+
+Keyboard controls in reasoning mode:
+- `?`: toggle hotkey help
+- `h/l`: move focus panel
+- `j/k`: previous/next reasoning event
+- `u/i`: previous/next trace
+- `o`: focus trace detail panel
+- `p`: pin/unpin selected trace
+- `f`: cycle reasoning filter (`all`, `errors`, `slow`)
+- `r`: toggle reasoning redaction
+- `1/2/3`: panel presets
 
 ## Tk/Tcl Video Window Troubleshooting (macOS)
 If telemetry works but the video window fails with an `init.tcl` error:
@@ -322,7 +357,10 @@ uv run python -m tools.telemetry.jetson_agent --video-source gst --video-fps 6
 uv run python -m tools.telemetry.jetson_agent --warning-throttle-s 3 --worker-restart-delay-s 1.0
 
 # Use packs + field filters directly on agent
-uv run python -m tools.telemetry.jetson_agent --pack runtime_core --pack planner_debug --field-filter 'actions_log.data.confidence<0.5'
+uv run python -m tools.telemetry.jetson_agent --pack reasoning_live --pack planner_debug --field-filter 'actions_log.data.confidence<0.5'
+
+# Tune trace correlation window for agent-side capture index generation
+uv run python -m tools.telemetry.jetson_agent --trace-match-window-s 2.0
 
 # Capture a reproducible bundle on Jetson side
 uv run python -m tools.telemetry.jetson_agent --pack all --capture-dir logs/telemetry/session_jetson_001 --capture-frames keyframes

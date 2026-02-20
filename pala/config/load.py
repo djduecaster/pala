@@ -5,6 +5,8 @@ from typing import Any, Dict, List, Optional
 import os
 import yaml
 
+from ..types.style_profiles import default_style_profiles
+
 
 @dataclass
 class LoopRates:
@@ -75,7 +77,22 @@ class CosmosConfig:
     policy_output_contract: str = (
         "Return JSON only with target_state,intent,style,primitive_hint,target_zone,allow_interrupt,urgency,confidence,rationale."
     )
+    # planner cadence
     max_hz: float = 1.0
+    planner_hz: float = 1.0
+    planner_strict_schema: bool = True
+    planner_allow_frame_fetch: bool = True
+    planner_max_tool_calls_per_cycle: int = 1
+    # summarizer cadence and media sampling
+    summarizer_enabled: bool = True
+    summarizer_hz: float = 1.0
+    summarizer_timeout_ms: int = 6000
+    summary_window_s: float = 6.0
+    summary_max_frames: int = 4
+    summary_max_width: int = 320
+    summary_jpeg_quality: int = 55
+    summary_ttl_ms: int = 6000
+    identity_file_path: str = "memory/identity.md"
     max_frame_age_ms: int = 500
     video_window_s: float = 8.0
     video_max_frames: int = 8
@@ -101,7 +118,11 @@ class CosmosConfig:
     reasoning_probe_hz: float = 0.1
     reasoning_probe_timeout_ms: int = 8000
     reasoning_probe_max_tokens: int = 1024
+    commitment_ttl_ms: int = 12000
     mock_latency_ms: int = 150
+    memory_recent_decisions: int = 8
+    memory_recent_summaries: int = 8
+    memory_recent_reasoning: int = 8
 
 
 @dataclass
@@ -180,9 +201,19 @@ def load_config(path: str) -> RobotConfig:
     if not isinstance(data, dict):
         _fail("root", "expected mapping at root")
 
-    mode = str(data.get("mode", "dev"))
+    mode = str(data.get("mode", "dev")).strip().lower()
+    allowed_modes = {"dev", "jetson_perception", "jetson_full"}
+    if mode not in allowed_modes:
+        _fail("mode", "expected one of dev|jetson_perception|jetson_full")
 
-    detector = str(data.get("detector", ""))
+    detector = str(data.get("detector", "dummy")).strip().lower()
+    if not detector:
+        detector = "dummy"
+    allowed_detectors = {"dummy", "deepstream", "jetson"}
+    if detector not in allowed_detectors:
+        _fail("detector", "expected one of dummy|deepstream|jetson")
+    if detector == "jetson":
+        _fail("detector", "detector 'jetson' is not implemented; use dummy or deepstream")
 
     loop_rates_raw = _req(data, "loop_rates", "root")
     if not isinstance(loop_rates_raw, dict):
@@ -260,6 +291,7 @@ def load_config(path: str) -> RobotConfig:
     cosmos_raw = data.get("cosmos", {})
     if not isinstance(cosmos_raw, dict):
         _fail("cosmos", "expected mapping")
+    planner_hz_raw = cosmos_raw.get("planner_hz", cosmos_raw.get("max_hz", 1.0))
     cosmos = CosmosConfig(
         enabled=_as_bool(cosmos_raw.get("enabled", False), "cosmos.enabled"),
         provider=str(cosmos_raw.get("provider", "brev")),
@@ -309,6 +341,43 @@ def load_config(path: str) -> RobotConfig:
             )
         ),
         max_hz=_as_float(cosmos_raw.get("max_hz", 1.0), "cosmos.max_hz"),
+        planner_hz=_as_float(planner_hz_raw, "cosmos.planner_hz"),
+        planner_strict_schema=_as_bool(cosmos_raw.get("planner_strict_schema", True), "cosmos.planner_strict_schema"),
+        planner_allow_frame_fetch=_as_bool(
+            cosmos_raw.get("planner_allow_frame_fetch", True),
+            "cosmos.planner_allow_frame_fetch",
+        ),
+        planner_max_tool_calls_per_cycle=_as_int(
+            cosmos_raw.get("planner_max_tool_calls_per_cycle", 1),
+            "cosmos.planner_max_tool_calls_per_cycle",
+        ),
+        summarizer_enabled=_as_bool(cosmos_raw.get("summarizer_enabled", True), "cosmos.summarizer_enabled"),
+        summarizer_hz=_as_float(cosmos_raw.get("summarizer_hz", 1.0), "cosmos.summarizer_hz"),
+        summarizer_timeout_ms=_as_int(
+            cosmos_raw.get("summarizer_timeout_ms", cosmos_raw.get("request_timeout_ms", 6000)),
+            "cosmos.summarizer_timeout_ms",
+        ),
+        summary_window_s=_as_float(
+            cosmos_raw.get("summary_window_s", cosmos_raw.get("video_window_s", 6.0)),
+            "cosmos.summary_window_s",
+        ),
+        summary_max_frames=_as_int(
+            cosmos_raw.get("summary_max_frames", cosmos_raw.get("video_max_frames", 4)),
+            "cosmos.summary_max_frames",
+        ),
+        summary_max_width=_as_int(
+            cosmos_raw.get("summary_max_width", cosmos_raw.get("video_max_width", 320)),
+            "cosmos.summary_max_width",
+        ),
+        summary_jpeg_quality=_as_int(
+            cosmos_raw.get("summary_jpeg_quality", cosmos_raw.get("video_jpeg_quality", 55)),
+            "cosmos.summary_jpeg_quality",
+        ),
+        summary_ttl_ms=_as_int(
+            cosmos_raw.get("summary_ttl_ms", cosmos_raw.get("response_ttl_ms", 6000)),
+            "cosmos.summary_ttl_ms",
+        ),
+        identity_file_path=str(cosmos_raw.get("identity_file_path", "memory/identity.md")),
         max_frame_age_ms=_as_int(cosmos_raw.get("max_frame_age_ms", 500), "cosmos.max_frame_age_ms"),
         video_window_s=_as_float(cosmos_raw.get("video_window_s", 8.0), "cosmos.video_window_s"),
         video_max_frames=_as_int(cosmos_raw.get("video_max_frames", 8), "cosmos.video_max_frames"),
@@ -366,13 +435,26 @@ def load_config(path: str) -> RobotConfig:
             cosmos_raw.get("reasoning_probe_max_tokens", 1024),
             "cosmos.reasoning_probe_max_tokens",
         ),
+        commitment_ttl_ms=_as_int(cosmos_raw.get("commitment_ttl_ms", 12000), "cosmos.commitment_ttl_ms"),
         mock_latency_ms=_as_int(cosmos_raw.get("mock_latency_ms", 150), "cosmos.mock_latency_ms"),
+        memory_recent_decisions=_as_int(
+            cosmos_raw.get("memory_recent_decisions", 8),
+            "cosmos.memory_recent_decisions",
+        ),
+        memory_recent_summaries=_as_int(
+            cosmos_raw.get("memory_recent_summaries", 8),
+            "cosmos.memory_recent_summaries",
+        ),
+        memory_recent_reasoning=_as_int(
+            cosmos_raw.get("memory_recent_reasoning", 8),
+            "cosmos.memory_recent_reasoning",
+        ),
     )
 
     style_profiles_raw = data.get("styles", {})
     if not isinstance(style_profiles_raw, dict):
         _fail("styles", "expected mapping")
-    style_profiles = _default_style_profiles()
+    style_profiles = default_style_profiles()
     for name, raw in style_profiles_raw.items():
         if not isinstance(raw, dict):
             _fail(f"styles.{name}", "expected mapping")
@@ -400,26 +482,3 @@ def load_config(path: str) -> RobotConfig:
         cosmos=cosmos,
         style_profiles=style_profiles,
     )
-
-
-def _default_style_profiles() -> Dict[str, Dict[str, float]]:
-    return {
-        "calm": {
-            "amp_scale": 0.85,
-            "rate_scale": 0.9,
-            "duration_scale": 1.1,
-            "settle_scale": 1.1,
-        },
-        "curious": {
-            "amp_scale": 1.15,
-            "rate_scale": 1.15,
-            "duration_scale": 0.9,
-            "settle_scale": 0.9,
-        },
-        "focused": {
-            "amp_scale": 0.7,
-            "rate_scale": 1.0,
-            "duration_scale": 0.85,
-            "settle_scale": 1.0,
-        },
-    }

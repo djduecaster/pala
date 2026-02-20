@@ -211,7 +211,9 @@ Request shape to Cosmos:
 
 Decision context currently passed in user text:
 - `control_state` (active primitive/age + latest accepted decision),
-- `transcript_tail` (decision + reasoning lines only),
+- `memory.working_memory` (decision + reasoning lines),
+- `memory.active_commitment` (current short-lived intent/primitive commitment),
+- `memory.scene_memory` + `memory.long_term_memory` anchors,
 - `frame_meta` (frames sent + frame age).
 
 Notes:

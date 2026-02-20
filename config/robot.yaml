@@ -75,19 +75,35 @@ cosmos:
   model: "nvidia/cosmos-reason2-2b"
   planner_prompt: "Prioritize calm, safe desk-companion behavior. Prefer hold/breath unless confidence is high."
   policy_version: "v1"
+  identity_file_path: "memory/identity.md"
   policy_identity: "You are PALA, a social desk companion lamp that should feel alive, expressive, and safe."
   policy_capabilities: "You can move head/neck joints via primitives: hold, breath, glance, nod, orient_to_zone. You cannot manipulate external objects, move base position, or physically touch users."
   policy_safety: "Avoid sudden aggressive motion. Prefer stable behavior. If uncertain, choose conservative actions."
   policy_style: "Default style is calm; use curious for gentle tracking and focused for attentive task support."
   policy_output_contract: "Return JSON only with target_state,intent,style,primitive_hint,target_zone,allow_interrupt,urgency,confidence,rationale."
-  max_hz: 0.3
+  # Planner cadence and parser policy.
+  max_hz: 0.6
+  planner_hz: 0.6
+  planner_strict_schema: true
+  planner_allow_frame_fetch: true
+  planner_max_tool_calls_per_cycle: 1
+  # Scene summarizer cadence.
+  summarizer_enabled: true
+  summarizer_hz: 1.0
+  summarizer_timeout_ms: 6000
+  summary_window_s: 6.0
+  summary_max_frames: 4
+  summary_max_width: 320
+  summary_jpeg_quality: 55
+  summary_ttl_ms: 6000
   max_frame_age_ms: 500
+  # Legacy planner media knobs (kept for compatibility).
   video_window_s: 6.0
   video_max_frames: 4
   video_max_width: 320
   video_jpeg_quality: 55
   request_timeout_ms: 6000
-  response_ttl_ms: 1500
+  response_ttl_ms: 5000
   # Legacy memory knobs (deprecated): retained for compatibility only; current planner context uses rolling transcript.
   memory_enabled: true
   memory_jsonl_path: "logs/orchestrator_memory.jsonl"
@@ -99,6 +115,9 @@ cosmos:
   context_transcript_per_type_max_items: 8
   context_transcript_max_chars: 4000
   context_memory_digest_max_items: 3
+  memory_recent_decisions: 8
+  memory_recent_summaries: 8
+  memory_recent_reasoning: 8
   decision_repeat_detector_window: 6
   orchestrator_timeline_jsonl_path: "logs/orchestrator_timeline.jsonl"
   inflight_guard_enabled: true
@@ -107,4 +126,5 @@ cosmos:
   reasoning_probe_hz: 0.1
   reasoning_probe_timeout_ms: 10000
   reasoning_probe_max_tokens: 1024
+  commitment_ttl_ms: 12000
   mock_latency_ms: 150

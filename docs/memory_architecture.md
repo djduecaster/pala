@@ -4,13 +4,14 @@ This document describes the next memory architecture iteration for PALA.
 It is intentionally practical for the current project timeline: no vector database, no heavy infra.
 
 ## Current State (Baseline)
-- Orchestrator context is transcript-first.
+- Orchestrator context is summary-first + transcript-backed.
 - Request context includes:
   - `control_state`
-  - `transcript_tail` (decision/reasoning lines)
+  - `summary_memory` (latest + recent `SceneSummary` entries)
+  - `memory.recent_decisions`, `memory.recent_reasoning`, `memory.transcript_tail`
   - `frame_meta`
-- Local semantic summaries are not injected into remote planning.
-- Timeline log (`logs/orchestrator_timeline.jsonl`) is the primary structured trace.
+- Scene summarizer loop writes compact `summary_event` records.
+- Timeline log (`logs/orchestrator_timeline.jsonl`) and memory log (`logs/orchestrator_memory.jsonl`) are canonical traces.
 
 ## Design Principles (OpenClaw-Inspired, Simplified)
 - Keep a canonical durable memory record on disk (human-readable and auditable).
@@ -42,7 +43,7 @@ It is intentionally practical for the current project timeline: no vector databa
   - stable scene anchors (desk focus area, frequent interaction region).
 - Lifetime: minutes to current session.
 - Retrieval: latest snapshot + recent deltas.
-- Sent selectively (compact bullets/JSON), not raw event streams.
+- Sent selectively as compact `SceneSummary` windows, not raw frame streams.
 
 ### Layer 3: Long-Term Session Memory
 - Purpose: persistent behavior preference and recurring patterns.
@@ -57,6 +58,7 @@ It is intentionally practical for the current project timeline: no vector databa
 ## Storage Plan (No Vector DB)
 - Canonical append-only event log:
   - `logs/orchestrator_timeline.jsonl` (already present)
+  - `logs/orchestrator_memory.jsonl` (summary/decision/reasoning events)
 - Optional durable memory folder (planned):
   - `memory/session/YYYY-MM-DD.jsonl` (session facts/events)
   - `memory/long_term.jsonl` (curated stable facts)
@@ -77,7 +79,7 @@ For each orchestrator request:
 
 ## Write/Consolidation Policy (Initial)
 - Every accepted decision/reasoning is appended to canonical timeline.
-- Spatial memory updates at fixed low rate (for example 0.5-1 Hz) from local observations.
+- Spatial memory updates at fixed low rate (for example 0.5-1 Hz) through remote scene summarizer outputs.
 - Long-term promotion is conservative:
   - require repeated evidence,
   - require confidence threshold,

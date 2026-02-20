@@ -20,6 +20,7 @@ from ..types import (
     BreathCommand,
     OrientToZoneCommand,
 )
+from ..types.style_profiles import default_style_profiles
 
 
 class ExecutionStatus(str, Enum):
@@ -302,11 +303,7 @@ def _clamp(vals: List[float], limits: List[List[float]]) -> List[float]:
 
 
 def _normalize_style_profiles(raw: Optional[Dict[str, Dict[str, float]]]) -> Dict[str, Dict[str, float]]:
-    defaults = {
-        "calm": {"amp_scale": 0.85, "rate_scale": 0.9, "duration_scale": 1.1, "settle_scale": 1.1},
-        "curious": {"amp_scale": 1.15, "rate_scale": 1.15, "duration_scale": 0.9, "settle_scale": 0.9},
-        "focused": {"amp_scale": 0.7, "rate_scale": 1.0, "duration_scale": 0.85, "settle_scale": 1.0},
-    }
+    defaults = default_style_profiles()
     if not isinstance(raw, dict):
         return defaults
 

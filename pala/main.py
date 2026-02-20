@@ -15,7 +15,15 @@ from .perception import PerceptionNode, LatestFrameCache
 from .perception.preview_tap import PreviewTapWriter
 from .perception.detector import DummyDetector, JetsonDetector, DeepStreamDetector
 from .perception.frame_source import DummyFrameSource, CameraFrameSource
-from .planner import HeuristicPlanner, AsyncOrchestratorPlanner
+from .planner import (
+    HeuristicPlanner,
+    AsyncOrchestratorPlanner,
+    AsyncSceneSummarizer,
+    MemoryManager,
+    MemoryManagerConfig,
+    TimelineConfig,
+    TimelineWriter,
+)
 from .behavior import BehaviorPolicy
 from .control import TrajectoryExecutor
 from .control.primitives import PrimitiveKind, HoldCommand
@@ -124,15 +132,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     def control_loop() -> None:
         rl = RateLimiter(cfg.loop_rates.control_hz)
         last_ts = time.monotonic()
+        startup_hold_action = ActionPlan(
+            primitive=PrimitiveKind.HOLD,
+            command=HoldCommand(),
+            confidence=0.1,
+            cancel_current=True,
+        )
         while not stop.is_set():
             action, _ = latest_action.get()
             if action is None:
-                action = ActionPlan(
-                    primitive=PrimitiveKind.HOLD,
-                    command=HoldCommand(),
-                    confidence=0.1,
-                    cancel_current=True,
-                )
+                action = startup_hold_action
 
             now = time.monotonic()
             dt = now - last_ts
@@ -309,9 +318,51 @@ def _build_planner(cfg, latest_frame: LatestFrameCache):
         api_key = os.getenv("PALA_COSMOS_API_KEY")
         model = os.getenv("PALA_COSMOS_MODEL") or cfg.cosmos.model
         planner_prompt = os.getenv("PALA_COSMOS_PROMPT") or cfg.cosmos.planner_prompt
+        timeline = TimelineWriter(
+            TimelineConfig(
+                enabled=True,
+                jsonl_path=cfg.cosmos.orchestrator_timeline_jsonl_path,
+            )
+        )
+        memory_events = max(
+            64,
+            cfg.cosmos.memory_recent_decisions + cfg.cosmos.memory_recent_reasoning + (2 * cfg.cosmos.memory_recent_summaries),
+        )
+        memory_manager = MemoryManager(
+            MemoryManagerConfig(
+                enabled=cfg.cosmos.memory_enabled,
+                jsonl_path=cfg.cosmos.memory_jsonl_path,
+                recent_events=memory_events,
+                digest_items=0,
+                distill_every_n_events=0,
+            )
+        )
+        summarizer = None
+        if cfg.cosmos.summarizer_enabled:
+            summarizer = AsyncSceneSummarizer(
+                frame_cache=latest_frame,
+                provider=cfg.cosmos.provider,
+                base_url=base_url,
+                api_key=api_key,
+                model=model,
+                policy_version=cfg.cosmos.policy_version,
+                summarizer_hz=cfg.cosmos.summarizer_hz,
+                max_frame_age_ms=cfg.cosmos.max_frame_age_ms,
+                summary_window_s=cfg.cosmos.summary_window_s,
+                summary_max_frames=cfg.cosmos.summary_max_frames,
+                summary_max_width=cfg.cosmos.summary_max_width,
+                summary_jpeg_quality=cfg.cosmos.summary_jpeg_quality,
+                request_timeout_ms=cfg.cosmos.summarizer_timeout_ms,
+                request_min_fresh_frames=cfg.cosmos.request_min_fresh_frames,
+                timeline=timeline,
+                memory_manager=memory_manager,
+            )
         return AsyncOrchestratorPlanner(
             frame_cache=latest_frame,
             fallback=HeuristicPlanner(),
+            summarizer=summarizer,
+            memory_manager=memory_manager,
+            timeline=timeline,
             provider=cfg.cosmos.provider,
             base_url=base_url,
             api_key=api_key,
@@ -320,11 +371,12 @@ def _build_planner(cfg, latest_frame: LatestFrameCache):
             runtime_mode=cfg.mode,
             policy_version=cfg.cosmos.policy_version,
             policy_identity=cfg.cosmos.policy_identity,
+            identity_file_path=cfg.cosmos.identity_file_path,
             policy_capabilities=cfg.cosmos.policy_capabilities,
             policy_safety=cfg.cosmos.policy_safety,
             policy_style=cfg.cosmos.policy_style,
             policy_output_contract=cfg.cosmos.policy_output_contract,
-            orchestrator_hz=cfg.cosmos.max_hz,
+            orchestrator_hz=cfg.cosmos.planner_hz,
             max_frame_age_ms=cfg.cosmos.max_frame_age_ms,
             video_window_s=cfg.cosmos.video_window_s,
             video_max_frames=cfg.cosmos.video_max_frames,
@@ -332,6 +384,13 @@ def _build_planner(cfg, latest_frame: LatestFrameCache):
             video_jpeg_quality=cfg.cosmos.video_jpeg_quality,
             request_timeout_ms=cfg.cosmos.request_timeout_ms,
             response_ttl_ms=cfg.cosmos.response_ttl_ms,
+            summary_ttl_ms=cfg.cosmos.summary_ttl_ms,
+            planner_strict_schema=cfg.cosmos.planner_strict_schema,
+            planner_allow_frame_fetch=cfg.cosmos.planner_allow_frame_fetch,
+            planner_max_tool_calls_per_cycle=cfg.cosmos.planner_max_tool_calls_per_cycle,
+            memory_recent_decisions=cfg.cosmos.memory_recent_decisions,
+            memory_recent_summaries=cfg.cosmos.memory_recent_summaries,
+            memory_recent_reasoning=cfg.cosmos.memory_recent_reasoning,
             memory_enabled=cfg.cosmos.memory_enabled,
             memory_jsonl_path=cfg.cosmos.memory_jsonl_path,
             memory_recent_events=cfg.cosmos.memory_recent_events,
@@ -343,13 +402,13 @@ def _build_planner(cfg, latest_frame: LatestFrameCache):
             context_transcript_max_chars=cfg.cosmos.context_transcript_max_chars,
             context_memory_digest_max_items=cfg.cosmos.context_memory_digest_max_items,
             decision_repeat_detector_window=cfg.cosmos.decision_repeat_detector_window,
-            timeline_jsonl_path=cfg.cosmos.orchestrator_timeline_jsonl_path,
             inflight_guard_enabled=cfg.cosmos.inflight_guard_enabled,
             request_min_fresh_frames=cfg.cosmos.request_min_fresh_frames,
             reasoning_probe_enabled=cfg.cosmos.reasoning_probe_enabled,
             reasoning_probe_hz=cfg.cosmos.reasoning_probe_hz,
             reasoning_probe_timeout_ms=cfg.cosmos.reasoning_probe_timeout_ms,
             reasoning_probe_max_tokens=cfg.cosmos.reasoning_probe_max_tokens,
+            commitment_ttl_ms=cfg.cosmos.commitment_ttl_ms,
         )
     return HeuristicPlanner()
 

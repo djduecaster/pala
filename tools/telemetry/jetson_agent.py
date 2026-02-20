@@ -829,6 +829,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--capture-frames", choices=["off", "keyframes", "all"], default="off")
     parser.add_argument("--capture-max-seconds", type=float, default=0.0)
     parser.add_argument("--capture-manifest-version", type=int, default=1)
+    parser.add_argument("--trace-match-window-s", type=float, default=2.0)
     return parser
 
 
@@ -886,6 +887,7 @@ def main() -> int:
             frames_mode=args.capture_frames,
             max_seconds=max(0.0, float(args.capture_max_seconds)),
             manifest_version=int(args.capture_manifest_version),
+            trace_match_window_s=max(0.1, float(args.trace_match_window_s)),
             metadata={
                 "packs": list(resolved_packs.names),
                 "field_filters": list(args.field_filter or []),

@@ -12,3 +12,4 @@ node_modules/
 *.egg-info/
 models/
 logs/
+jetson_logs/

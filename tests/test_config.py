@@ -9,6 +9,7 @@ def test_config_loads_and_validates(tmp_path):
         "\n".join(
             [
                 "mode: dev",
+                "detector: dummy",
                 "loop_rates:",
                 "  perception_hz: 20",
                 "  behavior_hz: 3",
@@ -84,3 +85,59 @@ def test_config_bool_string_false_is_parsed_false(tmp_path):
     assert cfg.cosmos.memory_enabled is False
     assert cfg.cosmos.inflight_guard_enabled is False
     assert cfg.cosmos.reasoning_probe_enabled is False
+
+
+def test_config_rejects_invalid_mode(tmp_path):
+    config_path = tmp_path / "robot_bad_mode.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "mode: staging",
+                "detector: dummy",
+                "loop_rates:",
+                "  perception_hz: 20",
+                "  behavior_hz: 3",
+                "  control_hz: 80",
+                "  hardware_hz: 120",
+                "deadman_timeout_ms: 250",
+                "joint_names: [yaw, pitch1, pitch2, roll, pitch3]",
+                "joint_limits_rad:",
+                "  - [-1.0, 1.0]",
+                "  - [-1.0, 1.0]",
+                "  - [-1.0, 1.0]",
+                "  - [-1.0, 1.0]",
+                "  - [-1.0, 1.0]",
+                "servo_calibration: {}",
+            ]
+        )
+    )
+    with pytest.raises(ValueError, match="mode"):
+        load_config(str(config_path))
+
+
+def test_config_rejects_unimplemented_jetson_detector(tmp_path):
+    config_path = tmp_path / "robot_bad_detector.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "mode: jetson_full",
+                "detector: jetson",
+                "loop_rates:",
+                "  perception_hz: 20",
+                "  behavior_hz: 3",
+                "  control_hz: 80",
+                "  hardware_hz: 120",
+                "deadman_timeout_ms: 250",
+                "joint_names: [yaw, pitch1, pitch2, roll, pitch3]",
+                "joint_limits_rad:",
+                "  - [-1.0, 1.0]",
+                "  - [-1.0, 1.0]",
+                "  - [-1.0, 1.0]",
+                "  - [-1.0, 1.0]",
+                "  - [-1.0, 1.0]",
+                "servo_calibration: {}",
+            ]
+        )
+    )
+    with pytest.raises(ValueError, match="detector"):
+        load_config(str(config_path))

@@ -123,6 +123,22 @@ def test_perception_detector_error_sets_debug_and_uses_fallback():
     assert "detector_error" in st.debug
 
 
+def test_perception_real_source_no_detection_reports_no_person():
+    class _NoDet:
+        def detect(self, _frame):
+            return []
+
+    node = PerceptionNode(source=_OneFrameSource(), detector=_NoDet())
+    st = node.step()
+    assert st.primary_person is None
+    assert st.primary_person_conf is None
+    assert st.debug.get("zone_hint") is None
+    assert st.debug.get("num_detections") == 0
+    assert st.debug.get("used_fallback_bbox") is False
+    assert st.latency_ms is not None
+    assert st.latency_ms >= 0.0
+
+
 def test_perception_source_error_is_reported_without_crashing():
     class _ErrSource:
         def get_packet(self):

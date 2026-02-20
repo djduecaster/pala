@@ -19,6 +19,7 @@ from tools.telemetry.protocol import decode_message, encode_message, event
 from tools.telemetry.jetson_agent import _TapVideoSource, _encode_jpeg_frame, _parse_tegrastats
 from tools.telemetry.filters import parse_field_filter, matches_field_filters
 from tools.telemetry.mac_viewer import (
+    _apply_panel_preset,
     DashboardState,
     _build_parser,
     _build_remote_agent_command,
@@ -28,6 +29,8 @@ from tools.telemetry.mac_viewer import (
 from tools.telemetry.packs import resolve_packs, apply_pack_overrides
 from tools.telemetry.capture import CaptureConfig, SessionCaptureWriter
 from tools.telemetry.replay import SessionReplayReader
+from tools.telemetry.reasoning import format_reasoning_snippet, normalize_reasoning_message, redact_reasoning_text
+from tools.telemetry.trace_graph import TraceGraphBuilder, TraceRecord, load_trace_index
 
 
 def test_protocol_roundtrip():
@@ -263,6 +266,15 @@ def test_capture_and_replay_roundtrip(tmp_path):
     assert events[0]["source"] == "actions_log"
     assert events[1]["source"] == "video_frame"
     assert isinstance(events[1]["payload"].get("bytes_b64"), str)
+    reasoning_index = json.loads((session_dir / "reasoning_index.json").read_text(encoding="utf-8"))
+    assert isinstance(reasoning_index.get("events"), list)
+    trace_index = json.loads((session_dir / "trace_index.json").read_text(encoding="utf-8"))
+    assert isinstance(trace_index.get("traces"), list)
+    loaded_traces = load_trace_index(str(session_dir / "trace_index.json"))
+    assert isinstance(loaded_traces, list)
+    manifest = json.loads((session_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest.get("trace_index_path") == "trace_index.json"
+    assert isinstance(manifest.get("trace_count"), int)
 
 
 def test_replay_rejects_frame_ref_path_traversal(tmp_path):
@@ -298,3 +310,170 @@ def test_draw_lamp_panel_with_command_data():
         },
     )
     assert panel.size == (260, 240)
+
+
+def test_reasoning_normalization_timeline_event():
+    msg = {
+        "source": "timeline_log",
+        "ts_wall_s": 123.4,
+        "payload": {
+            "data": {
+                "type": "req_end",
+                "payload": {
+                    "id": 7,
+                    "status": "parse_fail",
+                    "latency_ms": 321.0,
+                    "reasoning": "token=abc123 parse failed",
+                },
+            }
+        },
+    }
+    out = normalize_reasoning_message(msg)
+    assert out is not None
+    assert out.req_id == 7
+    assert out.phase == "req_end"
+    assert out.status == "parse_fail"
+    assert out.latency_ms == 321.0
+    assert out.severity == "error"
+
+
+def test_reasoning_redaction_and_snippet():
+    raw = "authorization=Bearer abc.def.ghi token=secretvalue1234567890"
+    redacted = redact_reasoning_text(raw)
+    assert "secretvalue1234567890" not in redacted
+    snippet = format_reasoning_snippet(raw, max_chars=24, redact=True)
+    assert len(snippet) <= 24
+
+
+def test_dashboard_reasoning_filters_and_selection():
+    state = DashboardState(host="jetson")
+    state.configure_panels(["summary", "reasoning_stream", "request_detail"], focus_panel="reasoning_stream")
+    state.apply(
+        {
+            "source": "timeline_log",
+            "ts_wall_s": time.time(),
+            "payload": {"data": {"type": "req_end", "payload": {"id": 1, "status": "ok", "latency_ms": 3000}}},
+        }
+    )
+    state.apply(
+        {
+            "source": "timeline_log",
+            "ts_wall_s": time.time(),
+            "payload": {"data": {"type": "req_end", "payload": {"id": 2, "status": "parse_fail", "latency_ms": 100}}},
+        }
+    )
+    all_events = state.filtered_reasoning_events(slow_ms=2000)
+    assert len(all_events) == 2
+    state.reasoning_filter_mode = "errors"
+    err_events = state.filtered_reasoning_events(slow_ms=2000)
+    assert len(err_events) == 1
+    state.reasoning_filter_mode = "slow"
+    slow_events = state.filtered_reasoning_events(slow_ms=2000)
+    assert len(slow_events) == 1
+    state.move_reasoning_selection(delta=-1, slow_ms=2000)
+    assert state.reasoning_selected_seq is not None
+
+
+def test_panel_preset_changes_active_panels():
+    args = _build_parser().parse_args([])
+    state = DashboardState(host="jetson")
+    state.configure_panels(["summary"], focus_panel="summary")
+    _apply_panel_preset(state, args, "1")
+    assert "reasoning_stream" in args.panel
+    assert "request_detail" in args.panel
+    assert "trace_list" in args.panel
+    assert "trace_detail" in args.panel
+
+
+def test_dashboard_trace_selection_and_pin():
+    state = DashboardState(host="jetson")
+    traces = [
+        TraceRecord(
+            trace_id="req:1",
+            req_id=1,
+            start_ts_wall_s=1.0,
+            end_ts_wall_s=1.5,
+            duration_ms=500.0,
+            status="ok",
+            severity="info",
+            summary="ok",
+            event_refs=tuple(),
+        ),
+        TraceRecord(
+            trace_id="time:1000-1",
+            req_id=None,
+            start_ts_wall_s=2.0,
+            end_ts_wall_s=2.1,
+            duration_ms=100.0,
+            status="error",
+            severity="error",
+            summary="error",
+            event_refs=tuple(),
+        ),
+    ]
+    state.set_traces(traces)
+    assert state.selected_trace() is not None
+    state.move_trace_selection(1)
+    selected = state.selected_trace()
+    assert selected is not None
+    assert selected.trace_id == "time:1000-1"
+    state.toggle_trace_pin()
+    assert state.trace_pinned_id == "time:1000-1"
+    state.toggle_trace_pin()
+    assert state.trace_pinned_id is None
+
+
+def test_trace_graph_correlates_by_req_id():
+    b = TraceGraphBuilder(match_window_s=2.0, max_events=100)
+    b.ingest(
+        {
+            "seq": 1,
+            "source": "timeline_log",
+            "ts_wall_s": 10.0,
+            "payload": {"data": {"type": "request_start", "payload": {"request_id": 42}}},
+        }
+    )
+    b.ingest(
+        {
+            "seq": 2,
+            "source": "timeline_log",
+            "ts_wall_s": 10.4,
+            "payload": {"data": {"type": "request_end", "payload": {"request_id": 42, "status": "parse_fail"}}},
+        }
+    )
+    traces = b.traces()
+    assert len(traces) == 1
+    assert traces[0].req_id == 42
+    assert traces[0].status == "parse_fail"
+
+
+def test_trace_graph_temporal_fallback_without_req_id():
+    b = TraceGraphBuilder(match_window_s=2.0, max_events=100)
+    b.ingest(
+        {
+            "seq": 1,
+            "source": "timeline_log",
+            "ts_wall_s": 20.0,
+            "payload": {"data": {"type": "request_start", "payload": {"request_id": 8}}},
+        }
+    )
+    b.ingest(
+        {
+            "seq": 2,
+            "source": "journal",
+            "ts_wall_s": 20.8,
+            "payload": {"line": "orchestrator warning timeout waiting for response"},
+            "level": "warning",
+        }
+    )
+    traces = b.traces()
+    assert len(traces) == 1
+    assert len(traces[0].event_refs) == 2
+
+
+def test_trace_graph_splits_far_events():
+    b = TraceGraphBuilder(match_window_s=2.0, max_events=100)
+    b.ingest({"seq": 1, "source": "journal", "ts_wall_s": 1.0, "payload": {"line": "error first failure"}, "level": "warning"})
+    b.ingest({"seq": 2, "source": "journal", "ts_wall_s": 10.0, "payload": {"line": "error second failure"}, "level": "warning"})
+    traces = b.traces()
+    assert len(traces) == 2
