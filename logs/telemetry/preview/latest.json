@@ -1,1 +1,0 @@
-{"frame_id":1,"width":160,"height":90,"mono_ns":434517040122291,"pts_ns":null,"ts_wall_s":1771476327.610259,"extra":{"command":{"joint_names":["yaw","pitch1","pitch2","roll","pitch3"],"joint_angles_rad":[0.0,0.0,0.0,0.0,0.0],"enable":true,"timestamp_monotonic_s":434517.038229791}}}
