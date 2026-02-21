@@ -5,6 +5,8 @@ import pathlib
 import sys
 import base64
 import time
+import io
+import contextlib
 
 import numpy as np
 from PIL import Image
@@ -18,9 +20,14 @@ from tools.telemetry.lamp_viz import draw_lamp_panel
 from tools.telemetry.protocol import decode_message, encode_message, event
 from tools.telemetry.jetson_agent import _TapVideoSource, _encode_jpeg_frame, _parse_tegrastats
 from tools.telemetry.filters import parse_field_filter, matches_field_filters
+from tools.telemetry.insights import build_improvement_report, load_improvement_report
 from tools.telemetry.mac_viewer import (
+    _apply_alert_policy,
     _apply_panel_preset,
+    _build_in_memory_query_rows,
     _can_preload_trace_index,
+    _write_query_export,
+    _write_query_slice_export,
     DashboardState,
     _build_parser,
     _build_remote_agent_command,
@@ -29,14 +36,21 @@ from tools.telemetry.mac_viewer import (
 )
 from tools.telemetry.packs import resolve_packs, apply_pack_overrides
 from tools.telemetry.capture import CaptureConfig, SessionCaptureWriter
+from tools.telemetry.compare import compare_sessions
 from tools.telemetry.dataset_export import export_dataset_rows
+from tools.telemetry.doctor import build_doctor_report, load_doctor_report
+from tools.telemetry.incident import build_incident_report, load_incident_report, render_incident_markdown
 from tools.telemetry.replay import SessionReplayReader
 from tools.telemetry.reasoning import format_reasoning_snippet, normalize_reasoning_message, redact_reasoning_text
 from tools.telemetry.quality import evaluate_quality_gate, load_quality_report
 from tools.telemetry.labels import load_labels_jsonl
 from tools.telemetry.schema_v3 import TELEMETRY_SCHEMA_VERSION_V3
+from tools.telemetry.scoreboard import load_scoreboard, summarize_scoreboard
 from tools.telemetry.storage_sqlite import build_session_db, query_session_db, resolve_session_db_path
+from tools.telemetry import telemetry as telemetry_cli
+from tools.telemetry.telemetry import main as telemetry_main
 from tools.telemetry.trace_graph import TraceGraphBuilder, TraceRecord, load_trace_index
+from tools.telemetry.watchdog import resolve_candidate_sessions, run_watchdog
 
 
 def test_protocol_roundtrip():
@@ -126,6 +140,25 @@ def test_remote_command_forwards_pack_and_filters():
     assert "--pack memory_debug" in cmd
     assert "--field-filter" in cmd
     assert "confidence<0.5" in cmd
+
+
+def test_remote_command_forwards_capture_metadata_tags():
+    args = _build_parser().parse_args([])
+    args.agent_capture_dir = "~/captures/session1"
+    args.capture_frames = "keyframes"
+    args.capture_max_seconds = 30.0
+    args.scenario_tag = ["kitchen", "occlusion"]
+    args.goal_tag = ["post_training"]
+    args.runbook = "night-lighting"
+    args.golden_session = ["/tmp/golden_a"]
+    args.scoreboard_path = "logs/telemetry/scoreboard.json"
+    args.no_scoreboard_update = True
+    cmd = _build_remote_agent_command(args)
+    assert "--capture-scenario-tag kitchen" in cmd
+    assert "--capture-goal-tag post_training" in cmd
+    assert "--capture-runbook night-lighting" in cmd
+    assert "--capture-golden-session /tmp/golden_a" in cmd
+    assert "--no-capture-scoreboard" in cmd
 
 
 def test_preview_tap_writer_emits_files_and_throttles(tmp_path):
@@ -281,9 +314,14 @@ def test_capture_and_replay_roundtrip(tmp_path):
     manifest = json.loads((session_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest.get("schema_version") == TELEMETRY_SCHEMA_VERSION_V3
     assert manifest.get("trace_index_path") == "trace_index.json"
+    assert manifest.get("doctor_report_path") == "doctor_report.json"
+    assert manifest.get("incident_report_path") == "incident_report.json"
     assert isinstance(manifest.get("trace_count"), int)
     assert (session_dir / "session.db").exists()
     assert (session_dir / "quality_report.json").exists()
+    assert (session_dir / "improvement_report.json").exists()
+    assert (session_dir / "doctor_report.json").exists()
+    assert (session_dir / "incident_report.json").exists()
     assert (session_dir / "labels.weak.jsonl").exists()
 
 
@@ -357,6 +395,368 @@ def test_query_trace_filter_scopes_event_results(tmp_path):
     writer.close()
     out = query_session_db(str(session_dir), query="trace:req:999", limit=10)
     assert out["events"] == []
+
+
+def test_query_supports_since_and_quoted_phrase(tmp_path):
+    session_dir = tmp_path / "session"
+    writer = SessionCaptureWriter(CaptureConfig(directory=str(session_dir), frames_mode="off", max_seconds=0.0))
+    now = time.time()
+    writer.write(
+        {
+            "type": "event",
+            "source": "journal",
+            "ts_wall_s": now - 600.0,
+            "payload": {"line": "camera timeout historical"},
+            "level": "warning",
+        }
+    )
+    writer.write(
+        {
+            "type": "event",
+            "source": "journal",
+            "ts_wall_s": now,
+            "payload": {"line": "camera timeout current"},
+            "level": "warning",
+        }
+    )
+    writer.close()
+
+    out = query_session_db(str(session_dir), query='since:5m "camera timeout"', limit=10)
+    assert len(out["events"]) == 1
+    ts_wall = float(out["events"][0].get("ts_wall_s", 0.0))
+    assert ts_wall >= (now - 60.0)
+    counts = out.get("counts")
+    assert isinstance(counts, dict)
+    assert int(counts.get("events", 0)) == 1
+
+
+def test_query_supports_kind_filter(tmp_path):
+    session_dir = tmp_path / "session"
+    writer = SessionCaptureWriter(CaptureConfig(directory=str(session_dir), frames_mode="off", max_seconds=0.0))
+    writer.write(
+        {
+            "type": "event",
+            "source": "timeline_log",
+            "ts_wall_s": time.time(),
+            "payload": {"data": {"type": "req_start", "payload": {"request_id": 5}}},
+        }
+    )
+    writer.write(
+        {
+            "type": "event",
+            "source": "timeline_log",
+            "ts_wall_s": time.time(),
+            "payload": {"data": {"type": "req_end", "payload": {"request_id": 5, "status": "ok"}}},
+        }
+    )
+    writer.close()
+
+    trace_only = query_session_db(str(session_dir), query="kind:trace", limit=10)
+    assert trace_only["events"] == []
+    assert trace_only["reasoning"] == []
+    assert len(trace_only["traces"]) >= 1
+
+    reasoning_only = query_session_db(str(session_dir), query="kind:reasoning", limit=10)
+    assert reasoning_only["events"] == []
+    assert reasoning_only["traces"] == []
+    assert len(reasoning_only["reasoning"]) >= 1
+
+
+def test_in_memory_query_rows_support_event_kind():
+    state = DashboardState(host="jetson")
+    state.apply(
+        {
+            "source": "journal",
+            "ts_wall_s": time.time(),
+            "level": "warning",
+            "payload": {"line": "camera timeout detected"},
+        }
+    )
+    state.apply(
+        {
+            "source": "timeline_log",
+            "ts_wall_s": time.time(),
+            "payload": {"data": {"type": "req_end", "payload": {"request_id": 3, "status": "ok", "reasoning": "done"}}},
+        }
+    )
+    state.query_text = 'kind:event source:journal "camera timeout"'
+    rows = _build_in_memory_query_rows(state, limit=10, now_wall_s=time.time())
+    assert len(rows) == 1
+    assert rows[0].get("kind") == "event"
+    assert rows[0].get("source") == "journal"
+
+
+def test_query_export_writer(tmp_path):
+    out_path = tmp_path / "query_export.json"
+    _write_query_export(
+        str(out_path),
+        query="status:error",
+        note="test",
+        rows=[{"kind": "event", "id": 1}],
+    )
+    payload = json.loads(out_path.read_text(encoding="utf-8"))
+    assert payload.get("query") == "status:error"
+    assert payload.get("row_count") == 1
+
+
+def test_query_slice_export_writer(tmp_path):
+    out_path = tmp_path / "query_slice.jsonl"
+    count = _write_query_slice_export(
+        str(out_path),
+        query="status:timeout",
+        rows=[{"kind": "trace", "id": "req:7", "trace_id": "req:7", "summary": "planner timeout"}],
+    )
+    assert count == 1
+    lines = out_path.read_text(encoding="utf-8").strip().splitlines()
+    payload = json.loads(lines[0])
+    assert payload.get("label") == "query_slice"
+    assert payload.get("query") == "status:timeout"
+
+
+def test_apply_alert_policy_sets_thresholds():
+    args = _build_parser().parse_args(["--alert-policy", "demo"])
+    _apply_alert_policy(args)
+    assert args.alert_stale_s <= 5.0
+    assert args.alert_video_idle_s <= 4.0
+    assert args.alert_dropped_events == 1
+
+
+def test_improvement_report_builder(tmp_path):
+    session_dir = tmp_path / "session"
+    writer = SessionCaptureWriter(CaptureConfig(directory=str(session_dir), frames_mode="off", max_seconds=0.0))
+    writer.write(
+        {
+            "type": "event",
+            "source": "timeline_log",
+            "ts_wall_s": time.time(),
+            "payload": {"data": {"type": "req_end", "payload": {"request_id": 9, "status": "parse_fail", "latency_ms": 2500}}},
+        }
+    )
+    writer.close()
+
+    report = build_improvement_report(str(session_dir))
+    assert isinstance(report.get("recommendations"), list)
+    assert report.get("summary", {}).get("parse_fail_count", 0) >= 1
+    loaded = load_improvement_report(str(session_dir))
+    assert loaded is not None
+    assert "summary" in loaded
+
+
+def test_capture_writer_updates_scoreboard(tmp_path):
+    session_dir = tmp_path / "session"
+    board_path = tmp_path / "scoreboard.json"
+    writer = SessionCaptureWriter(
+        CaptureConfig(
+            directory=str(session_dir),
+            frames_mode="off",
+            max_seconds=0.0,
+            scenario_tags=["lab"],
+            goal_tags=["ptx"],
+            runbook="runbook-a",
+            scoreboard_path=str(board_path),
+        )
+    )
+    writer.write(
+        {
+            "type": "event",
+            "source": "timeline_log",
+            "ts_wall_s": time.time(),
+            "payload": {"data": {"type": "req_end", "payload": {"request_id": 1, "status": "ok"}}},
+        }
+    )
+    writer.close()
+    board = load_scoreboard(str(board_path))
+    assert isinstance(board.get("sessions"), list)
+    assert len(board["sessions"]) == 1
+    assert board["sessions"][0].get("scenario_tags") == ["lab"]
+
+
+def test_doctor_report_builder_and_loader(tmp_path):
+    session_dir = tmp_path / "session"
+    writer = SessionCaptureWriter(CaptureConfig(directory=str(session_dir), frames_mode="off", max_seconds=0.0))
+    writer.write(
+        {
+            "type": "event",
+            "source": "timeline_log",
+            "ts_wall_s": time.time(),
+            "payload": {"data": {"type": "req_end", "payload": {"request_id": 4, "status": "parse_fail"}}},
+        }
+    )
+    writer.close()
+
+    report = build_doctor_report(str(session_dir))
+    assert isinstance(report.get("readiness"), dict)
+    loaded = load_doctor_report(str(session_dir))
+    assert loaded is not None
+    assert "checks" in loaded
+
+
+def test_compare_sessions_reports_delta(tmp_path):
+    base_dir = tmp_path / "base"
+    cand_dir = tmp_path / "cand"
+
+    writer_a = SessionCaptureWriter(CaptureConfig(directory=str(base_dir), frames_mode="off", max_seconds=0.0))
+    writer_a.write(
+        {
+            "type": "event",
+            "source": "timeline_log",
+            "ts_wall_s": time.time(),
+            "payload": {"data": {"type": "req_end", "payload": {"request_id": 10, "status": "ok"}}},
+        }
+    )
+    writer_a.close()
+
+    writer_b = SessionCaptureWriter(CaptureConfig(directory=str(cand_dir), frames_mode="off", max_seconds=0.0))
+    writer_b.write(
+        {
+            "type": "event",
+            "source": "timeline_log",
+            "ts_wall_s": time.time(),
+            "payload": {"data": {"type": "req_end", "payload": {"request_id": 11, "status": "parse_fail", "latency_ms": 3200}}},
+        }
+    )
+    writer_b.close()
+
+    out = compare_sessions(str(base_dir), str(cand_dir), parse_fail_increase_tol=0.0, timeout_increase_tol=0.0)
+    assert out.get("verdict") in {"warn", "fail", "pass"}
+    assert isinstance(out.get("delta"), dict)
+
+
+def test_incident_report_builder_and_markdown(tmp_path):
+    session_dir = tmp_path / "session"
+    writer = SessionCaptureWriter(CaptureConfig(directory=str(session_dir), frames_mode="off", max_seconds=0.0))
+    writer.write(
+        {
+            "type": "event",
+            "source": "timeline_log",
+            "ts_wall_s": time.time(),
+            "payload": {"data": {"type": "req_end", "payload": {"request_id": 21, "status": "parse_fail"}}},
+        }
+    )
+    writer.close()
+
+    report = build_incident_report(str(session_dir), limit=4)
+    assert report.get("severity") in {"critical", "high", "medium", "low"}
+    loaded = load_incident_report(str(session_dir))
+    assert loaded is not None
+    md = render_incident_markdown(report)
+    assert "## Summary" in md
+
+
+def test_scoreboard_summary_leaderboards(tmp_path):
+    board_path = tmp_path / "scoreboard.json"
+    first = SessionCaptureWriter(
+        CaptureConfig(
+            directory=str(tmp_path / "s1"),
+            frames_mode="off",
+            max_seconds=0.0,
+            scenario_tags=["desk"],
+            goal_tags=["pt"],
+            scoreboard_path=str(board_path),
+        )
+    )
+    first.write(
+        {
+            "type": "event",
+            "source": "timeline_log",
+            "ts_wall_s": time.time(),
+            "payload": {"data": {"type": "req_end", "payload": {"request_id": 1, "status": "ok"}}},
+        }
+    )
+    first.close()
+    second = SessionCaptureWriter(
+        CaptureConfig(
+            directory=str(tmp_path / "s2"),
+            frames_mode="off",
+            max_seconds=0.0,
+            scenario_tags=["desk", "night"],
+            goal_tags=["pt"],
+            scoreboard_path=str(board_path),
+        )
+    )
+    second.write(
+        {
+            "type": "event",
+            "source": "timeline_log",
+            "ts_wall_s": time.time(),
+            "payload": {"data": {"type": "req_end", "payload": {"request_id": 2, "status": "ok"}}},
+        }
+    )
+    second.close()
+    board = load_scoreboard(str(board_path))
+    summary = summarize_scoreboard(board, min_sessions=1, top_n=5)
+    scenarios = summary.get("scenario_leaderboard")
+    assert isinstance(scenarios, list)
+    assert any(row.get("tag") == "desk" for row in scenarios)
+
+
+def test_watchdog_resolve_and_run(tmp_path):
+    baseline = tmp_path / "baseline"
+    cand_root = tmp_path / "cands"
+    cand_root.mkdir(parents=True, exist_ok=True)
+    cand_a = cand_root / "cand_a"
+    cand_b = cand_root / "cand_b"
+
+    writer_base = SessionCaptureWriter(CaptureConfig(directory=str(baseline), frames_mode="off", max_seconds=0.0))
+    writer_base.write(
+        {
+            "type": "event",
+            "source": "timeline_log",
+            "ts_wall_s": time.time(),
+            "payload": {"data": {"type": "req_end", "payload": {"request_id": 31, "status": "ok"}}},
+        }
+    )
+    writer_base.close()
+
+    writer_a = SessionCaptureWriter(CaptureConfig(directory=str(cand_a), frames_mode="off", max_seconds=0.0))
+    writer_a.write(
+        {
+            "type": "event",
+            "source": "timeline_log",
+            "ts_wall_s": time.time(),
+            "payload": {"data": {"type": "req_end", "payload": {"request_id": 32, "status": "ok"}}},
+        }
+    )
+    writer_a.close()
+    writer_b = SessionCaptureWriter(CaptureConfig(directory=str(cand_b), frames_mode="off", max_seconds=0.0))
+    writer_b.write(
+        {
+            "type": "event",
+            "source": "timeline_log",
+            "ts_wall_s": time.time(),
+            "payload": {"data": {"type": "req_end", "payload": {"request_id": 33, "status": "parse_fail"}}},
+        }
+    )
+    writer_b.close()
+
+    resolved = resolve_candidate_sessions([str(cand_root)], discover=True)
+    assert len(resolved) == 2
+    report = run_watchdog(str(baseline), resolved, parse_fail_increase_tol=0.0, timeout_increase_tol=0.0)
+    assert report.get("candidate_count") == 2
+    assert report.get("overall_verdict") in {"pass", "warn", "fail"}
+
+
+def test_in_memory_query_rows_support_trace_kind():
+    state = DashboardState(host="jetson")
+    state.set_traces(
+        [
+            TraceRecord(
+                trace_id="req:7",
+                req_id=7,
+                start_ts_wall_s=time.time() - 0.2,
+                end_ts_wall_s=time.time() - 0.1,
+                duration_ms=100.0,
+                status="timeout",
+                severity="error",
+                summary="planner timeout",
+                event_refs=tuple(),
+            )
+        ]
+    )
+    state.query_text = "kind:trace status:timeout"
+    rows = _build_in_memory_query_rows(state, limit=10, now_wall_s=time.time())
+    assert len(rows) == 1
+    assert rows[0].get("kind") == "trace"
 
 
 def test_capture_reasoning_index_includes_confidence(tmp_path):
@@ -458,6 +858,55 @@ def test_manifest_trace_index_override_used_for_index_and_export(tmp_path):
     assert exported["row_count"] == 1
     row = json.loads(lines[0])
     assert row.get("trace_id") == "req:99"
+
+
+def test_build_parser_accepts_alert_panel_and_thresholds():
+    args = _build_parser().parse_args(
+        [
+            "--panel",
+            "alerts",
+            "--panel",
+            "throughput",
+            "--panel",
+            "insights",
+            "--panel",
+            "story",
+            "--panel",
+            "scoreboard",
+            "--panel",
+            "doctor",
+            "--panel",
+            "incident",
+            "--alert-stale-s",
+            "7.5",
+            "--alert-policy",
+            "training",
+            "--index-refresh-s",
+            "9",
+            "--query-export",
+            "out.json",
+            "--query-slice-export",
+            "slice.jsonl",
+            "--insight-max-recommendations",
+            "3",
+            "--doctor-gate",
+            "warn",
+        ]
+    )
+    assert "alerts" in args.panel
+    assert "throughput" in args.panel
+    assert "insights" in args.panel
+    assert "story" in args.panel
+    assert "scoreboard" in args.panel
+    assert "doctor" in args.panel
+    assert "incident" in args.panel
+    assert args.alert_stale_s == 7.5
+    assert args.alert_policy == "training"
+    assert args.index_refresh_s == 9
+    assert args.query_export == "out.json"
+    assert args.query_slice_export == "slice.jsonl"
+    assert args.insight_max_recommendations == 3
+    assert args.doctor_gate == "warn"
 
 
 def test_replay_rejects_frame_ref_path_traversal(tmp_path):
@@ -681,3 +1130,128 @@ def test_trace_graph_extracts_id_from_orchestrator_text():
 def test_can_preload_trace_index_requires_no_field_filters():
     assert _can_preload_trace_index(field_filters=[]) is True
     assert _can_preload_trace_index(field_filters=[object()]) is False
+
+
+def test_unified_telemetry_cli_lists_packs(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["telemetry", "packs"])
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = telemetry_main()
+    out = buf.getvalue()
+    assert rc == 0
+    assert "reasoning_live" in out
+
+
+def test_unified_telemetry_cli_viewer_allows_double_dash(monkeypatch):
+    captured = {}
+
+    def _fake_run(cmd, check=False):
+        captured["cmd"] = list(cmd)
+
+        class _Result:
+            returncode = 0
+
+        return _Result()
+
+    monkeypatch.setattr(telemetry_cli.subprocess, "run", _fake_run)
+    monkeypatch.setattr(sys, "argv", ["telemetry", "viewer", "--", "--jetson-host", "jetson"])
+    rc = telemetry_main()
+    assert rc == 0
+    cmd = captured.get("cmd", [])
+    assert "--" not in cmd
+    assert "--jetson-host" in cmd
+
+
+def test_unified_telemetry_cli_dispatches_doctor(monkeypatch):
+    captured = {}
+
+    def _fake_run(cmd, check=False):
+        captured["cmd"] = list(cmd)
+
+        class _Result:
+            returncode = 0
+
+        return _Result()
+
+    monkeypatch.setattr(telemetry_cli.subprocess, "run", _fake_run)
+    monkeypatch.setattr(sys, "argv", ["telemetry", "doctor", "--", "logs/telemetry/session_001"])
+    rc = telemetry_main()
+    assert rc == 0
+    cmd = captured.get("cmd", [])
+    assert "tools.telemetry.doctor" in cmd
+
+
+def test_unified_telemetry_cli_dispatches_compare(monkeypatch):
+    captured = {}
+
+    def _fake_run(cmd, check=False):
+        captured["cmd"] = list(cmd)
+
+        class _Result:
+            returncode = 0
+
+        return _Result()
+
+    monkeypatch.setattr(telemetry_cli.subprocess, "run", _fake_run)
+    monkeypatch.setattr(sys, "argv", ["telemetry", "compare", "--", "a", "b"])
+    rc = telemetry_main()
+    assert rc == 0
+    cmd = captured.get("cmd", [])
+    assert "tools.telemetry.compare" in cmd
+
+
+def test_unified_telemetry_cli_dispatches_incident(monkeypatch):
+    captured = {}
+
+    def _fake_run(cmd, check=False):
+        captured["cmd"] = list(cmd)
+
+        class _Result:
+            returncode = 0
+
+        return _Result()
+
+    monkeypatch.setattr(telemetry_cli.subprocess, "run", _fake_run)
+    monkeypatch.setattr(sys, "argv", ["telemetry", "incident", "--", "s"])
+    rc = telemetry_main()
+    assert rc == 0
+    cmd = captured.get("cmd", [])
+    assert "tools.telemetry.incident" in cmd
+
+
+def test_unified_telemetry_cli_dispatches_scoreboard(monkeypatch):
+    captured = {}
+
+    def _fake_run(cmd, check=False):
+        captured["cmd"] = list(cmd)
+
+        class _Result:
+            returncode = 0
+
+        return _Result()
+
+    monkeypatch.setattr(telemetry_cli.subprocess, "run", _fake_run)
+    monkeypatch.setattr(sys, "argv", ["telemetry", "scoreboard"])
+    rc = telemetry_main()
+    assert rc == 0
+    cmd = captured.get("cmd", [])
+    assert "tools.telemetry.scoreboard" in cmd
+
+
+def test_unified_telemetry_cli_dispatches_watchdog(monkeypatch):
+    captured = {}
+
+    def _fake_run(cmd, check=False):
+        captured["cmd"] = list(cmd)
+
+        class _Result:
+            returncode = 0
+
+        return _Result()
+
+    monkeypatch.setattr(telemetry_cli.subprocess, "run", _fake_run)
+    monkeypatch.setattr(sys, "argv", ["telemetry", "watchdog", "--", "b", "c"])
+    rc = telemetry_main()
+    assert rc == 0
+    cmd = captured.get("cmd", [])
+    assert "tools.telemetry.watchdog" in cmd

@@ -6,12 +6,19 @@ import json
 import os
 import socket
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 from .labels import derive_weak_labels, write_labels_jsonl
+from .doctor import build_doctor_report, write_doctor_report
+from .incident import build_incident_report, write_incident_markdown, write_incident_report
+from .insights import build_improvement_report, write_improvement_report
 from .quality import build_quality_report, write_quality_report
 from .reasoning import format_reasoning_snippet, normalize_reasoning_message
+from .scoreboard import DEFAULT_SCOREBOARD_PATH, add_scoreboard_session
 from .schema_v3 import (
+    DOCTOR_REPORT_PATH,
+    IMPROVEMENT_REPORT_PATH,
+    INCIDENT_REPORT_PATH,
     QUALITY_REPORT_PATH,
     TELEMETRY_SCHEMA_VERSION_V3,
     WEAK_LABELS_PATH,
@@ -32,6 +39,12 @@ class CaptureConfig:
     manifest_version: int = MANIFEST_SCHEMA_VERSION
     trace_match_window_s: float = 2.0
     trace_max_events: int = 20_000
+    scenario_tags: Sequence[str] = field(default_factory=list)
+    goal_tags: Sequence[str] = field(default_factory=list)
+    runbook: str = ""
+    golden_sessions: Sequence[str] = field(default_factory=list)
+    scoreboard_path: str = DEFAULT_SCOREBOARD_PATH
+    scoreboard_update: bool = True
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -218,10 +231,67 @@ class SessionCaptureWriter:
         except Exception as exc:
             manifest.setdefault("v3_artifact_errors", []).append(f"quality_report: {exc!r}")
 
+        improvement_report = None
+        try:
+            improvement_report = build_improvement_report(
+                self._dir,
+                golden_sessions=self._cfg.golden_sessions,
+                scenario_tags=self._cfg.scenario_tags,
+                goal_tags=self._cfg.goal_tags,
+                runbook=self._cfg.runbook,
+            )
+            write_improvement_report(self._dir, improvement_report, filename=IMPROVEMENT_REPORT_PATH)
+        except Exception as exc:
+            manifest.setdefault("v3_artifact_errors", []).append(f"improvement_report: {exc!r}")
+
+        if improvement_report is not None and bool(self._cfg.scoreboard_update):
+            try:
+                add_scoreboard_session(
+                    path=str(self._cfg.scoreboard_path or DEFAULT_SCOREBOARD_PATH),
+                    session_dir=self._dir,
+                    manifest=manifest,
+                    quality_report=quality_report,
+                    improvement_report=improvement_report,
+                    scenario_tags=self._cfg.scenario_tags,
+                    goal_tags=self._cfg.goal_tags,
+                    runbook=self._cfg.runbook,
+                )
+            except Exception as exc:
+                manifest.setdefault("v3_artifact_errors", []).append(f"scoreboard: {exc!r}")
+
+        doctor_report = None
+        try:
+            doctor_report = build_doctor_report(
+                self._dir,
+                manifest=manifest,
+                quality_report=quality_report,
+                improvement_report=improvement_report,
+                index_summary=index_summary,
+            )
+            write_doctor_report(self._dir, doctor_report, filename=DOCTOR_REPORT_PATH)
+        except Exception as exc:
+            manifest.setdefault("v3_artifact_errors", []).append(f"doctor_report: {exc!r}")
+
+        incident_report = None
+        try:
+            incident_report = build_incident_report(
+                self._dir,
+                quality_report=quality_report,
+                doctor_report=doctor_report,
+                improvement_report=improvement_report,
+            )
+            write_incident_report(self._dir, incident_report, filename=INCIDENT_REPORT_PATH)
+            write_incident_markdown(self._dir, incident_report)
+        except Exception as exc:
+            manifest.setdefault("v3_artifact_errors", []).append(f"incident_report: {exc!r}")
+
         manifest = upgrade_manifest_v3(
             manifest,
             index_summary=index_summary,
             quality_report=quality_report,
+            improvement_report=improvement_report,
+            doctor_report=doctor_report,
+            incident_report=incident_report,
             weak_label_count=weak_label_count,
         )
         with open(self._manifest_path, "w", encoding="utf-8") as fh:

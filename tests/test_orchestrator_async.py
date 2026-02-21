@@ -12,6 +12,7 @@ from pala.planner.orchestrator_async import (
     _parse_decision_content,
 )
 from pala.perception.frame_cache import LatestFrameCache
+from pala.planner.state_models import OrchestratorDecision
 from pala.types import ActionPlan, BBoxNorm, PerceptionState
 from pala.control.primitives import HoldCommand, PrimitiveKind, OrientToZoneCommand
 
@@ -100,6 +101,56 @@ def test_orchestrator_remote_payload_includes_multi_frame_sequence(monkeypatch):
         assert "\"summary_memory\"" in context
         assert "\"recent_decisions\"" in context
         assert "\"perception_state_raw\"" not in context
+    finally:
+        planner.shutdown()
+
+
+def test_orchestrator_can_include_images_on_first_pass(monkeypatch):
+    captured = {"payload": None}
+
+    def _fake_post(url, payload, *, timeout_s, api_key):
+        captured["payload"] = payload
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            '{"target_state":"tracking","intent":"maintain_presence","style":"curious","primitive_hint":"orient_to_zone",'
+                            '"target_zone":"left","allow_interrupt":false,"urgency":"low","confidence":0.7,"rationale":"test"}'
+                        )
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr("pala.planner.orchestrator_async._post_json", _fake_post)
+    cache = LatestFrameCache()
+    planner = AsyncOrchestratorPlanner(
+        frame_cache=cache,
+        provider="brev",
+        base_url="http://127.0.0.1:8000",
+        orchestrator_hz=100.0,
+        max_frame_age_ms=1000,
+        planner_include_images_first_pass=True,
+        planner_self_critique_enabled=False,
+    )
+    try:
+        deadline = time.monotonic() + 1.0
+        while captured["payload"] is None and time.monotonic() < deadline:
+            cache.set(np.full((6, 6, 3), 3, dtype=np.uint8), mono_ns=time.monotonic_ns(), pts_ns=None)
+            planner.plan(
+                PerceptionState(
+                    timestamp_monotonic_s=time.monotonic(),
+                    primary_person=BBoxNorm(cx=0.3, cy=0.5, w=0.2, h=0.4),
+                    primary_person_conf=0.8,
+                    debug={"zone_hint": "left"},
+                )
+            )
+            time.sleep(0.02)
+        assert captured["payload"] is not None
+        user_content = captured["payload"]["messages"][1]["content"]
+        image_items = [item for item in user_content if isinstance(item, dict) and item.get("type") == "image_url"]
+        assert image_items
     finally:
         planner.shutdown()
 
@@ -208,7 +259,9 @@ def test_parse_decision_rejects_string_none_intent():
         '"target_zone":"center","allow_interrupt":false,"urgency":"low","confidence":0.7,'
         '"rationale":"reason"}'
     )
-    assert _parse_decision_content(content) is None
+    decision = _parse_decision_content(content)
+    assert decision is not None
+    assert decision.intent == "track_transition"
 
 
 def test_extract_think_content_parses_tagged_output():
@@ -227,7 +280,11 @@ def test_parse_decision_accepts_prediction_action_details_schema():
         '}'
     )
     decision = _parse_decision_content(content)
-    assert decision is None
+    assert decision is not None
+    assert decision.target_state == "engaging"
+    assert decision.primitive_hint == "orient_to_zone"
+    assert decision.target_zone == "left"
+    assert decision.urgency == "medium"
 
 
 def test_parse_decision_accepts_prediction_string_schema():
@@ -239,7 +296,27 @@ def test_parse_decision_accepts_prediction_string_schema():
         '}'
     )
     decision = _parse_decision_content(content)
-    assert decision is None
+    assert decision is not None
+    assert decision.primitive_hint == "orient_to_zone"
+    assert decision.target_zone == "left"
+    assert decision.style == "focused"
+    assert decision.allow_interrupt is True
+
+
+def test_parse_decision_captures_utility_contract_fields():
+    content = (
+        '{"target_state":"tracking","intent":"track_transition","style":"focused","primitive_hint":"orient_to_zone",'
+        '"target_zone":"left","allow_interrupt":true,"urgency":"medium","confidence":0.78,'
+        '"user_utility_goal":"keep user lit while typing","why_now":"user shifted left",'
+        '"success_criteria":"lamp aligned within 1s","commit_s":2.5,'
+        '"rationale":"maintain useful illumination"}'
+    )
+    decision = _parse_decision_content(content)
+    assert decision is not None
+    assert decision.user_utility_goal == "keep user lit while typing"
+    assert decision.why_now == "user shifted left"
+    assert decision.success_criteria == "lamp aligned within 1s"
+    assert decision.commit_s == 2.5
 
 
 def test_reasoning_probe_writes_reasoning_event(monkeypatch):
@@ -412,7 +489,11 @@ def test_parse_decision_uses_selected_action_schema():
         '}'
     )
     decision = _parse_decision_content(content)
-    assert decision is None
+    assert decision is not None
+    assert decision.primitive_hint == "orient_to_zone"
+    assert decision.target_zone == "right"
+    assert decision.style == "curious"
+    assert decision.allow_interrupt is False
 
 
 def test_parse_decision_act_now_false_forces_hold():
@@ -591,6 +672,155 @@ def test_timeline_writes_request_lifecycle(monkeypatch, tmp_path):
         assert "request_start" in kinds
         assert "request_end" in kinds
         assert "decision_event" in kinds
+    finally:
+        planner.shutdown()
+
+
+def test_active_commitment_uses_remote_commit_seconds():
+    planner = AsyncOrchestratorPlanner(
+        frame_cache=LatestFrameCache(),
+        provider="local",
+    )
+    try:
+        now = time.monotonic()
+        decision = OrchestratorDecision(
+            target_state="tracking",
+            intent="track_transition",
+            style="curious",
+            primitive_hint="orient_to_zone",
+            target_zone="left",
+            allow_interrupt=True,
+            urgency="medium",
+            confidence=0.75,
+            rationale="test",
+            source="remote",
+            commit_s=1.7,
+        )
+        planner._update_active_commitment(decision, now)
+        assert planner._active_commitment_expires_mono_s is not None
+        remaining = planner._active_commitment_expires_mono_s - now
+        assert 1.5 <= remaining <= 1.9
+    finally:
+        planner.shutdown()
+
+
+def test_orchestrator_self_critique_replans_on_zone_conflict(monkeypatch):
+    calls = {"n": 0}
+
+    def _fake_post(url, payload, *, timeout_s, api_key):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"target_state":"tracking","intent":"track_transition","style":"curious",'
+                                '"primitive_hint":"orient_to_zone","target_zone":"center","allow_interrupt":false,'
+                                '"urgency":"low","confidence":0.62,"rationale":"track center"}'
+                            )
+                        }
+                    }
+                ]
+            }
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            '{"target_state":"tracking","intent":"track_transition","style":"curious",'
+                            '"primitive_hint":"orient_to_zone","target_zone":"right","allow_interrupt":true,'
+                            '"urgency":"medium","confidence":0.81,"rationale":"user is right"}'
+                        )
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr("pala.planner.orchestrator_async._post_json", _fake_post)
+    cache = LatestFrameCache()
+    planner = AsyncOrchestratorPlanner(
+        frame_cache=cache,
+        provider="brev",
+        base_url="http://127.0.0.1:8000",
+        orchestrator_hz=50.0,
+        planner_self_critique_enabled=True,
+        planner_self_critique_max_calls_per_cycle=1,
+    )
+    try:
+        deadline = time.monotonic() + 1.0
+        got = None
+        while time.monotonic() < deadline:
+            cache.set(np.full((6, 6, 3), 9, dtype=np.uint8), mono_ns=time.monotonic_ns(), pts_ns=None)
+            got = planner.plan(
+                PerceptionState(
+                    timestamp_monotonic_s=time.monotonic(),
+                    primary_person=BBoxNorm(cx=0.85, cy=0.5, w=0.2, h=0.4),
+                    primary_person_conf=0.9,
+                    debug={"zone_hint": "right"},
+                )
+            )
+            if calls["n"] >= 2 and got.primitive == PrimitiveKind.ORIENT_TO_ZONE:
+                break
+            time.sleep(0.02)
+        assert calls["n"] >= 2
+        assert got is not None
+        assert got.primitive == PrimitiveKind.ORIENT_TO_ZONE
+        assert isinstance(got.command, OrientToZoneCommand)
+        assert got.command.zone == "right"
+    finally:
+        planner.shutdown()
+
+
+def test_orchestrator_self_critique_disabled_keeps_first_decision(monkeypatch):
+    calls = {"n": 0}
+
+    def _fake_post(url, payload, *, timeout_s, api_key):
+        calls["n"] += 1
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            '{"target_state":"tracking","intent":"track_transition","style":"curious",'
+                            '"primitive_hint":"orient_to_zone","target_zone":"center","allow_interrupt":false,'
+                            '"urgency":"low","confidence":0.62,"rationale":"track center"}'
+                        )
+                    }
+                }
+            ]
+        }
+
+    monkeypatch.setattr("pala.planner.orchestrator_async._post_json", _fake_post)
+    cache = LatestFrameCache()
+    planner = AsyncOrchestratorPlanner(
+        frame_cache=cache,
+        provider="brev",
+        base_url="http://127.0.0.1:8000",
+        orchestrator_hz=50.0,
+        planner_self_critique_enabled=False,
+    )
+    try:
+        deadline = time.monotonic() + 1.0
+        got = None
+        while time.monotonic() < deadline:
+            cache.set(np.full((6, 6, 3), 7, dtype=np.uint8), mono_ns=time.monotonic_ns(), pts_ns=None)
+            got = planner.plan(
+                PerceptionState(
+                    timestamp_monotonic_s=time.monotonic(),
+                    primary_person=BBoxNorm(cx=0.85, cy=0.5, w=0.2, h=0.4),
+                    primary_person_conf=0.9,
+                    debug={"zone_hint": "right"},
+                )
+            )
+            if got.primitive == PrimitiveKind.ORIENT_TO_ZONE and calls["n"] >= 1:
+                break
+            time.sleep(0.02)
+        assert calls["n"] >= 1
+        assert got is not None
+        assert got.primitive == PrimitiveKind.ORIENT_TO_ZONE
+        assert isinstance(got.command, OrientToZoneCommand)
+        assert got.command.zone == "center"
     finally:
         planner.shutdown()
 

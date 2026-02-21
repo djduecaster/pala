@@ -6,9 +6,13 @@ import os
 from typing import Any, Dict, List
 
 from .dataset_export import export_dataset_rows
+from .doctor import build_doctor_report, write_doctor_report
+from .incident import build_incident_report, write_incident_markdown, write_incident_report
+from .insights import build_improvement_report, write_improvement_report
 from .labels import derive_weak_labels, write_labels_jsonl
 from .quality import build_quality_report, write_quality_report
-from .schema_v3 import QUALITY_REPORT_PATH, SESSION_DB_PATH, WEAK_LABELS_PATH, upgrade_manifest_v3
+from .scoreboard import DEFAULT_SCOREBOARD_PATH, add_scoreboard_session
+from .schema_v3 import DOCTOR_REPORT_PATH, IMPROVEMENT_REPORT_PATH, INCIDENT_REPORT_PATH, QUALITY_REPORT_PATH, SESSION_DB_PATH, WEAK_LABELS_PATH, upgrade_manifest_v3
 from .storage_sqlite import build_session_db
 from .trace_graph import load_trace_index, resolve_trace_index_path
 
@@ -55,6 +59,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--export-dataset", action="store_true", help="Write dataset_rows.jsonl from weak labels.")
     parser.add_argument("--include-unlabeled", action="store_true", help="Include unlabeled rows in dataset export.")
     parser.add_argument("--label-min-confidence", type=float, default=0.6)
+    parser.add_argument("--scenario-tag", action="append", default=[], help="Scenario tag stored in improvement report/scoreboard.")
+    parser.add_argument("--goal-tag", action="append", default=[], help="Goal tag stored in improvement report/scoreboard.")
+    parser.add_argument("--runbook", default="", help="Runbook/context note for this migration run.")
+    parser.add_argument("--golden-session", action="append", default=[], help="Golden session path for baseline comparison.")
+    parser.add_argument("--scoreboard-path", default=DEFAULT_SCOREBOARD_PATH, help="Scoreboard JSON output path.")
+    parser.add_argument("--no-scoreboard-update", action="store_true", help="Do not append this session to scoreboard.")
     return parser
 
 
@@ -92,6 +102,56 @@ def main() -> int:
     quality_path = write_quality_report(session_dir, quality, filename=QUALITY_REPORT_PATH)
     print(f"quality report: {quality_path} grade={quality.get('grade')} score={quality.get('score')}")
 
+    improvement = build_improvement_report(
+        session_dir,
+        golden_sessions=list(args.golden_session or []),
+        scenario_tags=list(args.scenario_tag or []),
+        goal_tags=list(args.goal_tag or []),
+        runbook=str(args.runbook or ""),
+    )
+    improvement_path = write_improvement_report(session_dir, improvement, filename=IMPROVEMENT_REPORT_PATH)
+    print(f"improvement report: {improvement_path} recommendations={len(improvement.get('recommendations', []))}")
+
+    doctor = build_doctor_report(
+        session_dir,
+        manifest=manifest,
+        quality_report=quality,
+        improvement_report=improvement,
+        index_summary=index_summary if index_summary else None,
+    )
+    doctor_path = write_doctor_report(session_dir, doctor, filename=DOCTOR_REPORT_PATH)
+    print(
+        f"doctor report: {doctor_path} grade={(doctor.get('readiness') or {}).get('grade')} "
+        f"score={(doctor.get('readiness') or {}).get('score')}"
+    )
+
+    incident = build_incident_report(
+        session_dir,
+        quality_report=quality,
+        doctor_report=doctor,
+        improvement_report=improvement,
+    )
+    incident_path = write_incident_report(session_dir, incident, filename=INCIDENT_REPORT_PATH)
+    incident_md_path = write_incident_markdown(session_dir, incident)
+    print(
+        f"incident report: {incident_path} markdown={incident_md_path} "
+        f"severity={incident.get('severity')}"
+    )
+
+    if not bool(args.no_scoreboard_update):
+        board = add_scoreboard_session(
+            path=str(args.scoreboard_path or DEFAULT_SCOREBOARD_PATH),
+            session_dir=session_dir,
+            manifest=manifest,
+            quality_report=quality,
+            improvement_report=improvement,
+            scenario_tags=list(args.scenario_tag or []),
+            goal_tags=list(args.goal_tag or []),
+            runbook=str(args.runbook or ""),
+        )
+        trend = board.get("trend")
+        print(f"scoreboard: {board.get('path')} trend={trend}")
+
     if args.export_dataset:
         result = export_dataset_rows(
             session_dir,
@@ -104,6 +164,9 @@ def main() -> int:
         manifest,
         index_summary=index_summary if index_summary else None,
         quality_report=quality,
+        improvement_report=improvement,
+        doctor_report=doctor,
+        incident_report=incident,
         weak_label_count=weak_label_count,
     )
     _save_manifest(session_dir, upgraded)

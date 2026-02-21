@@ -83,6 +83,7 @@ class CosmosConfig:
     planner_strict_schema: bool = True
     planner_allow_frame_fetch: bool = True
     planner_max_tool_calls_per_cycle: int = 1
+    planner_include_images_first_pass: bool = False
     # summarizer cadence and media sampling
     summarizer_enabled: bool = True
     summarizer_hz: float = 1.0
@@ -119,6 +120,10 @@ class CosmosConfig:
     reasoning_probe_timeout_ms: int = 8000
     reasoning_probe_max_tokens: int = 1024
     commitment_ttl_ms: int = 12000
+    planner_self_critique_enabled: bool = True
+    planner_self_critique_confidence: float = 0.68
+    planner_self_critique_margin: float = 0.05
+    planner_self_critique_max_calls_per_cycle: int = 1
     mock_latency_ms: int = 150
     memory_recent_decisions: int = 8
     memory_recent_summaries: int = 8
@@ -351,6 +356,10 @@ def load_config(path: str) -> RobotConfig:
             cosmos_raw.get("planner_max_tool_calls_per_cycle", 1),
             "cosmos.planner_max_tool_calls_per_cycle",
         ),
+        planner_include_images_first_pass=_as_bool(
+            cosmos_raw.get("planner_include_images_first_pass", False),
+            "cosmos.planner_include_images_first_pass",
+        ),
         summarizer_enabled=_as_bool(cosmos_raw.get("summarizer_enabled", True), "cosmos.summarizer_enabled"),
         summarizer_hz=_as_float(cosmos_raw.get("summarizer_hz", 1.0), "cosmos.summarizer_hz"),
         summarizer_timeout_ms=_as_int(
@@ -436,6 +445,22 @@ def load_config(path: str) -> RobotConfig:
             "cosmos.reasoning_probe_max_tokens",
         ),
         commitment_ttl_ms=_as_int(cosmos_raw.get("commitment_ttl_ms", 12000), "cosmos.commitment_ttl_ms"),
+        planner_self_critique_enabled=_as_bool(
+            cosmos_raw.get("planner_self_critique_enabled", True),
+            "cosmos.planner_self_critique_enabled",
+        ),
+        planner_self_critique_confidence=_as_float(
+            cosmos_raw.get("planner_self_critique_confidence", 0.68),
+            "cosmos.planner_self_critique_confidence",
+        ),
+        planner_self_critique_margin=_as_float(
+            cosmos_raw.get("planner_self_critique_margin", 0.05),
+            "cosmos.planner_self_critique_margin",
+        ),
+        planner_self_critique_max_calls_per_cycle=_as_int(
+            cosmos_raw.get("planner_self_critique_max_calls_per_cycle", 1),
+            "cosmos.planner_self_critique_max_calls_per_cycle",
+        ),
         mock_latency_ms=_as_int(cosmos_raw.get("mock_latency_ms", 150), "cosmos.mock_latency_ms"),
         memory_recent_decisions=_as_int(
             cosmos_raw.get("memory_recent_decisions", 8),

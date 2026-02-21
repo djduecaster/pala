@@ -100,4 +100,3 @@ def test_action_governor_refreshes_after_long_breath():
     assert isinstance(second.command, OrientToZoneCommand)
     assert second.command.zone == "right"
     assert second.cancel_current is True
-

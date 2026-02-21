@@ -388,6 +388,7 @@ def _build_planner(cfg, latest_frame: LatestFrameCache):
             planner_strict_schema=cfg.cosmos.planner_strict_schema,
             planner_allow_frame_fetch=cfg.cosmos.planner_allow_frame_fetch,
             planner_max_tool_calls_per_cycle=cfg.cosmos.planner_max_tool_calls_per_cycle,
+            planner_include_images_first_pass=cfg.cosmos.planner_include_images_first_pass,
             memory_recent_decisions=cfg.cosmos.memory_recent_decisions,
             memory_recent_summaries=cfg.cosmos.memory_recent_summaries,
             memory_recent_reasoning=cfg.cosmos.memory_recent_reasoning,
@@ -409,6 +410,10 @@ def _build_planner(cfg, latest_frame: LatestFrameCache):
             reasoning_probe_timeout_ms=cfg.cosmos.reasoning_probe_timeout_ms,
             reasoning_probe_max_tokens=cfg.cosmos.reasoning_probe_max_tokens,
             commitment_ttl_ms=cfg.cosmos.commitment_ttl_ms,
+            planner_self_critique_enabled=cfg.cosmos.planner_self_critique_enabled,
+            planner_self_critique_confidence=cfg.cosmos.planner_self_critique_confidence,
+            planner_self_critique_margin=cfg.cosmos.planner_self_critique_margin,
+            planner_self_critique_max_calls_per_cycle=cfg.cosmos.planner_self_critique_max_calls_per_cycle,
         )
     return HeuristicPlanner()
 

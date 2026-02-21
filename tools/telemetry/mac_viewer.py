@@ -4,6 +4,7 @@ import argparse
 import base64
 import collections
 import io
+import json
 import os
 import queue
 import select
@@ -29,15 +30,20 @@ except Exception:  # pragma: no cover - depends on Tk availability.
     tk = None
 
 from tools.telemetry.capture import CaptureConfig, SessionCaptureWriter
+from tools.telemetry.doctor import build_doctor_report, load_doctor_report, write_doctor_report
 from tools.telemetry.filters import matches_field_filters, parse_field_filters
+from tools.telemetry.incident import build_incident_report, load_incident_report, write_incident_markdown, write_incident_report
+from tools.telemetry.insights import build_improvement_report, load_improvement_report, write_improvement_report
 from tools.telemetry.packs import apply_pack_overrides, list_packs, resolve_packs
 from tools.telemetry.protocol import decode_message
 from tools.telemetry.lamp_viz import draw_lamp_panel
 from tools.telemetry.quality import evaluate_quality_gate, load_quality_report
 from tools.telemetry.reasoning import ReasoningEvent, format_reasoning_snippet, normalize_reasoning_message
 from tools.telemetry.replay import SessionReplayReader
+from tools.telemetry.scoreboard import DEFAULT_SCOREBOARD_PATH, load_scoreboard
 from tools.telemetry.schema_v3 import TELEMETRY_SCHEMA_VERSION_V3
-from tools.telemetry.storage_sqlite import query_session_db, resolve_session_db_path
+from tools.telemetry.storage_sqlite import build_session_db, query_session_db, resolve_session_db_path
+from tools.telemetry.story import build_reasoning_story, build_trace_story
 from tools.telemetry.trace_graph import TraceGraphBuilder, TraceRecord, resolve_trace_index_path, load_trace_index
 
 try:
@@ -128,8 +134,20 @@ class DashboardState:
     query_rows: List[Dict[str, Any]] = field(default_factory=list)
     query_note: str = ""
     quality_report: Optional[Dict[str, Any]] = None
+    improvement_report: Optional[Dict[str, Any]] = None
+    doctor_report: Optional[Dict[str, Any]] = None
+    incident_report: Optional[Dict[str, Any]] = None
     quality_gate_note: str = ""
     quality_gate_passed: Optional[bool] = None
+    doctor_gate_note: str = ""
+    doctor_gate_passed: Optional[bool] = None
+    active_alerts: List[str] = field(default_factory=list)
+    recent_event_samples: Deque[tuple[float, str]] = field(default_factory=lambda: collections.deque(maxlen=4000))
+    recent_query_events: Deque[Dict[str, Any]] = field(default_factory=lambda: collections.deque(maxlen=1500))
+    query_event_counter: int = 0
+    alert_history: Deque[str] = field(default_factory=lambda: collections.deque(maxlen=24))
+    scoreboard: Optional[Dict[str, Any]] = None
+    query_slice_exports: int = 0
 
     def configure_panels(self, panels: List[str], *, focus_panel: str = "") -> None:
         self.active_panels = list(panels)
@@ -140,13 +158,16 @@ class DashboardState:
 
     def apply(self, msg: Dict[str, Any]) -> None:
         source = str(msg.get("source", "unknown"))
-        self.last_event_wall_s = time.time()
+        now = time.time()
+        self.last_event_wall_s = now
         self.event_counts[source] = self.event_counts.get(source, 0) + 1
+        self.recent_event_samples.append((now, source))
 
         payload = msg.get("payload", {})
         if not isinstance(payload, dict):
             return
         self._ingest_reasoning_event(msg)
+        self._record_query_event(msg, payload)
 
         if source == "perception_log":
             data = payload.get("data")
@@ -379,6 +400,93 @@ class DashboardState:
         self.trace_pinned_id = selected.trace_id
         self.logs.append(f"trace pinned: {selected.trace_id}")
 
+    def event_rates(self, *, now_wall_s: float, window_s: float) -> tuple[float, Dict[str, float]]:
+        window = max(0.5, float(window_s))
+        cutoff = now_wall_s - window
+        per_source: Dict[str, int] = {}
+        total = 0
+        for ts, source in reversed(self.recent_event_samples):
+            if ts < cutoff:
+                break
+            total += 1
+            per_source[source] = per_source.get(source, 0) + 1
+        rates = {source: (count / window) for source, count in per_source.items()}
+        return (total / window), rates
+
+    def _record_query_event(self, msg: Dict[str, Any], payload: Dict[str, Any]) -> None:
+        source = str(msg.get("source", "unknown"))
+        if source == "video_frame":
+            return
+        ts_wall_s_raw = msg.get("ts_wall_s")
+        ts_wall_s = float(ts_wall_s_raw) if isinstance(ts_wall_s_raw, (int, float)) else time.time()
+        level = str(msg.get("level", "") or "").lower()
+        severity = "info"
+        if level in {"warning", "warn"}:
+            severity = "warning"
+        elif level == "error":
+            severity = "error"
+        if "error" in payload:
+            severity = "error"
+
+        req_id: Optional[int] = None
+        phase = ""
+        status = ""
+        snippet = ""
+        trace_id = None
+
+        if source == "timeline_log":
+            data = payload.get("data")
+            if isinstance(data, dict):
+                phase = str(data.get("type") or "")
+                dp = data.get("payload")
+                if isinstance(dp, dict):
+                    status = str(dp.get("status") or "")
+                    rid = dp.get("request_id")
+                    if rid is None:
+                        rid = dp.get("req_id")
+                    if rid is None:
+                        rid = dp.get("id")
+                    if isinstance(rid, int):
+                        req_id = rid
+                    snippet = str(dp.get("reasoning") or dp.get("message") or dp.get("detail") or "")
+        elif source == "actions_log":
+            data = payload.get("data")
+            if isinstance(data, dict):
+                phase = "action_plan"
+                status = str(data.get("status") or "ok")
+                rid = data.get("request_id")
+                if rid is None:
+                    rid = data.get("req_id")
+                if isinstance(rid, int):
+                    req_id = rid
+                snippet = str(data.get("explanation") or data.get("primitive") or "")
+        elif source == "journal":
+            line = payload.get("line")
+            if isinstance(line, str):
+                snippet = line
+            phase = "journal"
+        elif source == "agent":
+            status = "error" if "error" in payload else "ok"
+            snippet = str(payload.get("error") or payload.get("detail") or "")
+        else:
+            snippet = str(payload.get("line") or payload.get("status") or payload.get("message") or "")
+
+        self.query_event_counter += 1
+        self.recent_query_events.append(
+            {
+                "kind": "event",
+                "id": self.query_event_counter,
+                "ts_wall_s": ts_wall_s,
+                "source": source,
+                "trace_id": trace_id,
+                "req_id": req_id,
+                "phase": phase,
+                "status": status,
+                "severity": severity,
+                "summary": format_reasoning_snippet(snippet, max_chars=220, redact=False),
+            }
+        )
+
 
 @dataclass
 class _VideoWindow:
@@ -392,8 +500,14 @@ class _VideoWindow:
 PANEL_PRESETS: Dict[str, List[str]] = {
     "1": [
         "summary",
+        "alerts",
         "quality",
+        "doctor",
+        "incident",
+        "insights",
+        "story",
         "query",
+        "scoreboard",
         "trace_list",
         "trace_detail",
         "reasoning_stream",
@@ -403,8 +517,15 @@ PANEL_PRESETS: Dict[str, List[str]] = {
     ],
     "2": [
         "summary",
+        "alerts",
+        "throughput",
         "quality",
+        "doctor",
+        "incident",
+        "insights",
+        "story",
         "query",
+        "scoreboard",
         "trace_list",
         "trace_detail",
         "reasoning_stream",
@@ -413,7 +534,23 @@ PANEL_PRESETS: Dict[str, List[str]] = {
         "warnings",
         "transport",
     ],
-    "3": ["summary", "trace_list", "trace_detail", "video", "perception", "action", "system", "events"],
+    "3": [
+        "summary",
+        "alerts",
+        "throughput",
+        "doctor",
+        "incident",
+        "insights",
+        "story",
+        "scoreboard",
+        "trace_list",
+        "trace_detail",
+        "video",
+        "perception",
+        "action",
+        "system",
+        "events",
+    ],
 }
 
 
@@ -585,8 +722,20 @@ def _build_remote_agent_command(args: argparse.Namespace) -> str:
                 str(float(args.capture_max_seconds)),
                 "--capture-manifest-version",
                 str(int(args.capture_manifest_version)),
+                "--capture-runbook",
+                str(args.runbook),
+                "--capture-scoreboard-path",
+                str(args.scoreboard_path),
             ]
         )
+        for tag in args.scenario_tag:
+            agent_args.extend(["--capture-scenario-tag", str(tag)])
+        for tag in args.goal_tag:
+            agent_args.extend(["--capture-goal-tag", str(tag)])
+        for session in args.golden_session:
+            agent_args.extend(["--capture-golden-session", str(session)])
+        if args.no_scoreboard_update:
+            agent_args.append("--no-capture-scoreboard")
 
     agent_cmd = " ".join(shlex.quote(part) for part in agent_args)
 
@@ -971,47 +1120,443 @@ def _percentile(values: List[float], pct: float) -> Optional[float]:
     return ordered[idx]
 
 
+def _split_query_tokens(query: str) -> List[str]:
+    try:
+        return [tok for tok in shlex.split(str(query or "")) if tok]
+    except ValueError:
+        return [tok for tok in str(query or "").split() if tok]
+
+
+def _parse_query_since_s(query: str) -> Optional[float]:
+    values: List[float] = []
+    for token in _split_query_tokens(query):
+        if ":" not in token:
+            continue
+        key, raw = token.split(":", 1)
+        if key.strip().lower() != "since":
+            continue
+        text = raw.strip().lower()
+        if not text:
+            continue
+        scale = 1.0
+        if text.endswith("ms"):
+            scale = 0.001
+            text = text[:-2]
+        elif text.endswith("s"):
+            scale = 1.0
+            text = text[:-1]
+        elif text.endswith("m"):
+            scale = 60.0
+            text = text[:-1]
+        elif text.endswith("h"):
+            scale = 3600.0
+            text = text[:-1]
+        try:
+            val = float(text)
+        except ValueError:
+            continue
+        if val > 0.0:
+            values.append(val * scale)
+    if not values:
+        return None
+    return min(values)
+
+
+def _parse_query_keyed_values(query: str) -> Dict[str, List[str]]:
+    out: Dict[str, List[str]] = {
+        "source": [],
+        "severity": [],
+        "status": [],
+        "phase": [],
+        "req": [],
+        "trace": [],
+        "kind": [],
+        "since": [],
+    }
+    for token in _split_query_tokens(query):
+        if ":" not in token:
+            continue
+        key, value = token.split(":", 1)
+        key_l = key.strip().lower()
+        value = value.strip()
+        if key_l in out and value:
+            out[key_l].append(value)
+    return out
+
+
+def _query_text_terms(query: str) -> List[str]:
+    keyed = {"source", "severity", "status", "phase", "req", "trace", "since", "kind"}
+    out: List[str] = []
+    for token in _split_query_tokens(query):
+        if ":" in token:
+            key, value = token.split(":", 1)
+            if key.strip().lower() in keyed:
+                if key.strip().lower() not in {"since"} and not value.strip():
+                    continue
+                if key.strip().lower() in {"source", "severity", "status", "phase", "req", "trace", "kind", "since"}:
+                    continue
+        out.append(token)
+    return out
+
+
 def _query_text_match(query: str, text: str) -> bool:
-    tokens = [tok for tok in str(query or "").strip().split() if tok]
+    tokens = _query_text_terms(query)
     if not tokens:
         return True
     hay = str(text or "").lower()
     return all(token.lower() in hay for token in tokens)
 
 
-def _build_in_memory_query_rows(state: DashboardState, *, limit: int) -> List[Dict[str, Any]]:
+def _build_in_memory_query_rows(state: DashboardState, *, limit: int, now_wall_s: float) -> List[Dict[str, Any]]:
     lim = max(1, int(limit))
+    since_s = _parse_query_since_s(state.query_text)
+    keyed = _parse_query_keyed_values(state.query_text)
+    kind_values = {str(v).lower() for v in keyed.get("kind", []) if str(v).strip()}
+    want_events = (not kind_values) or bool(kind_values & {"event", "events"})
+    want_reasoning = (not kind_values) or bool(kind_values & {"reasoning", "reason"})
+    want_traces = (not kind_values) or bool(kind_values & {"trace", "traces"})
+    req_values = {int(v) for v in keyed.get("req", []) if str(v).isdigit()}
+    status_values = {str(v).lower() for v in keyed.get("status", [])}
+    severity_values = {str(v).lower() for v in keyed.get("severity", [])}
+    phase_values = {str(v).lower() for v in keyed.get("phase", [])}
+    source_values = {str(v).lower() for v in keyed.get("source", [])}
+    trace_values = [str(v).lower() for v in keyed.get("trace", []) if str(v).strip()]
     rows: List[Dict[str, Any]] = []
-    for seq, event in reversed(state._iter_reasoning_with_seq()):
-        text = " ".join(
-            [
-                str(event.source or ""),
-                str(event.phase or ""),
-                str(event.status or ""),
-                str(event.severity or ""),
-                str(event.req_id if event.req_id is not None else ""),
-                str(event.snippet or ""),
-            ]
+
+    if want_events:
+        for item in reversed(state.recent_query_events):
+            ts = item.get("ts_wall_s")
+            if since_s is not None and isinstance(ts, (int, float)) and (now_wall_s - float(ts)) > since_s:
+                continue
+            req = item.get("req_id")
+            if req_values and (not isinstance(req, int) or req not in req_values):
+                continue
+            status = str(item.get("status") or "").lower()
+            if status_values and status not in status_values:
+                continue
+            sev = str(item.get("severity") or "").lower()
+            if severity_values and sev not in severity_values:
+                continue
+            phase = str(item.get("phase") or "").lower()
+            if phase_values and phase not in phase_values:
+                continue
+            src = str(item.get("source") or "").lower()
+            if source_values and src not in source_values:
+                continue
+            trace_id = str(item.get("trace_id") or "").lower()
+            if trace_values and not any(value in trace_id for value in trace_values):
+                continue
+            text = " ".join(
+                [
+                    str(item.get("source") or ""),
+                    str(item.get("phase") or ""),
+                    str(item.get("status") or ""),
+                    str(item.get("severity") or ""),
+                    str(item.get("req_id") if item.get("req_id") is not None else ""),
+                    str(item.get("summary") or ""),
+                ]
+            )
+            if not _query_text_match(state.query_text, text):
+                continue
+            rows.append(dict(item))
+
+    if want_reasoning:
+        for seq, event in reversed(state._iter_reasoning_with_seq()):
+            if since_s is not None and event.ts_wall_s is not None and (now_wall_s - float(event.ts_wall_s)) > since_s:
+                continue
+            if req_values and (event.req_id is None or int(event.req_id) not in req_values):
+                continue
+            if status_values and str(event.status or "").lower() not in status_values:
+                continue
+            if severity_values and str(event.severity or "").lower() not in severity_values:
+                continue
+            if phase_values and str(event.phase or "").lower() not in phase_values:
+                continue
+            if source_values and str(event.source or "").lower() not in source_values:
+                continue
+            if trace_values:
+                continue
+            text = " ".join(
+                [
+                    str(event.source or ""),
+                    str(event.phase or ""),
+                    str(event.status or ""),
+                    str(event.severity or ""),
+                    str(event.req_id if event.req_id is not None else ""),
+                    str(event.snippet or ""),
+                ]
+            )
+            if not _query_text_match(state.query_text, text):
+                continue
+            rows.append(
+                {
+                    "kind": "reasoning",
+                    "id": seq,
+                    "ts_wall_s": event.ts_wall_s,
+                    "source": event.source,
+                    "trace_id": None,
+                    "req_id": event.req_id,
+                    "phase": event.phase,
+                    "status": event.status,
+                    "severity": event.severity,
+                    "summary": format_reasoning_snippet(
+                        event.snippet,
+                        max_chars=120,
+                        redact=False,
+                    ),
+                }
+            )
+
+    if want_traces:
+        for trace in state.trace_records:
+            ts = trace.end_ts_wall_s if trace.end_ts_wall_s is not None else trace.start_ts_wall_s
+            if since_s is not None and ts is not None and (now_wall_s - float(ts)) > since_s:
+                continue
+            if req_values and (trace.req_id is None or int(trace.req_id) not in req_values):
+                continue
+            if status_values and str(trace.status or "").lower() not in status_values:
+                continue
+            if severity_values and str(trace.severity or "").lower() not in severity_values:
+                continue
+            if source_values and "trace" not in source_values:
+                continue
+            trace_id_text = str(trace.trace_id or "")
+            if trace_values and not any(value in trace_id_text.lower() for value in trace_values):
+                continue
+            if phase_values:
+                continue
+            text = " ".join(
+                [
+                    trace_id_text,
+                    str(trace.req_id if trace.req_id is not None else ""),
+                    str(trace.status or ""),
+                    str(trace.severity or ""),
+                    str(trace.summary or ""),
+                ]
+            )
+            if not _query_text_match(state.query_text, text):
+                continue
+            rows.append(
+                {
+                    "kind": "trace",
+                    "id": trace.trace_id,
+                    "ts_wall_s": ts,
+                    "source": "trace",
+                    "trace_id": trace.trace_id,
+                    "req_id": trace.req_id,
+                    "phase": "",
+                    "status": trace.status,
+                    "severity": trace.severity,
+                    "summary": trace.summary,
+                }
+            )
+    kind_rank = {"event": 0, "reasoning": 1, "trace": 2}
+    rows.sort(
+        key=lambda item: (
+            -float(item.get("ts_wall_s") or 0.0),
+            kind_rank.get(str(item.get("kind")), 99),
+            str(item.get("id")),
         )
-        if not _query_text_match(state.query_text, text):
-            continue
+    )
+    if len(rows) > lim:
+        rows = rows[:lim]
+    return rows
+
+
+def _rows_from_query_out(query_out: Dict[str, Any], *, limit: int) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for row in query_out.get("events", []):
+        rows.append(
+            {
+                "kind": "event",
+                "id": row.get("seq"),
+                "ts_wall_s": row.get("ts_wall_s"),
+                "source": row.get("source"),
+                "trace_id": row.get("trace_id"),
+                "req_id": row.get("req_id"),
+                "status": row.get("status"),
+                "severity": row.get("severity"),
+                "summary": row.get("snippet"),
+            }
+        )
+    for row in query_out.get("reasoning", []):
         rows.append(
             {
                 "kind": "reasoning",
-                "id": seq,
-                "req_id": event.req_id,
-                "status": event.status,
-                "severity": event.severity,
-                "summary": format_reasoning_snippet(
-                    event.snippet,
-                    max_chars=120,
-                    redact=False,
-                ),
+                "id": row.get("event_index"),
+                "ts_wall_s": row.get("ts_wall_s"),
+                "source": "reasoning",
+                "trace_id": None,
+                "req_id": row.get("req_id"),
+                "status": row.get("status"),
+                "severity": row.get("severity"),
+                "summary": row.get("snippet"),
             }
         )
-        if len(rows) >= lim:
-            break
-    return rows
+    for row in query_out.get("traces", []):
+        rows.append(
+            {
+                "kind": "trace",
+                "id": row.get("trace_id"),
+                "ts_wall_s": None,
+                "source": "trace",
+                "trace_id": row.get("trace_id"),
+                "req_id": row.get("req_id"),
+                "status": row.get("status"),
+                "severity": row.get("severity"),
+                "summary": row.get("summary"),
+            }
+        )
+    kind_rank = {"event": 0, "reasoning": 1, "trace": 2}
+    rows.sort(
+        key=lambda item: (
+            -float(item.get("ts_wall_s") or 0.0),
+            kind_rank.get(str(item.get("kind")), 99),
+            str(item.get("id")),
+        )
+    )
+    return rows[: max(1, int(limit))]
+
+
+def _query_note_from_query_out(query_out: Dict[str, Any]) -> str:
+    counts = query_out.get("counts")
+    if isinstance(counts, dict):
+        return (
+            f"sqlite matches events={counts.get('events', 0)} "
+            f"reasoning={counts.get('reasoning', 0)} traces={counts.get('traces', 0)}"
+        )
+    return (
+        f"sqlite matches events={len(query_out.get('events', []))} "
+        f"reasoning={len(query_out.get('reasoning', []))} traces={len(query_out.get('traces', []))}"
+    )
+
+
+def _write_query_export(path: str, *, query: str, note: str, rows: List[Dict[str, Any]]) -> None:
+    payload = {
+        "exported_at_wall_s": time.time(),
+        "query": str(query),
+        "note": str(note),
+        "row_count": len(rows),
+        "rows": rows,
+    }
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, separators=(",", ":"), ensure_ascii=True)
+
+
+def _write_query_slice_export(path: str, *, query: str, rows: List[Dict[str, Any]]) -> int:
+    target = str(path).strip()
+    if not target:
+        raise ValueError("query slice export path is empty")
+    os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
+    written = 0
+    with open(target, "w", encoding="utf-8") as fh:
+        for row in rows:
+            record = {
+                "label": "query_slice",
+                "query": str(query),
+                "kind": row.get("kind"),
+                "trace_id": row.get("trace_id"),
+                "req_id": row.get("req_id"),
+                "source": row.get("source"),
+                "status": row.get("status"),
+                "severity": row.get("severity"),
+                "summary": row.get("summary"),
+                "row": row,
+            }
+            fh.write(json.dumps(record, separators=(",", ":"), ensure_ascii=True))
+            fh.write("\n")
+            written += 1
+    return written
+
+
+def _apply_alert_policy(args: argparse.Namespace, *, defaults: Optional[argparse.Namespace] = None) -> None:
+    policy = str(getattr(args, "alert_policy", "custom") or "custom").lower()
+    if policy == "custom":
+        return
+    presets: Dict[str, Dict[str, float]] = {
+        "demo": {
+            "alert_stale_s": 4.0,
+            "alert_heartbeat_s": 2.0,
+            "alert_video_idle_s": 3.0,
+            "alert_dropped_events": 1.0,
+            "alert_warning_count": 3.0,
+            "alert_trace_grace_s": 10.0,
+            "alert_min_events_per_s": 0.3,
+        },
+        "training": {
+            "alert_stale_s": 12.0,
+            "alert_heartbeat_s": 6.0,
+            "alert_video_idle_s": 8.0,
+            "alert_dropped_events": 4.0,
+            "alert_warning_count": 6.0,
+            "alert_trace_grace_s": 25.0,
+            "alert_min_events_per_s": 0.0,
+        },
+        "debug": {
+            "alert_stale_s": 30.0,
+            "alert_heartbeat_s": 15.0,
+            "alert_video_idle_s": 20.0,
+            "alert_dropped_events": 15.0,
+            "alert_warning_count": 12.0,
+            "alert_trace_grace_s": 60.0,
+            "alert_min_events_per_s": 0.0,
+        },
+    }
+    selected = presets.get(policy)
+    if not selected:
+        return
+    for key, value in selected.items():
+        if defaults is not None and getattr(args, key, None) != getattr(defaults, key, None):
+            continue
+        current = getattr(args, key, None)
+        if isinstance(current, int):
+            setattr(args, key, int(value))
+        else:
+            setattr(args, key, float(value))
+
+
+def _collect_alerts(state: DashboardState, args: argparse.Namespace, now_wall_s: float) -> List[str]:
+    alerts: List[str] = []
+    if state.quality_gate_passed is False:
+        alerts.append(f"quality_gate: {state.quality_gate_note}")
+    if state.doctor_gate_passed is False:
+        alerts.append(f"doctor_gate: {state.doctor_gate_note}")
+    stale_age = None if state.last_rx_wall_s is None else (now_wall_s - float(state.last_rx_wall_s))
+    if state.connected and stale_age is not None and stale_age > float(args.alert_stale_s):
+        alerts.append(f"stream_stale: last_rx_age={stale_age:.1f}s")
+    hb_age = None if state.last_agent_wall_s is None else (now_wall_s - float(state.last_agent_wall_s))
+    if state.connected and hb_age is not None and hb_age > float(args.alert_heartbeat_s):
+        alerts.append(f"agent_heartbeat_stale: age={hb_age:.1f}s")
+    if (not args.no_video) and state.last_video_wall_s is not None:
+        video_age = now_wall_s - float(state.last_video_wall_s)
+        if video_age > float(args.alert_video_idle_s):
+            alerts.append(f"video_idle: age={video_age:.1f}s")
+    if int(state.dropped_events_reported) >= int(args.alert_dropped_events):
+        alerts.append(f"dropped_events: {state.dropped_events_reported}")
+    if len(state.warnings) >= int(args.alert_warning_count):
+        alerts.append(f"warning_burst: warnings={len(state.warnings)}")
+    recent_eps, _ = state.event_rates(now_wall_s=now_wall_s, window_s=float(args.rate_window_s))
+    if state.connected and float(args.alert_min_events_per_s) > 0.0 and recent_eps < float(args.alert_min_events_per_s):
+        alerts.append(f"throughput_low: eps={recent_eps:.2f} (<{float(args.alert_min_events_per_s):.2f})")
+    if state.connected and (now_wall_s - state.started_wall_s) > float(args.alert_trace_grace_s) and not state.trace_records:
+        alerts.append("trace_gap: no traces observed yet")
+    return alerts
+
+
+def _evaluate_doctor_gate(report: Optional[Dict[str, Any]], mode: str) -> tuple[Optional[bool], str]:
+    gate = str(mode or "off")
+    if gate == "off":
+        return None, "doctor gate disabled"
+    readiness = report.get("readiness") if isinstance(report, dict) else None
+    readiness = readiness if isinstance(readiness, dict) else {}
+    grade = str(readiness.get("grade") or "unknown").lower()
+    score = readiness.get("score")
+    label = f"doctor grade={grade} score={score}"
+    if gate == "warn":
+        return grade != "fail", label
+    if gate == "strict":
+        return grade == "pass", label
+    return None, f"unknown doctor gate mode: {gate}"
 
 
 def _render_reasoning_stream(lines: List[str], state: DashboardState, args: argparse.Namespace) -> None:
@@ -1180,6 +1725,210 @@ def _render_quality_panel(lines: List[str], state: DashboardState) -> None:
     lines.append("")
 
 
+def _render_doctor_panel(lines: List[str], state: DashboardState) -> None:
+    lines.append(f"{_focus_prefix(state, 'doctor')}Doctor")
+    report = state.doctor_report
+    if report is None:
+        lines.append("  no doctor report loaded")
+        if state.doctor_gate_note:
+            lines.append(f"  gate={state.doctor_gate_note}")
+        lines.append("")
+        return
+    readiness = report.get("readiness")
+    readiness = readiness if isinstance(readiness, dict) else {}
+    lines.append(f"  grade={readiness.get('grade')} score={readiness.get('score')}")
+    summary = report.get("summary")
+    summary = summary if isinstance(summary, dict) else {}
+    lines.append(
+        "  "
+        f"errors={summary.get('error_count', 0)} warnings={summary.get('warning_count', 0)}"
+    )
+    checks = report.get("checks")
+    checks = checks if isinstance(checks, dict) else {}
+    lines.append(
+        "  "
+        f"events(lines)={checks.get('event_count_lines')} indexed={checks.get('event_count_indexed')} "
+        f"invalid_json={checks.get('invalid_json_count')}"
+    )
+    if state.doctor_gate_note:
+        lines.append(f"  gate={state.doctor_gate_note}")
+    issues = report.get("issues")
+    if isinstance(issues, list) and issues:
+        lines.append("  top_issues:")
+        for item in issues[:2]:
+            if not isinstance(item, dict):
+                continue
+            lines.append(f"    [{item.get('severity')}] {item.get('code')}")
+    lines.append("")
+
+
+def _render_incident_panel(lines: List[str], state: DashboardState, args: argparse.Namespace) -> None:
+    lines.append(f"{_focus_prefix(state, 'incident')}Incident")
+    report = state.incident_report
+    if report is None:
+        lines.append("  no incident report loaded")
+        lines.append("")
+        return
+    lines.append(f"  severity={report.get('severity')} title={_shorten(str(report.get('title') or ''), 96)}")
+    summary = report.get("summary")
+    summary = summary if isinstance(summary, dict) else {}
+    lines.append(
+        "  "
+        f"parse_fail={summary.get('parse_fail_count')} timeout={summary.get('timeout_count')} "
+        f"traces={summary.get('trace_count')} issues={summary.get('error_issue_count', 0)}/{summary.get('warning_issue_count', 0)}"
+    )
+    issues = report.get("issues")
+    if isinstance(issues, list) and issues:
+        lines.append("  issues:")
+        for item in issues[: max(1, int(args.max_log_lines // 2))]:
+            if not isinstance(item, dict):
+                continue
+            lines.append(f"    [{item.get('severity')}] {item.get('code')}")
+    recs = report.get("recommendations")
+    if isinstance(recs, list) and recs:
+        lines.append("  recommendations:")
+        for rec in recs[:2]:
+            lines.append(f"    {_shorten(str(rec), 140)}")
+    lines.append("")
+
+
+def _render_insights_panel(lines: List[str], state: DashboardState, args: argparse.Namespace) -> None:
+    lines.append(f"{_focus_prefix(state, 'insights')}Insights")
+    report = state.improvement_report
+    if report is None:
+        lines.append("  no improvement report loaded")
+        lines.append("")
+        return
+    summary = report.get("summary")
+    if isinstance(summary, dict):
+        lines.append(
+            "  "
+            f"reasoning={summary.get('reasoning_count')} traces={summary.get('trace_count')} "
+            f"parse_fail={summary.get('parse_fail_count')} timeout={summary.get('timeout_count')} slow={summary.get('slow_count')}"
+        )
+    recs = report.get("recommendations")
+    if not isinstance(recs, list) or not recs:
+        lines.append("  no recommendations")
+        lines.append("")
+        return
+    max_rows = max(1, int(args.insight_max_recommendations))
+    for item in recs[:max_rows]:
+        if not isinstance(item, dict):
+            continue
+        prio = str(item.get("priority") or "info")
+        title = str(item.get("title") or "recommendation")
+        why = str(item.get("why") or "")
+        action = str(item.get("action") or "")
+        lines.append(f"  [{prio}] {title}")
+        if why:
+            lines.append(f"    why: {_shorten(why, 140)}")
+        if action:
+            lines.append(f"    next: {_shorten(action, 140)}")
+    golden = report.get("golden_comparison")
+    if isinstance(golden, dict):
+        delta = golden.get("delta")
+        baseline = golden.get("baseline")
+        lines.append(
+            f"  golden_sessions={golden.get('golden_session_count')} "
+            f"baseline_quality={(baseline or {}).get('quality_score')}"
+        )
+        if isinstance(delta, dict):
+            lines.append(
+                "  "
+                f"delta quality={delta.get('quality_score')} "
+                f"parse_fail={delta.get('parse_fail_rate')} timeout={delta.get('timeout_rate')}"
+            )
+    fingerprints = report.get("failure_fingerprints")
+    if isinstance(fingerprints, list) and fingerprints:
+        lines.append("  fingerprints:")
+        for row in fingerprints[:2]:
+            if not isinstance(row, dict):
+                continue
+            lines.append(f"    {row.get('fingerprint')}: {row.get('count')}")
+    scenario_tags = report.get("scenario_tags")
+    if isinstance(scenario_tags, list) and scenario_tags:
+        lines.append(f"  scenario_tags={','.join(str(x) for x in scenario_tags[:6])}")
+    lines.append("")
+
+
+def _render_story_panel(lines: List[str], state: DashboardState, args: argparse.Namespace) -> None:
+    lines.append(f"{_focus_prefix(state, 'story')}Story")
+    max_rows = max(3, int(args.story_max_rows))
+    story_lines = build_trace_story(state.selected_trace(), max_events=max_rows)
+    for text in story_lines[: max_rows + 4]:
+        lines.append(f"  {_shorten(text, 160)}")
+    if state.query_rows:
+        lines.append("  query_slice:")
+        for text in build_reasoning_story(state.query_rows, max_rows=max_rows)[:max_rows]:
+            lines.append(f"    {_shorten(text, 148)}")
+    lines.append("")
+
+
+def _render_scoreboard_panel(lines: List[str], state: DashboardState, args: argparse.Namespace) -> None:
+    lines.append(f"{_focus_prefix(state, 'scoreboard')}Scoreboard")
+    board = state.scoreboard
+    if not isinstance(board, dict):
+        lines.append("  no scoreboard loaded")
+        lines.append("")
+        return
+    sessions = board.get("sessions")
+    trend = board.get("trend")
+    if isinstance(trend, dict):
+        lines.append(
+            f"  trend quality_delta={trend.get('quality_delta')} "
+            f"parse_fail_delta={trend.get('parse_fail_delta')} timeout_delta={trend.get('timeout_delta')}"
+        )
+    if not isinstance(sessions, list) or not sessions:
+        lines.append("  no sessions")
+        lines.append("")
+        return
+    max_rows = max(2, int(args.max_log_lines))
+    for row in list(sessions)[-max_rows:]:
+        if not isinstance(row, dict):
+            continue
+        lines.append(
+            "  "
+            f"{row.get('session_name')} q={row.get('quality_score')} "
+            f"pf={row.get('parse_fail_rate')} to={row.get('timeout_rate')} lbl={row.get('weak_label_count')}"
+        )
+    lines.append("")
+
+
+def _render_alerts_panel(lines: List[str], state: DashboardState, args: argparse.Namespace) -> None:
+    lines.append(f"{_focus_prefix(state, 'alerts')}Alerts")
+    if not state.active_alerts:
+        lines.append("  none")
+    else:
+        max_rows = max(4, int(args.max_log_lines))
+        for item in state.active_alerts[:max_rows]:
+            lines.append(f"  ! {_shorten(item, 160)}")
+    if state.alert_history:
+        lines.append("  recent:")
+        for item in list(state.alert_history)[-max(2, int(args.max_log_lines // 2)) :]:
+            lines.append(f"    {_shorten(item, 150)}")
+    lines.append("")
+
+
+def _render_throughput_panel(lines: List[str], state: DashboardState, args: argparse.Namespace, now_wall_s: float) -> None:
+    lines.append(f"{_focus_prefix(state, 'throughput')}Throughput")
+    uptime_s = max(0.1, now_wall_s - state.started_wall_s)
+    lifetime_total = sum(int(v) for v in state.event_counts.values())
+    lifetime_eps = lifetime_total / uptime_s
+    recent_eps, rates = state.event_rates(now_wall_s=now_wall_s, window_s=float(args.rate_window_s))
+    lines.append(
+        f"  lifetime_events={lifetime_total} lifetime_eps={lifetime_eps:.2f} "
+        f"recent_eps={recent_eps:.2f} window={float(args.rate_window_s):.1f}s"
+    )
+    if not rates:
+        lines.append("  no recent events")
+        lines.append("")
+        return
+    ranked = sorted(rates.items(), key=lambda item: (-item[1], item[0]))
+    for source, eps in ranked[: max(4, int(args.max_log_lines))]:
+        lines.append(f"  {source}: {eps:.2f} eps")
+    lines.append("")
+
+
 def _render_query_panel(lines: List[str], state: DashboardState, args: argparse.Namespace) -> None:
     lines.append(f"{_focus_prefix(state, 'query')}Query")
     query_text = str(state.query_text or "")
@@ -1197,11 +1946,13 @@ def _render_query_panel(lines: List[str], state: DashboardState, args: argparse.
     for row in state.query_rows[: max(1, int(args.query_limit))]:
         req = row.get("req_id")
         trace_id = row.get("trace_id")
+        source = row.get("source")
         status = row.get("status")
         severity = row.get("severity")
         summary = row.get("summary")
         lines.append(
-            f"  [{row.get('kind')}] id={row.get('id')} trace={trace_id or '-'} req={req if req is not None else '-'} "
+            f"  [{row.get('kind')}] id={row.get('id')} src={source or '-'} "
+            f"trace={trace_id or '-'} req={req if req is not None else '-'} "
             f"status={status or '-'} sev={severity or '-'}"
         )
         if summary:
@@ -1254,8 +2005,36 @@ def _render(state: DashboardState, *, now_wall_s: float, args: argparse.Namespac
                 f"grade={state.quality_report.get('grade')} score={state.quality_report.get('score')} "
                 f"gate={state.quality_gate_note or 'n/a'}"
             )
+        if state.improvement_report is not None:
+            recs = state.improvement_report.get("recommendations")
+            rec_count = len(recs) if isinstance(recs, list) else 0
+            lines.append(f"Insights: recommendations={rec_count}")
+        if state.doctor_report is not None:
+            readiness = state.doctor_report.get("readiness")
+            readiness = readiness if isinstance(readiness, dict) else {}
+            lines.append(
+                "Doctor: "
+                f"grade={readiness.get('grade')} score={readiness.get('score')} gate={state.doctor_gate_note or 'n/a'}"
+            )
+        if state.incident_report is not None:
+            lines.append(
+                "Incident: "
+                f"severity={state.incident_report.get('severity')} title={_shorten(str(state.incident_report.get('title') or ''), 72)}"
+            )
         if state.query_text:
             lines.append(f"Query: '{state.query_text}' matches={len(state.query_rows)}")
+        if state.query_slice_exports > 0:
+            lines.append(f"Query slices exported: {state.query_slice_exports}")
+        lines.append(f"Alerts: {len(state.active_alerts)}")
+        recent_eps, _ = state.event_rates(now_wall_s=now_wall_s, window_s=float(args.rate_window_s))
+        lines.append(f"Recent throughput: {recent_eps:.2f} eps over {float(args.rate_window_s):.1f}s")
+        if isinstance(state.scoreboard, dict):
+            trend = state.scoreboard.get("trend")
+            if isinstance(trend, dict):
+                lines.append(
+                    "Scoreboard trend: "
+                    f"quality_delta={trend.get('quality_delta')} parse_fail_delta={trend.get('parse_fail_delta')}"
+                )
         lines.append("")
 
     if _panel_enabled(args, "reasoning_stream"):
@@ -1273,8 +2052,29 @@ def _render(state: DashboardState, *, now_wall_s: float, args: argparse.Namespac
     if _panel_enabled(args, "trace_detail"):
         _render_trace_detail(lines, state, args)
 
+    if _panel_enabled(args, "alerts"):
+        _render_alerts_panel(lines, state, args)
+
+    if _panel_enabled(args, "throughput"):
+        _render_throughput_panel(lines, state, args, now_wall_s)
+
     if _panel_enabled(args, "quality"):
         _render_quality_panel(lines, state)
+
+    if _panel_enabled(args, "doctor"):
+        _render_doctor_panel(lines, state)
+
+    if _panel_enabled(args, "incident"):
+        _render_incident_panel(lines, state, args)
+
+    if _panel_enabled(args, "insights"):
+        _render_insights_panel(lines, state, args)
+
+    if _panel_enabled(args, "story"):
+        _render_story_panel(lines, state, args)
+
+    if _panel_enabled(args, "scoreboard"):
+        _render_scoreboard_panel(lines, state, args)
 
     if _panel_enabled(args, "query"):
         _render_query_panel(lines, state, args)
@@ -1437,13 +2237,14 @@ def _render(state: DashboardState, *, now_wall_s: float, args: argparse.Namespac
         lines.append("  u/i: previous/next trace")
         lines.append("  f: cycle reasoning filter (all/errors/slow)")
         lines.append("  r: toggle reasoning redaction")
+        lines.append("  x: export query slice now")
         lines.append("  o: focus trace detail panel")
         lines.append("  p: pin/unpin selected trace")
         lines.append("  1/2/3: apply panel preset")
         lines.append("  Ctrl-C: exit")
         lines.append("")
     lines.append(
-        "Cmd: [? help] [h/l focus] [j/k reasoning] [u/i trace] [o detail] [p pin] [f filter] [r redact] [1/2/3 presets] [Ctrl-C exit]"
+        "Cmd: [? help] [h/l focus] [j/k reasoning] [u/i trace] [o detail] [p pin] [f filter] [r redact] [x export] [1/2/3 presets] [Ctrl-C exit]"
     )
     return "\n".join(lines)
 
@@ -1476,8 +2277,15 @@ def _build_parser() -> argparse.ArgumentParser:
         default=[],
         choices=[
             "summary",
+            "alerts",
+            "throughput",
             "quality",
+            "doctor",
+            "incident",
+            "insights",
+            "story",
             "query",
+            "scoreboard",
             "trace_list",
             "trace_detail",
             "reasoning_stream",
@@ -1563,18 +2371,48 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--index-mode", choices=["auto", "off", "sqlite"], default="auto")
     parser.add_argument("--query", default="", help="Optional query against indexed telemetry (for replay/session DB).")
     parser.add_argument("--query-limit", type=int, default=10, help="Max rows shown in query panel.")
+    parser.add_argument("--query-export", default="", help="Optional path to write current query results JSON.")
+    parser.add_argument("--query-export-interval-s", type=float, default=5.0, help="Minimum seconds between query export writes.")
+    parser.add_argument("--query-slice-export", default="", help="Optional JSONL path for on-demand query slice exports.")
+    parser.add_argument("--insight-max-recommendations", type=int, default=4, help="Max recommendations shown in Insights panel.")
+    parser.add_argument("--story-max-rows", type=int, default=8, help="Max story rows shown in Story panel.")
+    parser.add_argument("--golden-session", action="append", default=[], help="Golden session path for baseline comparison.")
+    parser.add_argument("--scenario-tag", action="append", default=[], help="Scenario tag for insight/scoreboard metadata.")
+    parser.add_argument("--goal-tag", action="append", default=[], help="Goal tag for insight/scoreboard metadata.")
+    parser.add_argument("--runbook", default="", help="Runbook/context note for this run.")
+    parser.add_argument("--scoreboard-path", default=DEFAULT_SCOREBOARD_PATH, help="Scoreboard JSON path.")
+    parser.add_argument("--scoreboard-refresh-s", type=float, default=10.0, help="Seconds between scoreboard reloads.")
+    parser.add_argument("--no-scoreboard-update", action="store_true", help="Disable scoreboard updates for local captures.")
+    parser.add_argument("--rate-window-s", type=float, default=10.0, help="Window in seconds for recent throughput metrics.")
+    parser.add_argument("--index-refresh-s", type=float, default=15.0, help="Rebuild local session.db periodically during live capture.")
+    parser.add_argument("--alert-policy", choices=["demo", "training", "debug", "custom"], default="custom", help="Preset alert thresholds.")
+    parser.add_argument("--alert-stale-s", type=float, default=10.0, help="Alert when stream RX age exceeds this in seconds.")
+    parser.add_argument("--alert-heartbeat-s", type=float, default=5.0, help="Alert when heartbeat age exceeds this in seconds.")
+    parser.add_argument("--alert-video-idle-s", type=float, default=6.0, help="Alert when video age exceeds this in seconds.")
+    parser.add_argument("--alert-dropped-events", type=int, default=1, help="Alert when dropped agent events >= this.")
+    parser.add_argument("--alert-warning-count", type=int, default=4, help="Alert when warnings deque reaches this size.")
+    parser.add_argument("--alert-trace-grace-s", type=float, default=20.0, help="Alert if no traces observed after this uptime.")
+    parser.add_argument("--alert-min-events-per-s", type=float, default=0.0, help="Alert when recent events/sec drops below this (>0 enables).")
     parser.add_argument(
         "--quality-gate",
         choices=["off", "warn", "strict"],
         default="off",
         help="Apply quality gate status to loaded replay/capture quality report.",
     )
+    parser.add_argument(
+        "--doctor-gate",
+        choices=["off", "warn", "strict"],
+        default="off",
+        help="Apply doctor readiness gate to loaded replay/capture doctor report.",
+    )
     return parser
 
 
 def main() -> int:
     parser = _build_parser()
+    defaults = parser.parse_args([])
     args = parser.parse_args()
+    _apply_alert_policy(args, defaults=defaults)
     if args.list_packs:
         for pack in list_packs():
             print(f"{pack.name}: {pack.description}")
@@ -1590,8 +2428,14 @@ def main() -> int:
         if args.ui_mode == "reasoning":
             args.panel = [
                 "summary",
+                "alerts",
                 "quality",
+                "doctor",
+                "incident",
+                "insights",
+                "story",
                 "query",
+                "scoreboard",
                 "trace_list",
                 "trace_detail",
                 "reasoning_stream",
@@ -1630,6 +2474,11 @@ def main() -> int:
             state.focus_panel = "reasoning_stream"
     if map_note:
         state.logs.append(map_note)
+    if str(args.scoreboard_path or "").strip():
+        try:
+            state.scoreboard = load_scoreboard(str(args.scoreboard_path))
+        except Exception as exc:
+            state.warnings.append(f"scoreboard_load_failed: {exc!r}")
     in_q: "queue.Queue[Dict[str, Any]]" = queue.Queue(maxsize=max(256, int(args.queue_size)))
     trace_builder = TraceGraphBuilder(
         match_window_s=max(0.1, float(args.trace_match_window_s)),
@@ -1654,6 +2503,17 @@ def main() -> int:
     refresh_s = 1.0 / max(1.0, float(args.refresh_hz))
     last_draw = 0.0
     last_query_refresh_s = 0.0
+    last_query_export_s = 0.0
+    last_query_export_error_s = 0.0
+    last_query_slice_export_s = 0.0
+    last_query_slice_note_s = 0.0
+    last_index_refresh_s = 0.0
+    last_index_refresh_note_s = 0.0
+    last_index_error_s = 0.0
+    last_insight_reload_s = 0.0
+    last_scoreboard_reload_s = 0.0
+    last_scoreboard_error_s = 0.0
+    last_alert_set: set[str] = set()
     session_db_path = ""
     capture_writer: Optional[SessionCaptureWriter] = None
     save_session_dir = str(args.save_session or "").strip()
@@ -1665,10 +2525,19 @@ def main() -> int:
             max_seconds=max(0.0, float(args.capture_max_seconds)),
             manifest_version=int(args.capture_manifest_version),
             trace_match_window_s=max(0.1, float(args.trace_match_window_s)),
+            scenario_tags=list(args.scenario_tag or []),
+            goal_tags=list(args.goal_tag or []),
+            runbook=str(args.runbook or ""),
+            golden_sessions=list(args.golden_session or []),
+            scoreboard_path=str(args.scoreboard_path or DEFAULT_SCOREBOARD_PATH),
+            scoreboard_update=not bool(args.no_scoreboard_update),
             metadata={
                 "mode": "replay" if replay_mode else "live",
                 "packs": list(args.pack),
                 "field_filters": list(args.field_filter),
+                "scenario_tags": list(args.scenario_tag or []),
+                "goal_tags": list(args.goal_tag or []),
+                "runbook": str(args.runbook or ""),
             },
         )
         try:
@@ -1690,7 +2559,13 @@ def main() -> int:
         state.quality_gate_passed = passed
         state.quality_gate_note = note
 
+    def _apply_doctor_gate() -> None:
+        passed, note = _evaluate_doctor_gate(state.doctor_report, str(args.doctor_gate))
+        state.doctor_gate_passed = passed
+        state.doctor_gate_note = note
+
     _apply_quality_gate()
+    _apply_doctor_gate()
     video_window = _init_video_window(args, state)
 
     if replay_mode:
@@ -1701,8 +2576,64 @@ def main() -> int:
         state.connection_note = f"replay from {replay_dir}"
         replay_reader = SessionReplayReader(replay_dir)
         session_db_path = resolve_session_db_path(replay_dir)
+        if args.index_mode in {"auto", "sqlite"} and not os.path.exists(session_db_path):
+            try:
+                build_summary = build_session_db(replay_dir, replace=False)
+                state.logs.append(
+                    f"built replay index: events={build_summary.get('event_count')} traces={build_summary.get('trace_count')}"
+                )
+            except Exception as exc:
+                state.warnings.append(f"replay_index_build_failed: {exc!r}")
+                if args.index_mode == "sqlite":
+                    state.warnings.append("sqlite mode requested but session.db is unavailable")
         state.quality_report = load_quality_report(replay_dir)
+        state.doctor_report = load_doctor_report(replay_dir)
+        state.improvement_report = load_improvement_report(replay_dir)
+        state.incident_report = load_incident_report(replay_dir)
+        wants_runtime_insights = bool(args.golden_session or args.scenario_tag or args.goal_tag or str(args.runbook or "").strip())
+        if state.improvement_report is None or wants_runtime_insights:
+            try:
+                generated = build_improvement_report(
+                    replay_dir,
+                    golden_sessions=list(args.golden_session or []),
+                    scenario_tags=list(args.scenario_tag or []),
+                    goal_tags=list(args.goal_tag or []),
+                    runbook=str(args.runbook or ""),
+                )
+                if state.improvement_report is None:
+                    write_improvement_report(replay_dir, generated)
+                state.improvement_report = generated
+                state.logs.append("generated runtime improvement report for replay session")
+            except Exception as exc:
+                state.warnings.append(f"improvement_report_build_failed: {exc!r}")
+        if state.doctor_report is None:
+            try:
+                generated_doc = build_doctor_report(
+                    replay_dir,
+                    quality_report=state.quality_report,
+                    improvement_report=state.improvement_report,
+                )
+                write_doctor_report(replay_dir, generated_doc)
+                state.doctor_report = generated_doc
+                state.logs.append("generated doctor report for replay session")
+            except Exception as exc:
+                state.warnings.append(f"doctor_report_build_failed: {exc!r}")
+        if state.incident_report is None:
+            try:
+                generated_incident = build_incident_report(
+                    replay_dir,
+                    quality_report=state.quality_report,
+                    doctor_report=state.doctor_report,
+                    improvement_report=state.improvement_report,
+                )
+                write_incident_report(replay_dir, generated_incident)
+                write_incident_markdown(replay_dir, generated_incident)
+                state.incident_report = generated_incident
+                state.logs.append("generated incident report for replay session")
+            except Exception as exc:
+                state.warnings.append(f"incident_report_build_failed: {exc!r}")
         _apply_quality_gate()
+        _apply_doctor_gate()
         if not _can_preload_trace_index(field_filters=field_filters):
             state.logs.append("trace index preload disabled because field filters are active")
         else:
@@ -1719,7 +2650,7 @@ def main() -> int:
         if state.query_text:
             if args.index_mode == "off":
                 state.query_note = "query index disabled (--index-mode off)"
-                state.query_rows = _build_in_memory_query_rows(state, limit=int(args.query_limit))
+                state.query_rows = _build_in_memory_query_rows(state, limit=int(args.query_limit), now_wall_s=time.time())
             else:
                 try:
                     query_out = query_session_db(
@@ -1727,22 +2658,11 @@ def main() -> int:
                         query=state.query_text,
                         limit=int(args.query_limit),
                     )
-                    state.query_rows = [
-                        {
-                            "kind": "event",
-                            "id": row.get("seq"),
-                            "trace_id": row.get("trace_id"),
-                            "req_id": row.get("req_id"),
-                            "status": row.get("status"),
-                            "severity": row.get("severity"),
-                            "summary": row.get("snippet"),
-                        }
-                        for row in query_out.get("events", [])
-                    ]
-                    state.query_note = f"sqlite: {len(state.query_rows)} event matches"
+                    state.query_rows = _rows_from_query_out(query_out, limit=int(args.query_limit))
+                    state.query_note = _query_note_from_query_out(query_out)
                 except Exception as exc:
                     state.query_note = f"sqlite query failed: {exc!r}"
-                    state.query_rows = _build_in_memory_query_rows(state, limit=int(args.query_limit))
+                    state.query_rows = _build_in_memory_query_rows(state, limit=int(args.query_limit), now_wall_s=time.time())
         replay_thread = threading.Thread(
             target=_replay_loop,
             kwargs={
@@ -1797,6 +2717,18 @@ def main() -> int:
                 args.reasoning_redact = "off" if args.reasoning_redact == "on" else "on"
                 state.logs.append(f"reasoning redaction={args.reasoning_redact}")
                 continue
+            if key == "x":
+                if not state.query_text:
+                    state.warnings.append("query slice export skipped: --query is empty")
+                    continue
+                target = str(args.query_slice_export or "").strip() or "logs/telemetry/query_slice.jsonl"
+                try:
+                    written = _write_query_slice_export(target, query=state.query_text, rows=list(state.query_rows))
+                    state.query_slice_exports += 1
+                    state.logs.append(f"query slice exported: rows={written} path={target}")
+                except Exception as exc:
+                    state.warnings.append(f"query_slice_export_failed: {exc!r}")
+                continue
 
         if (not replay_mode) and proc is None and now >= next_connect_time:
             state.connection_note = "connecting via ssh"
@@ -1848,12 +2780,16 @@ def main() -> int:
                     state.logs.append("local capture stopped: max_seconds_elapsed")
                     if save_session_dir:
                         state.quality_report = load_quality_report(save_session_dir)
+                        state.doctor_report = load_doctor_report(save_session_dir)
+                        state.improvement_report = load_improvement_report(save_session_dir)
+                        state.incident_report = load_incident_report(save_session_dir)
                         _apply_quality_gate()
+                        _apply_doctor_gate()
 
         if state.query_text and (now - last_query_refresh_s) >= 1.0:
             last_query_refresh_s = now
             if args.index_mode == "off":
-                state.query_rows = _build_in_memory_query_rows(state, limit=int(args.query_limit))
+                state.query_rows = _build_in_memory_query_rows(state, limit=int(args.query_limit), now_wall_s=now)
                 state.query_note = "memory query (index disabled)"
             else:
                 lookup_root = ""
@@ -1871,25 +2807,107 @@ def main() -> int:
                             query=state.query_text,
                             limit=int(args.query_limit),
                         )
-                        state.query_rows = [
-                            {
-                                "kind": "event",
-                                "id": row.get("seq"),
-                                "trace_id": row.get("trace_id"),
-                                "req_id": row.get("req_id"),
-                                "status": row.get("status"),
-                                "severity": row.get("severity"),
-                                "summary": row.get("snippet"),
-                            }
-                            for row in query_out.get("events", [])
-                        ]
-                        state.query_note = f"sqlite query matches={len(state.query_rows)}"
+                        state.query_rows = _rows_from_query_out(query_out, limit=int(args.query_limit))
+                        state.query_note = _query_note_from_query_out(query_out)
                     except Exception as exc:
-                        state.query_rows = _build_in_memory_query_rows(state, limit=int(args.query_limit))
+                        state.query_rows = _build_in_memory_query_rows(state, limit=int(args.query_limit), now_wall_s=now)
                         state.query_note = f"sqlite query fallback: {exc!r}"
                 else:
-                    state.query_rows = _build_in_memory_query_rows(state, limit=int(args.query_limit))
+                    state.query_rows = _build_in_memory_query_rows(state, limit=int(args.query_limit), now_wall_s=now)
                     state.query_note = "memory query (session db unavailable)"
+
+        if (
+            save_session_dir
+            and (args.index_mode in {"auto", "sqlite"})
+            and (now - last_index_refresh_s) >= max(2.0, float(args.index_refresh_s))
+            and os.path.exists(os.path.join(save_session_dir, "events.jsonl"))
+        ):
+            last_index_refresh_s = now
+            try:
+                index_summary = build_session_db(save_session_dir, replace=True)
+                session_db_path = resolve_session_db_path(save_session_dir)
+                if (now - last_index_refresh_note_s) >= 30.0:
+                    state.logs.append(
+                        f"session index refreshed: events={index_summary.get('event_count')} traces={index_summary.get('trace_count')}"
+                    )
+                    last_index_refresh_note_s = now
+            except Exception as exc:
+                if (now - last_index_error_s) >= 10.0:
+                    state.warnings.append(f"session_index_refresh_failed: {exc!r}")
+                    last_index_error_s = now
+
+        if save_session_dir and (now - last_insight_reload_s) >= 5.0:
+            loaded = load_improvement_report(save_session_dir)
+            if loaded is not None:
+                state.improvement_report = loaded
+            loaded_doctor = load_doctor_report(save_session_dir)
+            if loaded_doctor is not None:
+                state.doctor_report = loaded_doctor
+                _apply_doctor_gate()
+            loaded_incident = load_incident_report(save_session_dir)
+            if loaded_incident is not None:
+                state.incident_report = loaded_incident
+            last_insight_reload_s = now
+
+        if str(args.scoreboard_path or "").strip() and (now - last_scoreboard_reload_s) >= max(2.0, float(args.scoreboard_refresh_s)):
+            try:
+                state.scoreboard = load_scoreboard(str(args.scoreboard_path))
+            except Exception as exc:
+                if (now - last_scoreboard_error_s) >= 10.0:
+                    state.warnings.append(f"scoreboard_reload_failed: {exc!r}")
+                    last_scoreboard_error_s = now
+            last_scoreboard_reload_s = now
+
+        state.active_alerts = _collect_alerts(state, args, now)
+        active_set = set(state.active_alerts)
+        for item in sorted(active_set - last_alert_set):
+            text = f"alert_on: {item}"
+            state.logs.append(text)
+            state.alert_history.append(text)
+        for item in sorted(last_alert_set - active_set):
+            text = f"alert_off: {item}"
+            state.logs.append(text)
+            state.alert_history.append(text)
+        last_alert_set = active_set
+
+        if (
+            state.query_text
+            and str(args.query_export or "").strip()
+            and (now - last_query_export_s) >= max(0.5, float(args.query_export_interval_s))
+        ):
+            try:
+                _write_query_export(
+                    str(args.query_export),
+                    query=state.query_text,
+                    note=state.query_note,
+                    rows=list(state.query_rows),
+                )
+                last_query_export_s = now
+            except Exception as exc:
+                if (now - last_query_export_error_s) >= 10.0:
+                    state.warnings.append(f"query_export_failed: {exc!r}")
+                    last_query_export_error_s = now
+
+        if (
+            state.query_text
+            and str(args.query_slice_export or "").strip()
+            and (now - last_query_slice_export_s) >= max(0.5, float(args.query_export_interval_s))
+        ):
+            try:
+                written = _write_query_slice_export(
+                    str(args.query_slice_export),
+                    query=state.query_text,
+                    rows=list(state.query_rows),
+                )
+                last_query_slice_export_s = now
+                state.query_slice_exports += 1
+                if (now - last_query_slice_note_s) >= 30.0:
+                    state.logs.append(f"query slice exported: rows={written} path={args.query_slice_export}")
+                    last_query_slice_note_s = now
+            except Exception as exc:
+                if (now - last_query_export_error_s) >= 10.0:
+                    state.warnings.append(f"query_slice_export_failed: {exc!r}")
+                    last_query_export_error_s = now
 
         if (not replay_mode) and proc is not None and proc.poll() is None:
             stale_ref_s = state.last_rx_wall_s
@@ -1948,6 +2966,16 @@ def main() -> int:
         if loaded_quality is not None:
             state.quality_report = loaded_quality
             _apply_quality_gate()
+        loaded_doctor = load_doctor_report(save_session_dir)
+        if loaded_doctor is not None:
+            state.doctor_report = loaded_doctor
+            _apply_doctor_gate()
+        loaded_improvement = load_improvement_report(save_session_dir)
+        if loaded_improvement is not None:
+            state.improvement_report = loaded_improvement
+        loaded_incident = load_incident_report(save_session_dir)
+        if loaded_incident is not None:
+            state.incident_report = loaded_incident
     key_reader.stop()
 
     if video_window is not None:
@@ -1958,6 +2986,8 @@ def main() -> int:
 
     print("\n")
     if str(args.quality_gate) == "strict" and state.quality_gate_passed is not True:
+        return 2
+    if str(args.doctor_gate) == "strict" and state.doctor_gate_passed is not True:
         return 2
     return 0
 

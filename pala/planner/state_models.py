@@ -17,6 +17,10 @@ class OrchestratorDecision:
     confidence: float
     rationale: str
     source: str = "local"
+    user_utility_goal: Optional[str] = None
+    why_now: Optional[str] = None
+    success_criteria: Optional[str] = None
+    commit_s: Optional[float] = None
 
 
 @dataclass

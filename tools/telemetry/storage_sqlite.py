@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import sqlite3
 import time
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
@@ -370,9 +371,15 @@ def _parse_query_tokens(query: str) -> Dict[str, List[str]]:
         "phase": [],
         "req": [],
         "trace": [],
+        "since": [],
+        "kind": [],
         "text": [],
     }
-    for raw in str(query or "").split():
+    try:
+        tokens = shlex.split(str(query or ""))
+    except ValueError:
+        tokens = str(query or "").split()
+    for raw in tokens:
         token = raw.strip()
         if not token:
             continue
@@ -385,6 +392,37 @@ def _parse_query_tokens(query: str) -> Dict[str, List[str]]:
                 continue
         groups["text"].append(token)
     return groups
+
+
+def _parse_since_seconds(raw_values: Sequence[str]) -> Optional[float]:
+    seconds: List[float] = []
+    for raw in raw_values:
+        text = str(raw or "").strip().lower()
+        if not text:
+            continue
+        scale = 1.0
+        if text.endswith("ms"):
+            scale = 0.001
+            text = text[:-2]
+        elif text.endswith("s"):
+            scale = 1.0
+            text = text[:-1]
+        elif text.endswith("m"):
+            scale = 60.0
+            text = text[:-1]
+        elif text.endswith("h"):
+            scale = 3600.0
+            text = text[:-1]
+        try:
+            value = float(text)
+        except ValueError:
+            continue
+        if value <= 0.0:
+            continue
+        seconds.append(value * scale)
+    if not seconds:
+        return None
+    return min(seconds)
 
 
 def _append_or_equals(clauses: List[str], params: List[Any], column: str, values: Sequence[str]) -> None:
@@ -414,6 +452,12 @@ def query_session_db(
         raise FileNotFoundError(f"session db missing: {db_path}")
     groups = _parse_query_tokens(query)
     lim = max(1, int(limit))
+    since_s = _parse_since_seconds(groups.get("since", []))
+    since_cutoff = (time.time() - since_s) if since_s is not None else None
+    kind_values = {str(v).strip().lower() for v in groups.get("kind", []) if str(v).strip()}
+    want_events = (not kind_values) or bool(kind_values & {"event", "events"})
+    want_reasoning = (not kind_values) or bool(kind_values & {"reasoning", "reason"})
+    want_traces = (not kind_values) or bool(kind_values & {"trace", "traces"})
 
     event_clauses: List[str] = []
     event_params: List[Any] = []
@@ -439,6 +483,9 @@ def query_session_db(
         event_clauses.append("(snippet LIKE ? OR payload_json LIKE ?)")
         like = f"%{value}%"
         event_params.extend([like, like])
+    if since_cutoff is not None:
+        event_clauses.append("ts_wall_s >= ?")
+        event_params.append(float(since_cutoff))
 
     trace_clauses: List[str] = []
     trace_params: List[Any] = []
@@ -455,6 +502,9 @@ def query_session_db(
     for value in groups["text"]:
         trace_clauses.append("summary LIKE ?")
         trace_params.append(f"%{value}%")
+    if since_cutoff is not None:
+        trace_clauses.append("COALESCE(end_ts_wall_s, start_ts_wall_s, 0) >= ?")
+        trace_params.append(float(since_cutoff))
 
     reasoning_clauses: List[str] = []
     reasoning_params: List[Any] = []
@@ -469,6 +519,9 @@ def query_session_db(
     for value in groups["text"]:
         reasoning_clauses.append("snippet LIKE ?")
         reasoning_params.append(f"%{value}%")
+    if since_cutoff is not None:
+        reasoning_clauses.append("ts_wall_s >= ?")
+        reasoning_params.append(float(since_cutoff))
 
     where_events = f"WHERE {' AND '.join(event_clauses)}" if event_clauses else ""
     where_traces = f"WHERE {' AND '.join(trace_clauses)}" if trace_clauses else ""
@@ -476,32 +529,56 @@ def query_session_db(
 
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
-        events = [
-            dict(row)
-            for row in conn.execute(
-                "SELECT e.seq, e.ts_wall_s, e.source, e.req_id, e.phase, e.status, e.severity, e.latency_ms, "
-                "e.snippet, (SELECT te.trace_id FROM trace_events te WHERE te.event_index = e.seq LIMIT 1) AS trace_id "
-                f"FROM events e {where_events} ORDER BY e.seq DESC LIMIT ?",
-                (*event_params, lim),
-            ).fetchall()
-        ]
-        traces = [
-            dict(row)
-            for row in conn.execute(
-                f"SELECT trace_id, req_id, status, severity, duration_ms, summary "
-                f"FROM traces {where_traces} ORDER BY start_ts_wall_s DESC LIMIT ?",
-                (*trace_params, lim),
-            ).fetchall()
-        ]
-        reasoning = [
-            dict(row)
-            for row in conn.execute(
-                f"SELECT event_index, ts_wall_s, req_id, phase, status, severity, latency_ms, snippet "
-                f"FROM reasoning {where_reasoning} ORDER BY event_index DESC LIMIT ?",
-                (*reasoning_params, lim),
-            ).fetchall()
-        ]
+        if want_events:
+            events = [
+                dict(row)
+                for row in conn.execute(
+                    "SELECT e.seq, e.ts_wall_s, e.source, e.req_id, e.phase, e.status, e.severity, e.latency_ms, "
+                    "e.snippet, (SELECT te.trace_id FROM trace_events te WHERE te.event_index = e.seq LIMIT 1) AS trace_id "
+                    f"FROM events e {where_events} ORDER BY e.seq DESC LIMIT ?",
+                    (*event_params, lim),
+                ).fetchall()
+            ]
+        else:
+            events = []
+        if want_traces:
+            traces = [
+                dict(row)
+                for row in conn.execute(
+                    f"SELECT trace_id, req_id, status, severity, duration_ms, summary "
+                    f"FROM traces {where_traces} ORDER BY start_ts_wall_s DESC LIMIT ?",
+                    (*trace_params, lim),
+                ).fetchall()
+            ]
+        else:
+            traces = []
+        if want_reasoning:
+            reasoning = [
+                dict(row)
+                for row in conn.execute(
+                    f"SELECT event_index, ts_wall_s, req_id, phase, status, severity, latency_ms, snippet "
+                    f"FROM reasoning {where_reasoning} ORDER BY event_index DESC LIMIT ?",
+                    (*reasoning_params, lim),
+                ).fetchall()
+            ]
+        else:
+            reasoning = []
         meta_rows = conn.execute("SELECT key, value FROM meta").fetchall()
+        event_count = (
+            int(conn.execute(f"SELECT COUNT(*) FROM events e {where_events}", tuple(event_params)).fetchone()[0])
+            if want_events
+            else 0
+        )
+        trace_count = (
+            int(conn.execute(f"SELECT COUNT(*) FROM traces {where_traces}", tuple(trace_params)).fetchone()[0])
+            if want_traces
+            else 0
+        )
+        reasoning_count = (
+            int(conn.execute(f"SELECT COUNT(*) FROM reasoning {where_reasoning}", tuple(reasoning_params)).fetchone()[0])
+            if want_reasoning
+            else 0
+        )
     meta = {str(row["key"]): row["value"] for row in meta_rows}
     return {
         "db_path": db_path,
@@ -509,5 +586,10 @@ def query_session_db(
         "events": events,
         "traces": traces,
         "reasoning": reasoning,
+        "counts": {
+            "events": event_count,
+            "traces": trace_count,
+            "reasoning": reasoning_count,
+        },
         "meta": meta,
     }

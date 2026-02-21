@@ -87,6 +87,8 @@ cosmos:
   planner_strict_schema: true
   planner_allow_frame_fetch: true
   planner_max_tool_calls_per_cycle: 1
+  # Cosmos-first: include image frames on initial planning request each cycle.
+  planner_include_images_first_pass: true
   # Scene summarizer cadence.
   summarizer_enabled: true
   summarizer_hz: 1.0
@@ -127,4 +129,9 @@ cosmos:
   reasoning_probe_timeout_ms: 10000
   reasoning_probe_max_tokens: 1024
   commitment_ttl_ms: 12000
+  # Cosmos self-critique replan pass: improves decision quality under collapse/stale choices.
+  planner_self_critique_enabled: true
+  planner_self_critique_confidence: 0.68
+  planner_self_critique_margin: 0.05
+  planner_self_critique_max_calls_per_cycle: 1
   mock_latency_ms: 150

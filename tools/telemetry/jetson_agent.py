@@ -21,6 +21,7 @@ from tools.telemetry.capture import CaptureConfig, SessionCaptureWriter
 from tools.telemetry.filters import FieldFilter, matches_field_filters, parse_field_filters
 from tools.telemetry.packs import apply_pack_overrides, list_packs, resolve_packs
 from tools.telemetry.protocol import encode_message, event
+from tools.telemetry.scoreboard import DEFAULT_SCOREBOARD_PATH
 from tools.telemetry.schema_v3 import TELEMETRY_SCHEMA_VERSION_V3
 
 
@@ -831,6 +832,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--capture-max-seconds", type=float, default=0.0)
     parser.add_argument("--capture-manifest-version", type=int, default=TELEMETRY_SCHEMA_VERSION_V3)
     parser.add_argument("--trace-match-window-s", type=float, default=2.0)
+    parser.add_argument("--capture-scenario-tag", action="append", default=[], help="Scenario tag for capture metadata.")
+    parser.add_argument("--capture-goal-tag", action="append", default=[], help="Goal tag for capture metadata.")
+    parser.add_argument("--capture-runbook", default="", help="Runbook/context note saved with capture metadata.")
+    parser.add_argument("--capture-golden-session", action="append", default=[], help="Golden session dir used for baseline comparison.")
+    parser.add_argument("--capture-scoreboard-path", default=DEFAULT_SCOREBOARD_PATH, help="Scoreboard JSON path for session trend tracking.")
+    parser.add_argument("--no-capture-scoreboard", action="store_true", help="Disable scoreboard update on capture close.")
     return parser
 
 
@@ -889,9 +896,18 @@ def main() -> int:
             max_seconds=max(0.0, float(args.capture_max_seconds)),
             manifest_version=int(args.capture_manifest_version),
             trace_match_window_s=max(0.1, float(args.trace_match_window_s)),
+            scenario_tags=list(args.capture_scenario_tag or []),
+            goal_tags=list(args.capture_goal_tag or []),
+            runbook=str(args.capture_runbook or ""),
+            golden_sessions=list(args.capture_golden_session or []),
+            scoreboard_path=str(args.capture_scoreboard_path or DEFAULT_SCOREBOARD_PATH),
+            scoreboard_update=not bool(args.no_capture_scoreboard),
             metadata={
                 "packs": list(resolved_packs.names),
                 "field_filters": list(args.field_filter or []),
+                "scenario_tags": list(args.capture_scenario_tag or []),
+                "goal_tags": list(args.capture_goal_tag or []),
+                "runbook": str(args.capture_runbook or ""),
             },
         )
         try:

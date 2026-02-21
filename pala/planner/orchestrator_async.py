@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import io
 import json
 import logging
+import re
 import subprocess
 import threading
 import time
@@ -118,6 +119,7 @@ class AsyncOrchestratorPlanner(PlannerInterface):
         planner_strict_schema: bool = True,
         planner_allow_frame_fetch: bool = True,
         planner_max_tool_calls_per_cycle: int = 1,
+        planner_include_images_first_pass: bool = False,
         transcript_max_items: int = 80,
         context_max_transcript_items: int = 0,
         context_transcript_max_items: int = 24,
@@ -141,6 +143,10 @@ class AsyncOrchestratorPlanner(PlannerInterface):
         reasoning_probe_timeout_ms: int = 8000,
         reasoning_probe_max_tokens: int = 1024,
         commitment_ttl_ms: int = 12000,
+        planner_self_critique_enabled: bool = True,
+        planner_self_critique_confidence: float = 0.68,
+        planner_self_critique_margin: float = 0.05,
+        planner_self_critique_max_calls_per_cycle: int = 1,
     ) -> None:
         self._frame_cache = frame_cache
         self._fallback = fallback or HeuristicPlanner()
@@ -169,6 +175,7 @@ class AsyncOrchestratorPlanner(PlannerInterface):
         self._planner_strict_schema = bool(planner_strict_schema)
         self._planner_allow_frame_fetch = bool(planner_allow_frame_fetch)
         self._planner_max_tool_calls_per_cycle = max(0, int(planner_max_tool_calls_per_cycle))
+        self._planner_include_images_first_pass = bool(planner_include_images_first_pass)
         legacy_max_items = max(0, int(context_max_transcript_items))
         default_max_items = max(1, int(context_transcript_max_items))
         self._context_transcript_max_items = legacy_max_items if legacy_max_items > 0 else default_max_items
@@ -198,6 +205,10 @@ class AsyncOrchestratorPlanner(PlannerInterface):
         self._reasoning_probe_timeout_s = max(0.1, float(reasoning_probe_timeout_ms) / 1000.0)
         self._reasoning_probe_max_tokens = max(128, int(reasoning_probe_max_tokens))
         self._commitment_ttl_s = max(0.5, float(commitment_ttl_ms) / 1000.0)
+        self._planner_self_critique_enabled = bool(planner_self_critique_enabled)
+        self._planner_self_critique_confidence = max(0.0, min(1.0, float(planner_self_critique_confidence)))
+        self._planner_self_critique_margin = max(0.0, float(planner_self_critique_margin))
+        self._planner_self_critique_max_calls_per_cycle = max(0, int(planner_self_critique_max_calls_per_cycle))
         self._remote_enabled = self._provider in {"brev", "cosmos", "openai"} and self._chat_url is not None
         self._request_count = 0
         self._success_count = 0
@@ -256,6 +267,8 @@ class AsyncOrchestratorPlanner(PlannerInterface):
                 "summary_ttl_s": self._summary_ttl_s,
                 "video_max_frames": self._video_max_frames,
                 "frame_fetch_enabled": self._planner_allow_frame_fetch,
+                "include_images_first_pass": self._planner_include_images_first_pass,
+                "self_critique_enabled": self._planner_self_critique_enabled,
                 "strict_schema": self._planner_strict_schema,
                 "git_sha": _resolve_git_sha(),
             },
@@ -434,7 +447,11 @@ class AsyncOrchestratorPlanner(PlannerInterface):
                     f"source={decision.source} target_state={decision.target_state} intent={decision.intent} "
                     f"style={decision.style} urgency={decision.urgency} allow_interrupt={decision.allow_interrupt} "
                     f"primitive={decision.primitive_hint or 'breath'} target_zone={decision.target_zone or '-'} "
-                    f"confidence={decision.confidence:.2f} rationale={decision.rationale}"
+                    f"confidence={decision.confidence:.2f} "
+                    f"utility_goal={decision.user_utility_goal or '-'} "
+                    f"success_criteria={decision.success_criteria or '-'} "
+                    f"commit_s={decision.commit_s if decision.commit_s is not None else '-'} "
+                    f"rationale={decision.rationale}"
                 ),
             )
             decision_payload = {
@@ -447,6 +464,10 @@ class AsyncOrchestratorPlanner(PlannerInterface):
                 "confidence": decision.confidence,
                 "allow_interrupt": decision.allow_interrupt,
                 "urgency": decision.urgency,
+                "user_utility_goal": decision.user_utility_goal,
+                "why_now": decision.why_now,
+                "success_criteria": decision.success_criteria,
+                "commit_s": decision.commit_s,
                 "latency_ms": self._latest_latency_ms,
             }
             self._memory.append_event("decision_event", decision_payload)
@@ -613,7 +634,11 @@ class AsyncOrchestratorPlanner(PlannerInterface):
         )
 
         t0 = time.monotonic()
-        payload = self._build_payload(req, include_images=False, frame_fetch_reason=None)
+        payload = self._build_payload(
+            req,
+            include_images=self._planner_include_images_first_pass,
+            frame_fetch_reason=("first_pass" if self._planner_include_images_first_pass else None),
+        )
         response = _post_json(
             self._chat_url,
             payload,
@@ -702,6 +727,50 @@ class AsyncOrchestratorPlanner(PlannerInterface):
             )
             return None
 
+        replan_calls = 0
+        while replan_calls < self._planner_self_critique_max_calls_per_cycle:
+            replan_directive = self._build_self_critique_directive(req=req, decision=decision)
+            if replan_directive is None:
+                break
+            replan_calls += 1
+            self._timeline.write(
+                "self_critique_event",
+                {
+                    "request_id": req_id,
+                    "attempt": replan_calls,
+                    "directive": replan_directive,
+                    "policy_version": self._policy_version,
+                },
+            )
+            payload = self._build_payload(
+                req,
+                include_images=False,
+                frame_fetch_reason="self_critique",
+                replan_directive=replan_directive,
+            )
+            response = _post_json(
+                self._chat_url,
+                payload,
+                timeout_s=self._request_timeout_s,
+                api_key=self._api_key,
+            )
+            content = _extract_content(response)
+            if content is None:
+                break
+            self._capture_reasoning(response, req_id, latency_ms=(time.monotonic() - t0) * 1000.0)
+            candidate = _parse_decision_content(content)
+            if candidate is None:
+                continue
+            if self._planner_strict_schema and not _is_valid_canonical_decision(candidate):
+                continue
+            current_score = self._score_decision_for_request(req=req, decision=decision, discourage_repeat=False)
+            candidate_score = self._score_decision_for_request(req=req, decision=candidate, discourage_repeat=True)
+            if candidate_score >= (current_score + self._planner_self_critique_margin):
+                decision = candidate
+                final_content = content
+            else:
+                break
+
         self._success_count += 1
         logger.debug(
             "orchestrator req_end id=%d status=ok latency_ms=%.1f state=%s intent=%s style=%s primitive=%s target_zone=%s",
@@ -724,11 +793,82 @@ class AsyncOrchestratorPlanner(PlannerInterface):
                 "style": decision.style,
                 "primitive_hint": decision.primitive_hint,
                 "target_zone": decision.target_zone,
+                "user_utility_goal": decision.user_utility_goal,
+                "success_criteria": decision.success_criteria,
+                "commit_s": decision.commit_s,
                 "tool_calls": tool_calls,
+                "self_critique_calls": replan_calls,
                 "policy_version": self._policy_version,
             },
         )
         return decision
+
+    def _build_self_critique_directive(
+        self,
+        *,
+        req: _OrchestratorRequest,
+        decision: OrchestratorDecision,
+    ) -> Optional[str]:
+        if not self._planner_self_critique_enabled:
+            return None
+        zone_hint = _zone_hint_from_state(req.state)
+        signature_repeat = False
+        if self._latest_decision is not None:
+            signature_repeat = _decision_signature(self._latest_decision) == _decision_signature(decision)
+        missing_utility = req.state.primary_person is not None and not (decision.user_utility_goal or "").strip()
+        zone_conflict = (
+            zone_hint is not None
+            and req.state.primary_person is not None
+            and decision.target_zone is not None
+            and zone_hint != decision.target_zone
+        )
+        low_conf = decision.confidence < self._planner_self_critique_confidence
+        if not (signature_repeat or zone_conflict or low_conf or missing_utility):
+            return None
+        reasons: list[str] = []
+        if signature_repeat:
+            reasons.append("repeated_decision")
+        if zone_conflict:
+            reasons.append(f"zone_conflict current={zone_hint} planned={decision.target_zone}")
+        if low_conf:
+            reasons.append(f"low_confidence={decision.confidence:.2f}")
+        if missing_utility:
+            reasons.append("missing_user_utility_goal")
+        return (
+            "Generate a better alternative action with clearer intent and timing. "
+            "Do not repeat the same primitive+zone unless strictly necessary for safety. "
+            "Include user_utility_goal, why_now, success_criteria, and commit_s when person is present. "
+            f"Observed issues: {', '.join(reasons)}."
+        )
+
+    def _score_decision_for_request(
+        self,
+        *,
+        req: _OrchestratorRequest,
+        decision: OrchestratorDecision,
+        discourage_repeat: bool,
+    ) -> float:
+        score = 0.0
+        score += 0.55 * max(0.0, min(1.0, decision.confidence))
+        if decision.urgency == "high":
+            score += 0.25
+        elif decision.urgency == "medium":
+            score += 0.12
+        zone_hint = _zone_hint_from_state(req.state)
+        if zone_hint is not None and decision.target_zone == zone_hint:
+            score += 0.22
+        if req.state.primary_person is not None and decision.primitive_hint in {"orient_to_zone", "glance", "nod"}:
+            score += 0.16
+        if req.state.primary_person is not None and (decision.user_utility_goal or "").strip():
+            score += 0.18
+        if req.state.primary_person is not None and (decision.success_criteria or "").strip():
+            score += 0.12
+        if decision.commit_s is not None:
+            score += 0.06
+        if discourage_repeat and self._latest_decision is not None:
+            if _decision_signature(self._latest_decision) == _decision_signature(decision):
+                score -= 0.35
+        return score
 
     def _capture_reasoning(self, response: dict[str, Any], req_id: int, *, latency_ms: float) -> None:
         reasoning = _extract_reasoning(response)
@@ -767,6 +907,7 @@ class AsyncOrchestratorPlanner(PlannerInterface):
         *,
         include_images: bool,
         frame_fetch_reason: Optional[str],
+        replan_directive: Optional[str] = None,
     ) -> dict[str, Any]:
         now = time.monotonic()
         summary_window, summary_stale = self._build_summary_window(now)
@@ -795,6 +936,9 @@ class AsyncOrchestratorPlanner(PlannerInterface):
                     "primitive_hint": self._latest_decision.primitive_hint,
                     "target_zone": self._latest_decision.target_zone,
                     "confidence": self._latest_decision.confidence,
+                    "user_utility_goal": self._latest_decision.user_utility_goal,
+                    "success_criteria": self._latest_decision.success_criteria,
+                    "commit_s": self._latest_decision.commit_s,
                 },
             },
             "summary_memory": {
@@ -826,6 +970,10 @@ class AsyncOrchestratorPlanner(PlannerInterface):
             "confidence": "number 0..1",
             "rationale": "short string",
             "act_now": "boolean (optional)",
+            "user_utility_goal": "optional short string",
+            "why_now": "optional short string",
+            "success_criteria": "optional short string",
+            "commit_s": "optional number 0.5..20",
         }
         user_text = (
             f"[policy_version={self._policy_version}]\n"
@@ -842,21 +990,20 @@ class AsyncOrchestratorPlanner(PlannerInterface):
             "3) Determine user-helpful opportunity.\n"
             "4) Pick one allowed primitive.\n"
             "5) Decide if interrupt is required.\n\n"
+            "Always specify a concrete user_utility_goal and success_criteria when person is present.\n"
             "If more visual detail is required, you may return exactly:\n"
             '{"tool_call":{"name":"frame_fetch","reason":"short reason"}}\n\n'
-            "Otherwise return strict action JSON matching this schema:\n"
+            "Otherwise return ONLY one strict JSON object matching this schema (no markdown, no extra keys):\n"
             + json.dumps(action_schema, separators=(",", ":"), ensure_ascii=True)
             + "\n\n"
-            "Answer the question using the following format:\n"
-            "<think>\n"
-            "Your reasoning.\n"
-            "</think>\n"
-            "Write your final answer immediately after the </think> tag.\n\n"
+            "Important: do not output <think> tags in this response. JSON only.\n\n"
             "Decision Context JSON:\n"
             + json.dumps(context, separators=(",", ":"), ensure_ascii=True)
         )
         if self._planner_prompt:
             user_text += f"\n\nOperator guidance:\n{self._planner_prompt}"
+        if replan_directive:
+            user_text += f"\n\nReplan directive:\n{replan_directive}"
 
         image_items: list[dict[str, Any]] = []
         if include_images and req.frames:
@@ -1031,8 +1178,12 @@ class AsyncOrchestratorPlanner(PlannerInterface):
             "primitive_hint": decision.primitive_hint,
             "target_zone": decision.target_zone,
             "confidence": decision.confidence,
+            "user_utility_goal": decision.user_utility_goal,
+            "success_criteria": decision.success_criteria,
+            "commit_s": decision.commit_s,
         }
-        self._active_commitment_expires_mono_s = now_mono_s + self._commitment_ttl_s
+        commit_s = self._commitment_ttl_s if decision.commit_s is None else max(0.5, min(20.0, float(decision.commit_s)))
+        self._active_commitment_expires_mono_s = now_mono_s + commit_s
 
 
 def _decision_to_action(decision: OrchestratorDecision) -> ActionPlan:
@@ -1042,12 +1193,13 @@ def _decision_to_action(decision: OrchestratorDecision) -> ActionPlan:
 
     zone = decision.target_zone if decision.target_zone in {"left", "center", "right"} else None
     cancel_current = bool(decision.allow_interrupt or decision.urgency == "high")
+    explanation = _decision_explanation(decision, hint=hint, zone=zone)
     if hint == "nod":
         return ActionPlan(
             primitive=PrimitiveKind.NOD,
             command=NodCommand(amp_rad=0.2, duration_s=0.5, cycles=1, rate_rad_s=1.8),
             confidence=decision.confidence,
-            explanation=f"{decision.source}:{decision.rationale}",
+            explanation=explanation,
             style=decision.style,
             cancel_current=cancel_current,
         )
@@ -1057,7 +1209,7 @@ def _decision_to_action(decision: OrchestratorDecision) -> ActionPlan:
             primitive=PrimitiveKind.GLANCE,
             command=GlanceCommand(direction=direction, amp_rad=0.24, duration_s=0.55, rate_rad_s=1.6),
             confidence=decision.confidence,
-            explanation=f"{decision.source}:{decision.rationale}",
+            explanation=explanation,
             style=decision.style,
             cancel_current=cancel_current,
         )
@@ -1066,7 +1218,7 @@ def _decision_to_action(decision: OrchestratorDecision) -> ActionPlan:
             primitive=PrimitiveKind.ORIENT_TO_ZONE,
             command=OrientToZoneCommand(zone=zone or "center", amp_rad=0.2, rate_rad_s=1.4),
             confidence=decision.confidence,
-            explanation=f"{decision.source}:{decision.rationale}",
+            explanation=explanation,
             style=decision.style,
             cancel_current=cancel_current,
         )
@@ -1075,7 +1227,7 @@ def _decision_to_action(decision: OrchestratorDecision) -> ActionPlan:
             primitive=PrimitiveKind.HOLD,
             command=HoldCommand(),
             confidence=decision.confidence,
-            explanation=f"{decision.source}:{decision.rationale}",
+            explanation=explanation,
             style=decision.style,
             cancel_current=cancel_current,
         )
@@ -1083,9 +1235,32 @@ def _decision_to_action(decision: OrchestratorDecision) -> ActionPlan:
         primitive=PrimitiveKind.BREATH,
         command=BreathCommand(amp_rad=0.08, period_s=6.5, rate_rad_s=1.0),
         confidence=decision.confidence,
-        explanation=f"{decision.source}:{decision.rationale}",
+        explanation=explanation,
         style=decision.style,
         cancel_current=cancel_current,
+    )
+
+
+def _decision_explanation(decision: OrchestratorDecision, *, hint: str, zone: Optional[str]) -> str:
+    rationale = " ".join((decision.rationale or "").strip().split())
+    utility_goal = (decision.user_utility_goal or "").strip() or "-"
+    why_now = (decision.why_now or "").strip() or "-"
+    success_criteria = (decision.success_criteria or "").strip() or "-"
+    commit_s = "-" if decision.commit_s is None else f"{float(decision.commit_s):.2f}"
+    return (
+        f"source={decision.source} "
+        f"target_state={decision.target_state} "
+        f"intent={decision.intent} "
+        f"primitive={hint} "
+        f"zone={zone or 'none'} "
+        f"urgency={decision.urgency} "
+        f"allow_interrupt={int(bool(decision.allow_interrupt))} "
+        f"confidence={decision.confidence:.2f} "
+        f"user_utility_goal={utility_goal} "
+        f"why_now={why_now} "
+        f"success_criteria={success_criteria} "
+        f"commit_s={commit_s} "
+        f"rationale={rationale}"
     )
 
 
@@ -1158,23 +1333,34 @@ def _parse_decision_content(content: str) -> Optional[OrchestratorDecision]:
     data = _parse_json_content(content)
     if data is None:
         return None
-    missing = [field for field in _ACTION_REQUIRED_FIELDS if field not in data]
-    if missing:
-        return None
 
-    target_state_raw = _clean_text(data.get("target_state"))
-    intent_raw = _clean_text(data.get("intent"))
-    style_raw = _clean_text(data.get("style"))
-    primitive_raw = _clean_text(data.get("primitive_hint"))
-    urgency_raw = _clean_text(data.get("urgency"))
-    rationale_raw = _clean_text(data.get("rationale"))
-    if None in {target_state_raw, intent_raw, style_raw, primitive_raw, urgency_raw, rationale_raw}:
-        return None
-    target_state = target_state_raw.lower()
-    intent = intent_raw
-    style = style_raw.lower()
-    primitive_hint = primitive_raw.lower()
-    urgency = urgency_raw.lower()
+    candidates = _decision_candidate_maps(data)
+    target_state_raw = _first_clean_text(candidates, "target_state", "state")
+    intent_raw = _first_clean_text(candidates, "intent", "action_intent", "goal", "prediction")
+    style_raw = _first_clean_text(candidates, "style", "mood", "tone")
+    primitive_raw = _first_clean_text(candidates, "primitive_hint", "primitive", "action", "prediction")
+    urgency_raw = _first_clean_text(candidates, "urgency", "priority")
+    rationale_raw = _first_clean_text(candidates, "rationale", "inference", "analysis", "reason", "explanation")
+    zone_raw = _first_clean_text(candidates, "target_zone", "zone", "zone_hint", "direction")
+    utility_goal_raw = _first_clean_text(candidates, "user_utility_goal", "utility_goal", "goal")
+    why_now_raw = _first_clean_text(candidates, "why_now", "justification", "why")
+    success_criteria_raw = _first_clean_text(
+        candidates,
+        "success_criteria",
+        "success_check",
+        "next_check",
+        "expected_outcome",
+    )
+    commit_raw = _first_value(candidates, "commit_s", "commit_seconds", "horizon_s")
+
+    primitive_hint = _normalize_primitive_hint(primitive_raw, intent=intent_raw, rationale=rationale_raw)
+    target_state = _normalize_target_state(target_state_raw, primitive_hint=primitive_hint, intent=intent_raw)
+    style = _normalize_style(style_raw, primitive_hint=primitive_hint)
+    urgency = _normalize_urgency(urgency_raw, primitive_hint=primitive_hint)
+    intent = _normalize_intent(intent_raw, primitive_hint=primitive_hint, target_state=target_state)
+    if intent.strip().lower() in {"none", "null", "n/a", "na"}:
+        intent = _default_intent_for_state(target_state)
+
     if target_state not in _TARGET_STATES:
         return None
     if style not in _STYLES:
@@ -1183,33 +1369,32 @@ def _parse_decision_content(content: str) -> Optional[OrchestratorDecision]:
         return None
     if urgency not in _URGENCY:
         return None
-    if intent.strip().lower() in {"none", "null", "n/a", "na"}:
-        return None
 
-    allow_interrupt_value = _coerce_bool_value(data.get("allow_interrupt"), default=False)
+    allow_interrupt_value = _coerce_bool_value(
+        _first_value(candidates, "allow_interrupt", "cancel_current", "interrupt"),
+        default=primitive_hint in {"glance", "nod", "orient_to_zone"},
+    )
     if allow_interrupt_value is None:
         return None
-    try:
-        confidence = float(data.get("confidence"))
-    except Exception:
-        return None
-    confidence = max(0.0, min(1.0, confidence))
+    confidence = _coerce_confidence(
+        _first_value(candidates, "confidence", "inference_confidence", "score", "probability"),
+        default=(0.72 if primitive_hint in {"glance", "nod", "orient_to_zone"} else 0.6),
+    )
 
-    zone_value = _clean_text(data.get("target_zone"))
-    target_zone = None
-    if zone_value is not None:
-        zone = zone_value.lower()
-        if zone in {"left", "center", "right"}:
-            target_zone = zone
+    target_zone = _normalize_target_zone(zone_raw, rationale=rationale_raw)
+    commit_s = _normalize_commit_s(commit_raw)
 
-    act_now = _coerce_bool_value(data.get("act_now", True), default=True)
+    rationale = rationale_raw or (
+        f"normalized decision target_state={target_state} primitive={primitive_hint} style={style} urgency={urgency}"
+    )
+
+    act_now = _coerce_bool_value(_first_value(candidates, "act_now", "execute_now"), default=True)
     if act_now is None:
         return None
     if not act_now:
         primitive_hint = "hold"
         allow_interrupt_value = False
-        if target_state not in _TARGET_STATES:
-            target_state = "idle"
+        target_state = "idle"
 
     return OrchestratorDecision(
         target_state=target_state,
@@ -1220,9 +1405,262 @@ def _parse_decision_content(content: str) -> Optional[OrchestratorDecision]:
         allow_interrupt=allow_interrupt_value,
         urgency=urgency,
         confidence=confidence,
-        rationale=rationale_raw,
+        rationale=rationale,
         source="remote",
+        user_utility_goal=utility_goal_raw,
+        why_now=why_now_raw,
+        success_criteria=success_criteria_raw,
+        commit_s=commit_s,
     )
+
+
+def _decision_candidate_maps(data: dict[str, Any]) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = [data]
+    for key in ("selected_action", "prediction", "action_details", "decision", "action", "output", "result"):
+        value = data.get(key)
+        if isinstance(value, dict):
+            candidates.append(value)
+            for nested_key in ("selected_action", "prediction", "action_details", "decision", "action"):
+                nested = value.get(nested_key)
+                if isinstance(nested, dict):
+                    candidates.append(nested)
+    return candidates
+
+
+def _first_value(candidates: list[dict[str, Any]], *keys: str) -> Any:
+    for item in candidates:
+        for key in keys:
+            if key in item:
+                return item.get(key)
+    return None
+
+
+def _first_clean_text(candidates: list[dict[str, Any]], *keys: str) -> Optional[str]:
+    value = _first_value(candidates, *keys)
+    if isinstance(value, str):
+        return _clean_text(value)
+    return None
+
+
+def _coerce_confidence(value: Any, *, default: float) -> float:
+    if value is None:
+        return max(0.0, min(1.0, float(default)))
+    try:
+        out = float(value)
+    except Exception:
+        out = default
+    return max(0.0, min(1.0, out))
+
+
+def _normalize_target_state(
+    raw: Optional[str],
+    *,
+    primitive_hint: str,
+    intent: Optional[str],
+) -> str:
+    if raw:
+        token = raw.strip().lower()
+        mapping = {
+            "idle": "idle",
+            "waiting": "idle",
+            "user_detected": "user_detected",
+            "detected": "user_detected",
+            "engage": "engaging",
+            "engaging": "engaging",
+            "assist": "engaging",
+            "ack": "acknowledging",
+            "acknowledging": "acknowledging",
+            "track": "tracking",
+            "tracking": "tracking",
+            "reacquire": "reacquiring",
+            "reacquiring": "reacquiring",
+        }
+        normalized = mapping.get(token)
+        if normalized in _TARGET_STATES:
+            return normalized
+    text = f"{intent or ''} {primitive_hint}".lower()
+    if _contains_any(text, "reacquire", "search", "lost"):
+        return "reacquiring"
+    if _contains_any(text, "ack", "greet", "welcome", "nod"):
+        return "acknowledging"
+    if _contains_any(text, "assist", "help", "task", "engage"):
+        return "engaging"
+    if primitive_hint in {"orient_to_zone", "glance"}:
+        return "tracking"
+    if primitive_hint in {"hold", "breath"}:
+        return "idle"
+    return "tracking"
+
+
+def _normalize_primitive_hint(raw: Optional[str], *, intent: Optional[str], rationale: Optional[str]) -> str:
+    text = " ".join(
+        part for part in (raw or "", intent or "", rationale or "") if part
+    ).strip().lower()
+    if not text:
+        return "orient_to_zone"
+    if text in _PRIMITIVE_HINTS:
+        return text
+    mapping = {
+        "reach_for_object": "orient_to_zone",
+        "look_at_user": "orient_to_zone",
+        "track_transition": "orient_to_zone",
+        "track_user": "orient_to_zone",
+        "assist_with_task": "orient_to_zone",
+        "search": "glance",
+        "scan": "glance",
+        "greet": "nod",
+        "acknowledge": "nod",
+    }
+    if text in mapping:
+        return mapping[text]
+    if _contains_any(text, "nod", "ack", "greet", "welcome", "hello"):
+        return "nod"
+    if _contains_any(text, "glance", "scan", "search", "reacquire"):
+        return "glance"
+    if _contains_any(text, "hold", "wait", "pause", "still"):
+        return "hold"
+    if _contains_any(text, "breath", "idle", "calm"):
+        return "breath"
+    if _contains_any(text, "orient", "track", "follow", "turn", "reach", "assist", "look", "focus"):
+        return "orient_to_zone"
+    return "orient_to_zone"
+
+
+def _normalize_style(raw: Optional[str], *, primitive_hint: str) -> str:
+    if raw:
+        token = raw.strip().lower()
+        if token in _STYLES:
+            return token
+        if token in {"attentive", "intentional", "working"}:
+            return "focused"
+        if token in {"friendly", "playful", "expressive"}:
+            return "curious"
+        if token in {"gentle", "neutral", "still"}:
+            return "calm"
+    if primitive_hint in {"hold", "breath"}:
+        return "calm"
+    if primitive_hint in {"glance", "nod"}:
+        return "curious"
+    return "focused"
+
+
+def _normalize_urgency(raw: Optional[str], *, primitive_hint: str) -> str:
+    if raw:
+        token = raw.strip().lower()
+        if token in _URGENCY:
+            return token
+        if token in {"immediate", "critical", "urgent", "now"}:
+            return "high"
+        if token in {"soon", "prompt"}:
+            return "medium"
+        if token in {"gentle", "background", "later"}:
+            return "low"
+    if primitive_hint in {"hold", "breath"}:
+        return "low"
+    if primitive_hint in {"nod", "glance"}:
+        return "medium"
+    return "medium"
+
+
+def _normalize_target_zone(raw: Optional[str], *, rationale: Optional[str]) -> Optional[str]:
+    if raw:
+        token = raw.strip().lower()
+        if token in {"left", "center", "right"}:
+            return token
+        if token in {"l", "west"}:
+            return "left"
+        if token in {"r", "east"}:
+            return "right"
+        if token in {"middle", "centre"}:
+            return "center"
+    text = (rationale or "").strip().lower()
+    for token in ("left", "center", "right"):
+        if token in text:
+            return token
+    return None
+
+
+def _normalize_commit_s(raw: Any) -> Optional[float]:
+    if raw is None:
+        return None
+    try:
+        value = float(raw)
+    except Exception:
+        return None
+    if not np.isfinite(value):
+        return None
+    return max(0.5, min(20.0, value))
+
+
+def _normalize_intent(raw: Optional[str], *, primitive_hint: str, target_state: str) -> str:
+    cleaned = _clean_text(raw) if raw is not None else None
+    if cleaned is not None:
+        token = cleaned.strip().lower()
+        if token not in {"none", "null", "n/a", "na"}:
+            return cleaned
+    return _default_intent_for_state(target_state if target_state in _TARGET_STATES else _state_for_primitive(primitive_hint))
+
+
+def _default_intent_for_state(state: str) -> str:
+    defaults = {
+        "idle": "idle_presence",
+        "user_detected": "user_detected",
+        "engaging": "assist_with_task",
+        "tracking": "track_transition",
+        "acknowledging": "acknowledge_presence",
+        "reacquiring": "reacquire_user",
+    }
+    return defaults.get(state, "track_transition")
+
+
+def _state_for_primitive(primitive_hint: str) -> str:
+    mapping = {
+        "hold": "idle",
+        "breath": "idle",
+        "nod": "acknowledging",
+        "glance": "reacquiring",
+        "orient_to_zone": "tracking",
+    }
+    return mapping.get(primitive_hint, "tracking")
+
+
+def _zone_hint_from_state(st: PerceptionState) -> Optional[str]:
+    if isinstance(st.debug, dict):
+        raw = st.debug.get("zone_hint")
+        if isinstance(raw, str):
+            token = raw.strip().lower()
+            if token in {"left", "center", "right"}:
+                return token
+    if st.primary_person is None:
+        return None
+    cx = float(st.primary_person.cx)
+    if cx < 0.33:
+        return "left"
+    if cx < 0.66:
+        return "center"
+    return "right"
+
+
+def _decision_signature(decision: OrchestratorDecision) -> str:
+    return "|".join(
+        [
+            decision.target_state,
+            decision.intent,
+            decision.style,
+            decision.primitive_hint or "-",
+            decision.target_zone or "-",
+            f"{decision.confidence:.2f}",
+        ],
+    )
+
+
+def _contains_any(text: str, *tokens: str) -> bool:
+    lowered = text.lower()
+    for token in tokens:
+        pattern = rf"\b{re.escape(token.lower())}\b"
+        if re.search(pattern, lowered):
+            return True
+    return False
 
 
 def _parse_json_content(content: str) -> Optional[dict[str, Any]]:

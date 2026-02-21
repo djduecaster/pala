@@ -37,7 +37,7 @@ class ActionGovernor:
         self._last_action: Optional[ActionPlan] = None
         self._last_action_ts_s: Optional[float] = None
         self._last_signature: Optional[str] = None
-        self._last_zone_nudge_ts_s = 0.0
+        self._last_zone_nudge_ts_s: Optional[float] = None
 
     def apply(self, proposed: ActionPlan, obs: SceneObservation) -> ActionPlan:
         now = self._clock()
@@ -105,8 +105,9 @@ class ActionGovernor:
             return proposed
         if _targets_zone(proposed, obs.zone):
             return proposed
-        if (now - self._last_zone_nudge_ts_s) < self._cfg.zone_change_nudge_cooldown_s:
-            return proposed
+        if self._last_zone_nudge_ts_s is not None:
+            if (now - self._last_zone_nudge_ts_s) < self._cfg.zone_change_nudge_cooldown_s:
+                return proposed
         self._last_zone_nudge_ts_s = now
         return ActionPlan(
             primitive=PrimitiveKind.ORIENT_TO_ZONE,
@@ -161,4 +162,3 @@ def _copy_action(
 
 def _signature(action: ActionPlan) -> str:
     return f"{action.primitive.value}:{action.style}:{action.command!r}"
-

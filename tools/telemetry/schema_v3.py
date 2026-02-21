@@ -10,6 +10,9 @@ SESSION_DB_PATH = "session.db"
 QUALITY_REPORT_PATH = "quality_report.json"
 WEAK_LABELS_PATH = "labels.weak.jsonl"
 DATASET_ROWS_PATH = "dataset_rows.jsonl"
+IMPROVEMENT_REPORT_PATH = "improvement_report.json"
+DOCTOR_REPORT_PATH = "doctor_report.json"
+INCIDENT_REPORT_PATH = "incident_report.json"
 
 
 def v3_artifact_paths() -> Dict[str, str]:
@@ -18,6 +21,9 @@ def v3_artifact_paths() -> Dict[str, str]:
         "quality_report_path": QUALITY_REPORT_PATH,
         "weak_labels_path": WEAK_LABELS_PATH,
         "dataset_rows_path": DATASET_ROWS_PATH,
+        "improvement_report_path": IMPROVEMENT_REPORT_PATH,
+        "doctor_report_path": DOCTOR_REPORT_PATH,
+        "incident_report_path": INCIDENT_REPORT_PATH,
     }
 
 
@@ -26,6 +32,9 @@ def upgrade_manifest_v3(
     *,
     index_summary: Optional[Mapping[str, Any]] = None,
     quality_report: Optional[Mapping[str, Any]] = None,
+    improvement_report: Optional[Mapping[str, Any]] = None,
+    doctor_report: Optional[Mapping[str, Any]] = None,
+    incident_report: Optional[Mapping[str, Any]] = None,
     weak_label_count: Optional[int] = None,
 ) -> Dict[str, Any]:
     out: Dict[str, Any] = dict(manifest)
@@ -52,6 +61,46 @@ def upgrade_manifest_v3(
             out["quality_score"] = round(float(score), 2)
         if isinstance(grade, str):
             out["quality_grade"] = grade
+
+    if improvement_report is not None:
+        recs = improvement_report.get("recommendations")
+        if isinstance(recs, list):
+            out["improvement_recommendation_count"] = len(recs)
+        summary = improvement_report.get("summary")
+        if isinstance(summary, dict):
+            out["improvement_summary"] = {
+                "parse_fail_count": summary.get("parse_fail_count"),
+                "timeout_count": summary.get("timeout_count"),
+                "slow_count": summary.get("slow_count"),
+                "weak_label_count": summary.get("weak_label_count"),
+            }
+
+    if doctor_report is not None:
+        readiness = doctor_report.get("readiness")
+        if isinstance(readiness, dict):
+            score = readiness.get("score")
+            grade = readiness.get("grade")
+            if isinstance(score, (int, float)):
+                out["doctor_readiness_score"] = round(float(score), 2)
+            if isinstance(grade, str):
+                out["doctor_readiness_grade"] = grade
+        summary = doctor_report.get("summary")
+        if isinstance(summary, dict):
+            out["doctor_summary"] = {
+                "error_count": summary.get("error_count"),
+                "warning_count": summary.get("warning_count"),
+            }
+
+    if incident_report is not None:
+        severity = incident_report.get("severity")
+        title = incident_report.get("title")
+        if isinstance(severity, str):
+            out["incident_severity"] = severity
+        if isinstance(title, str):
+            out["incident_title"] = title
+        issues = incident_report.get("issues")
+        if isinstance(issues, list):
+            out["incident_issue_count"] = len(issues)
 
     if weak_label_count is not None:
         out["weak_label_count"] = max(0, int(weak_label_count))
