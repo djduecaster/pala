@@ -33,8 +33,11 @@ from tools.telemetry.filters import matches_field_filters, parse_field_filters
 from tools.telemetry.packs import apply_pack_overrides, list_packs, resolve_packs
 from tools.telemetry.protocol import decode_message
 from tools.telemetry.lamp_viz import draw_lamp_panel
+from tools.telemetry.quality import evaluate_quality_gate, load_quality_report
 from tools.telemetry.reasoning import ReasoningEvent, format_reasoning_snippet, normalize_reasoning_message
 from tools.telemetry.replay import SessionReplayReader
+from tools.telemetry.schema_v3 import TELEMETRY_SCHEMA_VERSION_V3
+from tools.telemetry.storage_sqlite import query_session_db, resolve_session_db_path
 from tools.telemetry.trace_graph import TraceGraphBuilder, TraceRecord, resolve_trace_index_path, load_trace_index
 
 try:
@@ -121,6 +124,12 @@ class DashboardState:
     trace_records: List[TraceRecord] = field(default_factory=list)
     trace_selected_id: Optional[str] = None
     trace_pinned_id: Optional[str] = None
+    query_text: str = ""
+    query_rows: List[Dict[str, Any]] = field(default_factory=list)
+    query_note: str = ""
+    quality_report: Optional[Dict[str, Any]] = None
+    quality_gate_note: str = ""
+    quality_gate_passed: Optional[bool] = None
 
     def configure_panels(self, panels: List[str], *, focus_panel: str = "") -> None:
         self.active_panels = list(panels)
@@ -381,8 +390,29 @@ class _VideoWindow:
 
 
 PANEL_PRESETS: Dict[str, List[str]] = {
-    "1": ["summary", "trace_list", "trace_detail", "reasoning_stream", "request_detail", "reasoning_health", "video"],
-    "2": ["summary", "trace_list", "trace_detail", "reasoning_stream", "request_detail", "logs", "warnings", "transport"],
+    "1": [
+        "summary",
+        "quality",
+        "query",
+        "trace_list",
+        "trace_detail",
+        "reasoning_stream",
+        "request_detail",
+        "reasoning_health",
+        "video",
+    ],
+    "2": [
+        "summary",
+        "quality",
+        "query",
+        "trace_list",
+        "trace_detail",
+        "reasoning_stream",
+        "request_detail",
+        "logs",
+        "warnings",
+        "transport",
+    ],
     "3": ["summary", "trace_list", "trace_detail", "video", "perception", "action", "system", "events"],
 }
 
@@ -941,6 +971,49 @@ def _percentile(values: List[float], pct: float) -> Optional[float]:
     return ordered[idx]
 
 
+def _query_text_match(query: str, text: str) -> bool:
+    tokens = [tok for tok in str(query or "").strip().split() if tok]
+    if not tokens:
+        return True
+    hay = str(text or "").lower()
+    return all(token.lower() in hay for token in tokens)
+
+
+def _build_in_memory_query_rows(state: DashboardState, *, limit: int) -> List[Dict[str, Any]]:
+    lim = max(1, int(limit))
+    rows: List[Dict[str, Any]] = []
+    for seq, event in reversed(state._iter_reasoning_with_seq()):
+        text = " ".join(
+            [
+                str(event.source or ""),
+                str(event.phase or ""),
+                str(event.status or ""),
+                str(event.severity or ""),
+                str(event.req_id if event.req_id is not None else ""),
+                str(event.snippet or ""),
+            ]
+        )
+        if not _query_text_match(state.query_text, text):
+            continue
+        rows.append(
+            {
+                "kind": "reasoning",
+                "id": seq,
+                "req_id": event.req_id,
+                "status": event.status,
+                "severity": event.severity,
+                "summary": format_reasoning_snippet(
+                    event.snippet,
+                    max_chars=120,
+                    redact=False,
+                ),
+            }
+        )
+        if len(rows) >= lim:
+            break
+    return rows
+
+
 def _render_reasoning_stream(lines: List[str], state: DashboardState, args: argparse.Namespace) -> None:
     lines.append(f"{_focus_prefix(state, 'reasoning_stream')}Reasoning Stream")
     filtered = state.filtered_reasoning_events(slow_ms=float(args.reasoning_slow_ms))
@@ -1078,11 +1151,73 @@ def _render_trace_detail(lines: List[str], state: DashboardState, args: argparse
     lines.append("")
 
 
+def _render_quality_panel(lines: List[str], state: DashboardState) -> None:
+    lines.append(f"{_focus_prefix(state, 'quality')}Quality")
+    report = state.quality_report
+    if report is None:
+        lines.append("  no quality report loaded")
+        if state.quality_gate_note:
+            lines.append(f"  gate={state.quality_gate_note}")
+        lines.append("")
+        return
+    score = report.get("score")
+    grade = report.get("grade")
+    lines.append(f"  grade={grade} score={score}")
+    metrics = report.get("metrics")
+    if isinstance(metrics, dict):
+        lines.append(
+            "  "
+            f"events={metrics.get('event_count')} reasoning={metrics.get('reasoning_count')} "
+            f"traces={metrics.get('trace_count')} errors={metrics.get('reasoning_errors')}"
+        )
+        lines.append(
+            "  "
+            f"p50={metrics.get('latency_ms_p50')}ms p95={metrics.get('latency_ms_p95')}ms "
+            f"slow={metrics.get('reasoning_slow')}"
+        )
+    if state.quality_gate_note:
+        lines.append(f"  gate={state.quality_gate_note}")
+    lines.append("")
+
+
+def _render_query_panel(lines: List[str], state: DashboardState, args: argparse.Namespace) -> None:
+    lines.append(f"{_focus_prefix(state, 'query')}Query")
+    query_text = str(state.query_text or "")
+    if not query_text:
+        lines.append("  no query (set --query)")
+        lines.append("")
+        return
+    lines.append(f"  expr={query_text}")
+    if state.query_note:
+        lines.append(f"  note={_shorten(state.query_note, 120)}")
+    if not state.query_rows:
+        lines.append("  no matches")
+        lines.append("")
+        return
+    for row in state.query_rows[: max(1, int(args.query_limit))]:
+        req = row.get("req_id")
+        trace_id = row.get("trace_id")
+        status = row.get("status")
+        severity = row.get("severity")
+        summary = row.get("summary")
+        lines.append(
+            f"  [{row.get('kind')}] id={row.get('id')} trace={trace_id or '-'} req={req if req is not None else '-'} "
+            f"status={status or '-'} sev={severity or '-'}"
+        )
+        if summary:
+            lines.append(f"    {_shorten(str(summary), 150)}")
+    lines.append("")
+
+
 def _panel_enabled(args: argparse.Namespace, panel: str) -> bool:
     selected = getattr(args, "panel", None)
     if not selected:
         return True
     return panel in set(selected)
+
+
+def _can_preload_trace_index(*, field_filters: List[Any]) -> bool:
+    return len(field_filters) == 0
 
 
 def _render(state: DashboardState, *, now_wall_s: float, args: argparse.Namespace) -> str:
@@ -1113,6 +1248,14 @@ def _render(state: DashboardState, *, now_wall_s: float, args: argparse.Namespac
             f"count={len(state.trace_records)} selected={(selected_trace.trace_id if selected_trace else 'n/a')} "
             f"pinned={(state.trace_pinned_id or 'none')}"
         )
+        if state.quality_report is not None:
+            lines.append(
+                "Quality: "
+                f"grade={state.quality_report.get('grade')} score={state.quality_report.get('score')} "
+                f"gate={state.quality_gate_note or 'n/a'}"
+            )
+        if state.query_text:
+            lines.append(f"Query: '{state.query_text}' matches={len(state.query_rows)}")
         lines.append("")
 
     if _panel_enabled(args, "reasoning_stream"):
@@ -1129,6 +1272,12 @@ def _render(state: DashboardState, *, now_wall_s: float, args: argparse.Namespac
 
     if _panel_enabled(args, "trace_detail"):
         _render_trace_detail(lines, state, args)
+
+    if _panel_enabled(args, "quality"):
+        _render_quality_panel(lines, state)
+
+    if _panel_enabled(args, "query"):
+        _render_query_panel(lines, state, args)
 
     if _panel_enabled(args, "video"):
         lines.append(f"{_focus_prefix(state, 'video')}Video")
@@ -1327,6 +1476,8 @@ def _build_parser() -> argparse.ArgumentParser:
         default=[],
         choices=[
             "summary",
+            "quality",
+            "query",
             "trace_list",
             "trace_detail",
             "reasoning_stream",
@@ -1397,7 +1548,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--agent-capture-dir", default="", help="Remote capture directory on Jetson for agent-side capture.")
     parser.add_argument("--capture-frames", choices=["off", "keyframes", "all"], default="off")
     parser.add_argument("--capture-max-seconds", type=float, default=0.0)
-    parser.add_argument("--capture-manifest-version", type=int, default=1)
+    parser.add_argument("--capture-manifest-version", type=int, default=TELEMETRY_SCHEMA_VERSION_V3)
     parser.add_argument("--save-session", default="", help="Local capture directory on Mac for viewer-side session bundle.")
     parser.add_argument("--replay", default="", help="Replay an existing local capture directory instead of SSH live mode.")
     parser.add_argument("--replay-speed", type=float, default=1.0)
@@ -1409,6 +1560,15 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reasoning-slow-ms", type=float, default=2000.0)
     parser.add_argument("--trace-match-window-s", type=float, default=2.0)
     parser.add_argument("--trace-max-events", type=int, default=1000)
+    parser.add_argument("--index-mode", choices=["auto", "off", "sqlite"], default="auto")
+    parser.add_argument("--query", default="", help="Optional query against indexed telemetry (for replay/session DB).")
+    parser.add_argument("--query-limit", type=int, default=10, help="Max rows shown in query panel.")
+    parser.add_argument(
+        "--quality-gate",
+        choices=["off", "warn", "strict"],
+        default="off",
+        help="Apply quality gate status to loaded replay/capture quality report.",
+    )
     return parser
 
 
@@ -1430,6 +1590,8 @@ def main() -> int:
         if args.ui_mode == "reasoning":
             args.panel = [
                 "summary",
+                "quality",
+                "query",
                 "trace_list",
                 "trace_detail",
                 "reasoning_stream",
@@ -1460,6 +1622,7 @@ def main() -> int:
 
     state = DashboardState(host=args.jetson_host, max_frame_bytes=max(0, int(args.max_frame_bytes)))
     state.configure_panels(args.panel, focus_panel=str(args.focus_panel or ""))
+    state.query_text = str(args.query or "").strip()
     if args.ui_mode == "reasoning":
         if "trace_list" in args.panel:
             state.focus_panel = "trace_list"
@@ -1490,9 +1653,12 @@ def main() -> int:
     stale_timeout_s = max(2.0, float(args.stale_timeout_s))
     refresh_s = 1.0 / max(1.0, float(args.refresh_hz))
     last_draw = 0.0
+    last_query_refresh_s = 0.0
+    session_db_path = ""
     capture_writer: Optional[SessionCaptureWriter] = None
     save_session_dir = str(args.save_session or "").strip()
     if save_session_dir:
+        session_db_path = resolve_session_db_path(save_session_dir)
         cfg = CaptureConfig(
             directory=save_session_dir,
             frames_mode=args.capture_frames,
@@ -1519,6 +1685,12 @@ def main() -> int:
         next_connect_time = time.time() + delay
         state.connection_note = f"{reason}; retry in {delay:.1f}s"
 
+    def _apply_quality_gate() -> None:
+        passed, note = evaluate_quality_gate(state.quality_report, str(args.quality_gate))
+        state.quality_gate_passed = passed
+        state.quality_gate_note = note
+
+    _apply_quality_gate()
     video_window = _init_video_window(args, state)
 
     if replay_mode:
@@ -1528,16 +1700,49 @@ def main() -> int:
         state.connected = True
         state.connection_note = f"replay from {replay_dir}"
         replay_reader = SessionReplayReader(replay_dir)
-        try:
-            trace_index_path = resolve_trace_index_path(replay_dir, replay_reader.manifest)
-            if os.path.exists(trace_index_path):
-                preloaded_traces = load_trace_index(trace_index_path)
-                state.set_traces(preloaded_traces)
-                if preloaded_traces:
-                    using_preloaded_trace_index = True
-                    state.logs.append(f"preloaded {len(preloaded_traces)} traces from trace index")
-        except Exception as exc:
-            state.warnings.append(f"trace_index_load_failed: {exc!r}")
+        session_db_path = resolve_session_db_path(replay_dir)
+        state.quality_report = load_quality_report(replay_dir)
+        _apply_quality_gate()
+        if not _can_preload_trace_index(field_filters=field_filters):
+            state.logs.append("trace index preload disabled because field filters are active")
+        else:
+            try:
+                trace_index_path = resolve_trace_index_path(replay_dir, replay_reader.manifest)
+                if os.path.exists(trace_index_path):
+                    preloaded_traces = load_trace_index(trace_index_path)
+                    state.set_traces(preloaded_traces)
+                    if preloaded_traces:
+                        using_preloaded_trace_index = True
+                        state.logs.append(f"preloaded {len(preloaded_traces)} traces from trace index")
+            except Exception as exc:
+                state.warnings.append(f"trace_index_load_failed: {exc!r}")
+        if state.query_text:
+            if args.index_mode == "off":
+                state.query_note = "query index disabled (--index-mode off)"
+                state.query_rows = _build_in_memory_query_rows(state, limit=int(args.query_limit))
+            else:
+                try:
+                    query_out = query_session_db(
+                        session_db_path if os.path.exists(session_db_path) else replay_dir,
+                        query=state.query_text,
+                        limit=int(args.query_limit),
+                    )
+                    state.query_rows = [
+                        {
+                            "kind": "event",
+                            "id": row.get("seq"),
+                            "trace_id": row.get("trace_id"),
+                            "req_id": row.get("req_id"),
+                            "status": row.get("status"),
+                            "severity": row.get("severity"),
+                            "summary": row.get("snippet"),
+                        }
+                        for row in query_out.get("events", [])
+                    ]
+                    state.query_note = f"sqlite: {len(state.query_rows)} event matches"
+                except Exception as exc:
+                    state.query_note = f"sqlite query failed: {exc!r}"
+                    state.query_rows = _build_in_memory_query_rows(state, limit=int(args.query_limit))
         replay_thread = threading.Thread(
             target=_replay_loop,
             kwargs={
@@ -1641,6 +1846,50 @@ def main() -> int:
                     capture_writer.close()
                     capture_writer = None
                     state.logs.append("local capture stopped: max_seconds_elapsed")
+                    if save_session_dir:
+                        state.quality_report = load_quality_report(save_session_dir)
+                        _apply_quality_gate()
+
+        if state.query_text and (now - last_query_refresh_s) >= 1.0:
+            last_query_refresh_s = now
+            if args.index_mode == "off":
+                state.query_rows = _build_in_memory_query_rows(state, limit=int(args.query_limit))
+                state.query_note = "memory query (index disabled)"
+            else:
+                lookup_root = ""
+                if session_db_path and os.path.exists(session_db_path):
+                    lookup_root = session_db_path
+                elif replay_mode and os.path.isdir(str(args.replay).strip()):
+                    lookup_root = str(args.replay).strip()
+                elif save_session_dir and os.path.isdir(save_session_dir):
+                    lookup_root = save_session_dir
+
+                if lookup_root:
+                    try:
+                        query_out = query_session_db(
+                            lookup_root,
+                            query=state.query_text,
+                            limit=int(args.query_limit),
+                        )
+                        state.query_rows = [
+                            {
+                                "kind": "event",
+                                "id": row.get("seq"),
+                                "trace_id": row.get("trace_id"),
+                                "req_id": row.get("req_id"),
+                                "status": row.get("status"),
+                                "severity": row.get("severity"),
+                                "summary": row.get("snippet"),
+                            }
+                            for row in query_out.get("events", [])
+                        ]
+                        state.query_note = f"sqlite query matches={len(state.query_rows)}"
+                    except Exception as exc:
+                        state.query_rows = _build_in_memory_query_rows(state, limit=int(args.query_limit))
+                        state.query_note = f"sqlite query fallback: {exc!r}"
+                else:
+                    state.query_rows = _build_in_memory_query_rows(state, limit=int(args.query_limit))
+                    state.query_note = "memory query (session db unavailable)"
 
         if (not replay_mode) and proc is not None and proc.poll() is None:
             stale_ref_s = state.last_rx_wall_s
@@ -1694,6 +1943,11 @@ def main() -> int:
         replay_thread.join(timeout=1.0)
     if capture_writer is not None:
         capture_writer.close()
+    if save_session_dir:
+        loaded_quality = load_quality_report(save_session_dir)
+        if loaded_quality is not None:
+            state.quality_report = loaded_quality
+            _apply_quality_gate()
     key_reader.stop()
 
     if video_window is not None:
@@ -1703,6 +1957,8 @@ def main() -> int:
             pass
 
     print("\n")
+    if str(args.quality_gate) == "strict" and state.quality_gate_passed is not True:
+        return 2
     return 0
 
 

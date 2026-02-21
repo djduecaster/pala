@@ -8,11 +8,20 @@ import socket
 import time
 from typing import Any, Dict, List, Optional
 
+from .labels import derive_weak_labels, write_labels_jsonl
+from .quality import build_quality_report, write_quality_report
 from .reasoning import format_reasoning_snippet, normalize_reasoning_message
+from .schema_v3 import (
+    QUALITY_REPORT_PATH,
+    TELEMETRY_SCHEMA_VERSION_V3,
+    WEAK_LABELS_PATH,
+    upgrade_manifest_v3,
+)
+from .storage_sqlite import build_session_db
 from .trace_graph import TraceGraphBuilder
 
 
-MANIFEST_SCHEMA_VERSION = 1
+MANIFEST_SCHEMA_VERSION = TELEMETRY_SCHEMA_VERSION_V3
 
 
 @dataclass
@@ -46,6 +55,7 @@ class SessionCaptureWriter:
         self._bytes_written = 0
         self._index: List[Dict[str, Any]] = []
         self._reasoning_index: List[Dict[str, Any]] = []
+        self._source_counts: Dict[str, int] = {}
         self._trace_builder = TraceGraphBuilder(
             match_window_s=float(cfg.trace_match_window_s),
             max_events=int(cfg.trace_max_events),
@@ -109,8 +119,10 @@ class SessionCaptureWriter:
             return False
 
         line_obj = json.loads(json.dumps(msg, ensure_ascii=True))
+        source = str(line_obj.get("source", "unknown"))
+        self._source_counts[source] = self._source_counts.get(source, 0) + 1
         payload = line_obj.get("payload")
-        if isinstance(payload, dict) and line_obj.get("source") == "video_frame":
+        if isinstance(payload, dict) and source == "video_frame":
             self._store_frame(self._event_count, payload)
         reasoning_event = normalize_reasoning_message(line_obj)
         if reasoning_event is not None:
@@ -123,6 +135,7 @@ class SessionCaptureWriter:
                     "phase": reasoning_event.phase,
                     "status": reasoning_event.status,
                     "latency_ms": reasoning_event.latency_ms,
+                    "confidence": reasoning_event.confidence,
                     "severity": reasoning_event.severity,
                     "snippet": format_reasoning_snippet(
                         reasoning_event.snippet,
@@ -153,6 +166,7 @@ class SessionCaptureWriter:
             json.dump({"frames": self._index}, fh, separators=(",", ":"), ensure_ascii=True)
         with open(self._reasoning_index_path, "w", encoding="utf-8") as fh:
             json.dump({"events": self._reasoning_index}, fh, separators=(",", ":"), ensure_ascii=True)
+        trace_records = self._trace_builder.traces()
         trace_index = self._trace_builder.build_trace_index()
         with open(self._trace_index_path, "w", encoding="utf-8") as fh:
             json.dump(trace_index, fh, separators=(",", ":"), ensure_ascii=True)
@@ -174,7 +188,41 @@ class SessionCaptureWriter:
             "stored_frame_bytes": self._bytes_written,
             "frames_mode": str(self._cfg.frames_mode),
             "trace_match_window_s": float(self._cfg.trace_match_window_s),
+            "source_counts": dict(self._source_counts),
             "metadata": self._cfg.metadata,
         }
+
+        index_summary: Optional[Dict[str, Any]] = None
+        try:
+            index_summary = build_session_db(self._dir, replace=True)
+        except Exception as exc:
+            manifest.setdefault("v3_artifact_errors", []).append(f"session_db: {exc!r}")
+
+        weak_label_count: Optional[int] = None
+        try:
+            labels = derive_weak_labels(reasoning_index=self._reasoning_index, traces=trace_records)
+            labels_path = os.path.join(self._dir, WEAK_LABELS_PATH)
+            weak_label_count = write_labels_jsonl(labels_path, labels)
+        except Exception as exc:
+            manifest.setdefault("v3_artifact_errors", []).append(f"weak_labels: {exc!r}")
+
+        quality_report = None
+        try:
+            quality_report = build_quality_report(
+                event_count=self._event_count,
+                source_counts=self._source_counts,
+                reasoning_index=self._reasoning_index,
+                traces=trace_records,
+            )
+            write_quality_report(self._dir, quality_report, filename=QUALITY_REPORT_PATH)
+        except Exception as exc:
+            manifest.setdefault("v3_artifact_errors", []).append(f"quality_report: {exc!r}")
+
+        manifest = upgrade_manifest_v3(
+            manifest,
+            index_summary=index_summary,
+            quality_report=quality_report,
+            weak_label_count=weak_label_count,
+        )
         with open(self._manifest_path, "w", encoding="utf-8") as fh:
             json.dump(manifest, fh, separators=(",", ":"), ensure_ascii=True)

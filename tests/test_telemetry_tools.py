@@ -20,6 +20,7 @@ from tools.telemetry.jetson_agent import _TapVideoSource, _encode_jpeg_frame, _p
 from tools.telemetry.filters import parse_field_filter, matches_field_filters
 from tools.telemetry.mac_viewer import (
     _apply_panel_preset,
+    _can_preload_trace_index,
     DashboardState,
     _build_parser,
     _build_remote_agent_command,
@@ -28,8 +29,13 @@ from tools.telemetry.mac_viewer import (
 )
 from tools.telemetry.packs import resolve_packs, apply_pack_overrides
 from tools.telemetry.capture import CaptureConfig, SessionCaptureWriter
+from tools.telemetry.dataset_export import export_dataset_rows
 from tools.telemetry.replay import SessionReplayReader
 from tools.telemetry.reasoning import format_reasoning_snippet, normalize_reasoning_message, redact_reasoning_text
+from tools.telemetry.quality import evaluate_quality_gate, load_quality_report
+from tools.telemetry.labels import load_labels_jsonl
+from tools.telemetry.schema_v3 import TELEMETRY_SCHEMA_VERSION_V3
+from tools.telemetry.storage_sqlite import build_session_db, query_session_db, resolve_session_db_path
 from tools.telemetry.trace_graph import TraceGraphBuilder, TraceRecord, load_trace_index
 
 
@@ -273,8 +279,185 @@ def test_capture_and_replay_roundtrip(tmp_path):
     loaded_traces = load_trace_index(str(session_dir / "trace_index.json"))
     assert isinstance(loaded_traces, list)
     manifest = json.loads((session_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest.get("schema_version") == TELEMETRY_SCHEMA_VERSION_V3
     assert manifest.get("trace_index_path") == "trace_index.json"
     assert isinstance(manifest.get("trace_count"), int)
+    assert (session_dir / "session.db").exists()
+    assert (session_dir / "quality_report.json").exists()
+    assert (session_dir / "labels.weak.jsonl").exists()
+
+
+def test_session_db_query_and_quality_gate(tmp_path):
+    session_dir = tmp_path / "session"
+    writer = SessionCaptureWriter(CaptureConfig(directory=str(session_dir), frames_mode="off", max_seconds=0.0))
+    writer.write(
+        {
+            "type": "event",
+            "source": "timeline_log",
+            "ts_wall_s": time.time(),
+            "payload": {
+                "data": {
+                    "type": "req_end",
+                    "payload": {
+                        "request_id": 42,
+                        "status": "parse_fail",
+                        "latency_ms": 3200,
+                        "reasoning": "parse failed after timeout",
+                    },
+                }
+            },
+        }
+    )
+    writer.close()
+
+    db_path = resolve_session_db_path(str(session_dir))
+    out = query_session_db(db_path, query="status:parse_fail req:42", limit=10)
+    assert out["events"]
+    assert out["events"][0]["req_id"] == 42
+
+    quality = load_quality_report(str(session_dir))
+    assert quality is not None
+    passed_warn, _ = evaluate_quality_gate(quality, "warn")
+    assert isinstance(passed_warn, bool)
+
+
+def test_dataset_export_from_weak_labels(tmp_path):
+    session_dir = tmp_path / "session"
+    writer = SessionCaptureWriter(CaptureConfig(directory=str(session_dir), frames_mode="off", max_seconds=0.0))
+    writer.write(
+        {
+            "type": "event",
+            "source": "timeline_log",
+            "ts_wall_s": time.time(),
+            "payload": {"data": {"type": "req_end", "payload": {"request_id": 7, "status": "parse_fail"}}},
+        }
+    )
+    writer.close()
+
+    labels = load_labels_jsonl(str(session_dir / "labels.weak.jsonl"))
+    assert labels
+
+    exported = export_dataset_rows(str(session_dir), include_unlabeled=False, min_label_confidence=0.5)
+    assert exported["row_count"] >= 1
+    assert pathlib.Path(exported["output_path"]).exists()
+
+
+def test_query_trace_filter_scopes_event_results(tmp_path):
+    session_dir = tmp_path / "session"
+    writer = SessionCaptureWriter(CaptureConfig(directory=str(session_dir), frames_mode="off", max_seconds=0.0))
+    writer.write(
+        {
+            "type": "event",
+            "source": "journal",
+            "ts_wall_s": time.time(),
+            "payload": {"line": "generic warning without req id"},
+            "level": "warning",
+        }
+    )
+    writer.close()
+    out = query_session_db(str(session_dir), query="trace:req:999", limit=10)
+    assert out["events"] == []
+
+
+def test_capture_reasoning_index_includes_confidence(tmp_path):
+    session_dir = tmp_path / "session"
+    writer = SessionCaptureWriter(CaptureConfig(directory=str(session_dir), frames_mode="off", max_seconds=0.0))
+    writer.write(
+        {
+            "type": "event",
+            "source": "actions_log",
+            "ts_wall_s": time.time(),
+            "payload": {"data": {"primitive": "hold", "confidence": 0.2}},
+        }
+    )
+    writer.close()
+    reasoning_index = json.loads((session_dir / "reasoning_index.json").read_text(encoding="utf-8"))
+    assert reasoning_index["events"][0].get("confidence") == 0.2
+
+
+def test_manifest_trace_index_override_used_for_index_and_export(tmp_path):
+    session_dir = tmp_path / "session"
+    session_dir.mkdir(parents=True, exist_ok=True)
+
+    event = {
+        "type": "event",
+        "source": "timeline_log",
+        "ts_wall_s": 1.0,
+        "payload": {"data": {"type": "req_end", "payload": {"status": "ok", "reasoning": "done"}}},
+    }
+    (session_dir / "events.jsonl").write_text(json.dumps(event) + "\n", encoding="utf-8")
+    (session_dir / "reasoning_index.json").write_text(
+        json.dumps(
+            {
+                "events": [
+                    {
+                        "event_index": 0,
+                        "source": "timeline_log",
+                        "ts_wall_s": 1.0,
+                        "req_id": 99,
+                        "phase": "req_end",
+                        "status": "ok",
+                        "severity": "info",
+                        "snippet": "done",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    (session_dir / "labels.weak.jsonl").write_text(
+        json.dumps({"event_index": 0, "label": "trace_failure", "confidence": 0.7}) + "\n",
+        encoding="utf-8",
+    )
+    (session_dir / "manifest.json").write_text(
+        json.dumps({"trace_index_path": "alt_trace.json", "event_count": 1}),
+        encoding="utf-8",
+    )
+    (session_dir / "alt_trace.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "traces": [
+                    {
+                        "trace_id": "req:99",
+                        "req_id": 99,
+                        "start_ts_wall_s": 1.0,
+                        "end_ts_wall_s": 1.1,
+                        "duration_ms": 100.0,
+                        "status": "ok",
+                        "severity": "info",
+                        "summary": "manual trace",
+                        "event_refs": [
+                            {
+                                "event_index": 0,
+                                "source": "timeline_log",
+                                "ts_wall_s": 1.0,
+                                "req_id": 99,
+                                "phase": "req_end",
+                                "status": "ok",
+                                "latency_ms": None,
+                                "severity": "info",
+                                "summary": "manual trace",
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    summary = build_session_db(str(session_dir))
+    assert summary["trace_count"] == 1
+    out = query_session_db(str(session_dir), query="trace:req:99", limit=10)
+    assert len(out["events"]) == 1
+    assert out["events"][0].get("trace_id") == "req:99"
+
+    exported = export_dataset_rows(str(session_dir), include_unlabeled=False, min_label_confidence=0.6)
+    lines = (session_dir / "dataset_rows.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    assert exported["row_count"] == 1
+    row = json.loads(lines[0])
+    assert row.get("trace_id") == "req:99"
 
 
 def test_replay_rejects_frame_ref_path_traversal(tmp_path):
@@ -477,3 +660,24 @@ def test_trace_graph_splits_far_events():
     b.ingest({"seq": 2, "source": "journal", "ts_wall_s": 10.0, "payload": {"line": "error second failure"}, "level": "warning"})
     traces = b.traces()
     assert len(traces) == 2
+
+
+def test_trace_graph_extracts_id_from_orchestrator_text():
+    b = TraceGraphBuilder(match_window_s=2.0, max_events=100)
+    b.ingest(
+        {
+            "seq": 1,
+            "source": "journal",
+            "ts_wall_s": 1.0,
+            "payload": {"line": "orchestrator timeout id=77 while waiting"},
+            "level": "warning",
+        }
+    )
+    traces = b.traces()
+    assert len(traces) == 1
+    assert traces[0].req_id == 77
+
+
+def test_can_preload_trace_index_requires_no_field_filters():
+    assert _can_preload_trace_index(field_filters=[]) is True
+    assert _can_preload_trace_index(field_filters=[object()]) is False

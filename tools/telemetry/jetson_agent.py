@@ -21,6 +21,7 @@ from tools.telemetry.capture import CaptureConfig, SessionCaptureWriter
 from tools.telemetry.filters import FieldFilter, matches_field_filters, parse_field_filters
 from tools.telemetry.packs import apply_pack_overrides, list_packs, resolve_packs
 from tools.telemetry.protocol import encode_message, event
+from tools.telemetry.schema_v3 import TELEMETRY_SCHEMA_VERSION_V3
 
 
 class DropCounter:
@@ -828,7 +829,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--capture-dir", default="", help="Optional capture bundle output directory.")
     parser.add_argument("--capture-frames", choices=["off", "keyframes", "all"], default="off")
     parser.add_argument("--capture-max-seconds", type=float, default=0.0)
-    parser.add_argument("--capture-manifest-version", type=int, default=1)
+    parser.add_argument("--capture-manifest-version", type=int, default=TELEMETRY_SCHEMA_VERSION_V3)
     parser.add_argument("--trace-match-window-s", type=float, default=2.0)
     return parser
 
