@@ -13,8 +13,13 @@
    - Updates latest frame cache for remote planner image payloads.
 
 2. **Behavior Loop (2-5 Hz)**
-   - Calls planner and emits `ActionPlan`.
-   - If planner declares `owns_semantic_behavior=True` (Cosmos orchestrator), behavior layer does not add extra local semantic triggers.
+   - Calls planner to get a candidate `ActionPlan`.
+   - Runs a **scene interpreter** (`person_entered`, `person_exited`, `zone_changed`) over local perception.
+   - Runs an **action governor** that keeps behavior interruptible and avoids persistent-action lockups:
+     - Forces cancellation when switching away from persistent primitives (`hold`/`breath`),
+     - Injects zone-tracking nudges on meaningful zone transitions,
+     - Refreshes prolonged `hold`/`breath` into finite tracking motion when a person is present.
+   - Emits the governed `ActionPlan` to control.
 
 3. **Control Loop (50-100 Hz)**
    - Converts `ActionPlan` to smoothed joint trajectories in `HardwareCommand`.
@@ -48,6 +53,7 @@ Planner context intentionally avoids feeding raw local detector belief packets d
 
 ## Remote/Local Behavior Contract
 - If Cosmos is enabled and reachable, planner runs in remote-first mode.
+- Behavior layer remains active even in orchestrator-owned mode, but only for execution governance (not semantic replacement).
 - No local semantic substitute decision is generated when a remote response fails parse/validation; system keeps prior action (or initial neutral hold).
 - Decision prompt enforces a stepwise decision tree (safety -> change -> opportunity -> selection).
 - Planner may request `frame_fetch` before returning a strict action JSON.
