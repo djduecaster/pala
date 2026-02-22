@@ -6,22 +6,57 @@ import json
 import os
 import socket
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from .labels import derive_weak_labels, write_labels_jsonl
 from .quality import build_quality_report, write_quality_report
 from .reasoning import format_reasoning_snippet, normalize_reasoning_message
 from .schema_v3 import (
+    INTEGRITY_REPORT_PATH,
     QUALITY_REPORT_PATH,
+    REASONING_TRACE_INDEX_PATH,
     TELEMETRY_SCHEMA_VERSION_V3,
     WEAK_LABELS_PATH,
     upgrade_manifest_v3,
 )
+from .integrity import build_integrity_report, verify_integrity_report, write_integrity_report
 from .storage_sqlite import build_session_db
+from .trace_join import build_reasoning_trace_index, write_reasoning_trace_index
 from .trace_graph import TraceGraphBuilder
 
 
 MANIFEST_SCHEMA_VERSION = TELEMETRY_SCHEMA_VERSION_V3
+
+
+def _iter_events_for_trace_rebuild(events_path: str) -> Iterable[Dict[str, Any]]:
+    with open(events_path, "r", encoding="utf-8", errors="replace") as fh:
+        for idx, line in enumerate(fh):
+            text = line.strip()
+            if not text:
+                continue
+            try:
+                msg = json.loads(text)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(msg, dict):
+                continue
+            msg.setdefault("seq", idx)
+            yield msg
+
+
+def _build_trace_artifacts_from_events(
+    events_path: str,
+    *,
+    match_window_s: float,
+    expected_event_count: int = 0,
+) -> Tuple[List[Any], Dict[str, Any]]:
+    builder = TraceGraphBuilder(
+        match_window_s=max(0.1, float(match_window_s)),
+        max_events=max(128, int(expected_event_count) + 8),
+    )
+    for msg in _iter_events_for_trace_rebuild(events_path):
+        builder.ingest(msg)
+    return builder.traces(), builder.build_trace_index()
 
 
 @dataclass
@@ -32,6 +67,9 @@ class CaptureConfig:
     manifest_version: int = MANIFEST_SCHEMA_VERSION
     trace_match_window_s: float = 2.0
     trace_max_events: int = 20_000
+    index_live_every: int = 0
+    index_live_min_interval_s: float = 5.0
+    integrity_enabled: bool = True
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -47,6 +85,7 @@ class SessionCaptureWriter:
         self._index_path = os.path.join(self._dir, "index.json")
         self._reasoning_index_path = os.path.join(self._dir, "reasoning_index.json")
         self._trace_index_path = os.path.join(self._dir, "trace_index.json")
+        self._reasoning_trace_index_path = os.path.join(self._dir, REASONING_TRACE_INDEX_PATH)
         self._frames_dir = os.path.join(self._dir, "frames")
         self._events_fh = None
         self._start_wall_s = time.time()
@@ -60,6 +99,9 @@ class SessionCaptureWriter:
             match_window_s=float(cfg.trace_match_window_s),
             max_events=int(cfg.trace_max_events),
         )
+        self._live_index_runs = 0
+        self._last_live_index_wall_s = 0.0
+        self._runtime_artifact_errors: List[str] = []
         self._closed = False
 
         os.makedirs(self._dir, exist_ok=True)
@@ -136,6 +178,8 @@ class SessionCaptureWriter:
                     "status": reasoning_event.status,
                     "latency_ms": reasoning_event.latency_ms,
                     "confidence": reasoning_event.confidence,
+                    "component": reasoning_event.component,
+                    "delta_score": reasoning_event.delta_score,
                     "severity": reasoning_event.severity,
                     "snippet": format_reasoning_snippet(
                         reasoning_event.snippet,
@@ -151,7 +195,28 @@ class SessionCaptureWriter:
         self._events_fh.write(encoded)
         self._events_fh.write("\n")
         self._event_count += 1
+        self._maybe_refresh_live_index()
         return True
+
+    def _maybe_refresh_live_index(self) -> None:
+        every = max(0, int(self._cfg.index_live_every))
+        if every <= 0:
+            return
+        if self._event_count <= 0 or (self._event_count % every) != 0:
+            return
+        now = time.time()
+        min_interval = max(0.0, float(self._cfg.index_live_min_interval_s))
+        if self._last_live_index_wall_s and (now - self._last_live_index_wall_s) < min_interval:
+            return
+        if self._events_fh is None:
+            return
+        try:
+            self._events_fh.flush()
+            build_session_db(self._dir, replace=True)
+            self._live_index_runs += 1
+            self._last_live_index_wall_s = now
+        except Exception as exc:
+            self._runtime_artifact_errors.append(f"live_index: {exc!r}")
 
     def close(self) -> None:
         if self._closed:
@@ -166,10 +231,23 @@ class SessionCaptureWriter:
             json.dump({"frames": self._index}, fh, separators=(",", ":"), ensure_ascii=True)
         with open(self._reasoning_index_path, "w", encoding="utf-8") as fh:
             json.dump({"events": self._reasoning_index}, fh, separators=(",", ":"), ensure_ascii=True)
+        artifact_errors: List[str] = list(self._runtime_artifact_errors)
         trace_records = self._trace_builder.traces()
         trace_index = self._trace_builder.build_trace_index()
+        try:
+            rebuilt_records, rebuilt_index = _build_trace_artifacts_from_events(
+                self._events_path,
+                match_window_s=float(self._cfg.trace_match_window_s),
+                expected_event_count=self._event_count,
+            )
+            trace_records = rebuilt_records
+            trace_index = rebuilt_index
+        except Exception as exc:
+            artifact_errors.append(f"trace_index_rebuild: {exc!r}")
         with open(self._trace_index_path, "w", encoding="utf-8") as fh:
             json.dump(trace_index, fh, separators=(",", ":"), ensure_ascii=True)
+        joined_index = build_reasoning_trace_index(self._dir, traces=trace_records)
+        write_reasoning_trace_index(self._dir, joined_index, filename=REASONING_TRACE_INDEX_PATH)
 
         manifest = {
             "schema_version": int(self._cfg.manifest_version),
@@ -185,6 +263,8 @@ class SessionCaptureWriter:
             "frame_count": self._frame_count,
             "reasoning_event_count": len(self._reasoning_index),
             "trace_count": len(trace_index.get("traces", [])),
+            "reasoning_trace_count": int(joined_index.get("row_count", 0)),
+            "live_index_runs": int(self._live_index_runs),
             "stored_frame_bytes": self._bytes_written,
             "frames_mode": str(self._cfg.frames_mode),
             "trace_match_window_s": float(self._cfg.trace_match_window_s),
@@ -196,7 +276,7 @@ class SessionCaptureWriter:
         try:
             index_summary = build_session_db(self._dir, replace=True)
         except Exception as exc:
-            manifest.setdefault("v3_artifact_errors", []).append(f"session_db: {exc!r}")
+            artifact_errors.append(f"session_db: {exc!r}")
 
         weak_label_count: Optional[int] = None
         try:
@@ -204,7 +284,7 @@ class SessionCaptureWriter:
             labels_path = os.path.join(self._dir, WEAK_LABELS_PATH)
             weak_label_count = write_labels_jsonl(labels_path, labels)
         except Exception as exc:
-            manifest.setdefault("v3_artifact_errors", []).append(f"weak_labels: {exc!r}")
+            artifact_errors.append(f"weak_labels: {exc!r}")
 
         quality_report = None
         try:
@@ -216,7 +296,10 @@ class SessionCaptureWriter:
             )
             write_quality_report(self._dir, quality_report, filename=QUALITY_REPORT_PATH)
         except Exception as exc:
-            manifest.setdefault("v3_artifact_errors", []).append(f"quality_report: {exc!r}")
+            artifact_errors.append(f"quality_report: {exc!r}")
+
+        if artifact_errors:
+            manifest["v3_artifact_errors"] = artifact_errors
 
         manifest = upgrade_manifest_v3(
             manifest,
@@ -224,5 +307,14 @@ class SessionCaptureWriter:
             quality_report=quality_report,
             weak_label_count=weak_label_count,
         )
+        if bool(self._cfg.integrity_enabled):
+            try:
+                integrity = build_integrity_report(self._dir)
+                write_integrity_report(self._dir, integrity, filename=INTEGRITY_REPORT_PATH)
+                verify = verify_integrity_report(self._dir)
+                manifest["integrity_ok"] = bool(verify.get("ok"))
+                manifest["integrity_checked_file_count"] = int(verify.get("checked_file_count", 0))
+            except Exception as exc:
+                manifest.setdefault("v3_artifact_errors", []).append(f"integrity: {exc!r}")
         with open(self._manifest_path, "w", encoding="utf-8") as fh:
             json.dump(manifest, fh, separators=(",", ":"), ensure_ascii=True)

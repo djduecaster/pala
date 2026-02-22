@@ -1,231 +1,119 @@
 from __future__ import annotations
 
-from collections import deque
 from dataclasses import dataclass
 import json
-import logging
-import os
+from pathlib import Path
 import threading
 import time
-from typing import Any, Deque, Iterable, Optional
-
-logger = logging.getLogger(__name__)
+from typing import Any, Dict, List, Optional
 
 
 @dataclass
 class MemoryManagerConfig:
-    enabled: bool = True
+    enabled: bool = False
     jsonl_path: str = "logs/orchestrator_memory.jsonl"
-    recent_events: int = 200
-    # Kept for compatibility with existing config; not used by current implementation.
-    digest_items: int = 0
-    distill_every_n_events: int = 0
+    recent_events: int = 20
+    digest_items: int = 3
+    distill_every_n_events: int = 20
 
 
 class MemoryManager:
-    """Canonical append-only memory stream with bounded in-memory cache."""
+    """Small local event memory used by planner/orchestrator paths."""
 
-    def __init__(self, cfg: MemoryManagerConfig):
-        self._cfg = cfg
+    def __init__(self, config: Optional[MemoryManagerConfig] = None):
+        self._cfg = config or MemoryManagerConfig()
         self._lock = threading.Lock()
-        self._recent: Deque[dict[str, Any]] = deque(maxlen=max(16, int(cfg.recent_events)))
-        self._digests: Deque[dict[str, Any]] = deque(maxlen=max(1, int(cfg.digest_items or 0)))
-        self._events_since_distill = 0
-        if self._cfg.enabled:
-            self._load_existing()
+        self._recent_events: List[Dict[str, Any]] = []
+        self._digests: List[Dict[str, Any]] = []
+        self._total_events = 0
+        self._load_existing_if_enabled()
 
-    def append_event(self, event_type: str, payload: dict[str, Any]) -> None:
+    def append_event(self, event_type: str, payload: Dict[str, Any]) -> None:
+        if not self._cfg.enabled:
+            return
         item = {
             "type": str(event_type),
             "ts_wall_s": time.time(),
-            "payload": payload if isinstance(payload, dict) else {},
+            "payload": dict(payload),
         }
-        new_digest: Optional[dict[str, Any]] = None
         with self._lock:
-            self._recent.append(item)
-            self._events_since_distill += 1
-            if self._cfg.distill_every_n_events > 0 and self._events_since_distill >= self._cfg.distill_every_n_events:
-                digest = _distill(self._recent)
-                self._events_since_distill = 0
+            self._recent_events.append(item)
+            if len(self._recent_events) > max(1, int(self._cfg.recent_events)):
+                self._recent_events = self._recent_events[-int(self._cfg.recent_events) :]
+            self._total_events += 1
+            self._append_jsonl_locked(item)
+
+            n = max(0, int(self._cfg.distill_every_n_events))
+            if n > 0 and (self._total_events % n) == 0:
+                digest = self._distill_locked()
                 if digest is not None:
                     self._digests.append(digest)
-                    new_digest = digest
-        if self._cfg.enabled:
-            self._append_jsonl(item)
-            if new_digest is not None:
-                self._append_jsonl(
-                    {
-                        "type": "summary_event",
-                        "ts_wall_s": time.time(),
-                        "payload": new_digest,
-                    }
-                )
+                    max_items = max(0, int(self._cfg.digest_items))
+                    if max_items > 0 and len(self._digests) > max_items:
+                        self._digests = self._digests[-max_items:]
+                    self._append_jsonl_locked(digest)
 
-    def recent_events(self, *, event_type: Optional[str] = None, limit: int = 10) -> list[dict[str, Any]]:
-        n = max(0, int(limit))
-        if n == 0:
-            return []
+    def context(self) -> Dict[str, Any]:
         with self._lock:
-            rows = list(self._recent)
-        if event_type is not None:
-            rows = [row for row in rows if row.get("type") == event_type]
-        return rows[-n:]
+            return {
+                "recent_events": list(self._recent_events),
+                "session_memory_digest": list(self._digests),
+            }
 
-    def recent_payloads(self, event_type: str, limit: int) -> list[dict[str, Any]]:
-        rows = self.recent_events(event_type=event_type, limit=limit)
-        out: list[dict[str, Any]] = []
-        for row in rows:
-            payload = row.get("payload")
-            if isinstance(payload, dict):
-                out.append(dict(payload))
-        return out
-
-    def recent_lines(
-        self,
-        *,
-        event_types: Iterable[str],
-        limit: int,
-        max_chars: int,
-    ) -> list[str]:
-        allowed = {str(t) for t in event_types}
-        n = max(0, int(limit))
-        if n == 0 or max_chars <= 0:
-            return []
-        with self._lock:
-            rows = [row for row in self._recent if str(row.get("type")) in allowed]
-        rows = rows[-n:]
-        lines: list[str] = []
-        for row in rows:
-            ts = row.get("ts_wall_s")
-            ts_str = time.strftime("%H:%M:%S", time.localtime(ts)) if isinstance(ts, (int, float)) else "00:00:00"
-            event_type = str(row.get("type", "event"))
-            payload = row.get("payload")
-            if isinstance(payload, dict):
-                compact = _compact_payload(payload)
-            else:
-                compact = "{}"
-            lines.append(f"{ts_str} {event_type}: {compact}")
-        while lines and sum(len(line) + 1 for line in lines) > max_chars:
-            lines.pop(0)
-        return lines
-
-    def context(self) -> dict[str, Any]:
-        with self._lock:
-            digests = list(self._digests)
-        return {
-            "recent_events": self.recent_events(limit=min(50, len(self._recent))),
-            "session_memory_digest": digests,
-        }
-
-    def stats(self) -> dict[str, int]:
-        return {
-            "recent_events": len(self._recent),
-            "digest_items": len(self._digests),
-        }
-
-    def _load_existing(self) -> None:
-        path = self._cfg.jsonl_path
-        if not path or not os.path.exists(path):
-            return
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                for line in f:
-                    raw = line.strip()
-                    if not raw:
-                        continue
-                    try:
-                        item = json.loads(raw)
-                    except json.JSONDecodeError:
-                        continue
-                    if not isinstance(item, dict):
-                        continue
-                    if not isinstance(item.get("payload"), dict):
-                        item["payload"] = {}
-                    if item.get("type") == "summary_event":
-                        self._digests.append(item.get("payload", {}))
-                    else:
-                        self._recent.append(item)
-        except OSError as exc:
-            logger.warning("memory manager load failed: %s", exc)
-
-    def _append_jsonl(self, item: dict[str, Any]) -> None:
-        path = self._cfg.jsonl_path
-        if not path:
-            return
-        directory = os.path.dirname(path)
-        if directory:
-            os.makedirs(directory, exist_ok=True)
-        try:
-            with open(path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(item, separators=(",", ":"), ensure_ascii=True))
-                f.write("\n")
-        except OSError as exc:
-            logger.warning("memory manager append failed: %s", exc)
-
-
-def _compact_payload(payload: dict[str, Any]) -> str:
-    preview: dict[str, Any] = {}
-    for key in (
-        "scene_state",
-        "state",
-        "intent",
-        "primitive",
-        "primitive_hint",
-        "target_zone",
-        "zone_hint",
-        "confidence",
-        "source",
-    ):
-        if key in payload:
-            preview[key] = payload[key]
-    if not preview:
-        preview = payload
-    try:
-        return json.dumps(preview, separators=(",", ":"), ensure_ascii=True)
-    except Exception:
-        return "{}"
-
-
-def _distill(events: Iterable[dict[str, Any]]) -> Optional[dict[str, Any]]:
-    state_counts: dict[str, int] = {}
-    zone_counts: dict[str, int] = {}
-    primitive_counts: dict[str, int] = {}
-    count = 0
-    for event in events:
-        payload = event.get("payload")
-        if not isinstance(payload, dict):
-            continue
-        count += 1
-        state = payload.get("state")
-        if isinstance(state, str) and state:
-            state_counts[state] = state_counts.get(state, 0) + 1
-        zone = payload.get("zone_hint")
-        if isinstance(zone, str) and zone:
-            zone_counts[zone] = zone_counts.get(zone, 0) + 1
-        primitive = payload.get("primitive")
-        if isinstance(primitive, str) and primitive:
-            primitive_counts[primitive] = primitive_counts.get(primitive, 0) + 1
-    if count == 0:
-        return None
-
-    def _top(counter: dict[str, int]) -> Optional[str]:
-        if not counter:
+    def _distill_locked(self) -> Optional[Dict[str, Any]]:
+        if not self._recent_events:
             return None
-        return max(counter.items(), key=lambda kv: kv[1])[0]
+        window = self._recent_events[-min(10, len(self._recent_events)) :]
+        states = [str(evt.get("payload", {}).get("state")) for evt in window if evt.get("payload")]
+        zones = [str(evt.get("payload", {}).get("zone_hint")) for evt in window if evt.get("payload")]
+        primitives = [str(evt.get("payload", {}).get("primitive")) for evt in window if evt.get("payload")]
+        payload = {
+            "window_events": len(window),
+            "highlights": [
+                f"dominant_state={_dominant(states)}",
+                f"dominant_zone={_dominant(zones)}",
+                f"dominant_primitive={_dominant(primitives)}",
+            ],
+        }
+        return {"type": "summary_event", "ts_wall_s": time.time(), "payload": payload}
 
-    highlights: list[str] = []
-    top_state = _top(state_counts)
-    top_zone = _top(zone_counts)
-    top_primitive = _top(primitive_counts)
-    if top_state is not None:
-        highlights.append(f"dominant_state={top_state}")
-    if top_zone is not None:
-        highlights.append(f"dominant_zone={top_zone}")
-    if top_primitive is not None:
-        highlights.append(f"dominant_primitive={top_primitive}")
-    if not highlights:
-        highlights.append("limited_signal")
-    return {
-        "window_events": count,
-        "highlights": highlights,
-    }
+    def _load_existing_if_enabled(self) -> None:
+        if not self._cfg.enabled:
+            return
+        path = Path(self._cfg.jsonl_path)
+        if not path.exists():
+            return
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            return
+        for line in lines:
+            try:
+                item = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(item, dict):
+                continue
+            self._total_events += 1
+            self._recent_events.append(item)
+        if self._recent_events:
+            self._recent_events = self._recent_events[-max(1, int(self._cfg.recent_events)) :]
+
+    def _append_jsonl_locked(self, item: Dict[str, Any]) -> None:
+        path = Path(self._cfg.jsonl_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(item, ensure_ascii=True) + "\n")
+
+
+def _dominant(values: List[str]) -> str:
+    counts: Dict[str, int] = {}
+    for value in values:
+        token = value.strip().lower() if isinstance(value, str) else ""
+        if not token or token in {"none", "null"}:
+            continue
+        counts[token] = counts.get(token, 0) + 1
+    if not counts:
+        return "unknown"
+    return max(counts.items(), key=lambda item: item[1])[0]
+

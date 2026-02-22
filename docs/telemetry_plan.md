@@ -5,7 +5,7 @@ Last updated: 2026-02-07
 ## Objective
 Design a Mac-run telemetry experience that streams live data from Jetson for debugging and demos:
 - Live video (reduced FPS/resolution acceptable)
-- Overlays from detector and planner/Cosmos-related decisions
+- Overlays from detector and runtime decision stream (TODO: updated schema after reset)
 - Important runtime variables and live logs
 - Sidecar-style implementation, separate from core control safety logic
 
@@ -18,7 +18,7 @@ Design a Mac-run telemetry experience that streams live data from Jetson for deb
 ## Required Telemetry Signals
 - Video frames: latest camera frame, target 5 to 15 FPS for viewer.
 - Perception: bbox/confidence, `fps`, `latency_ms`, detector health.
-- Behavior/planner: current primitive, confidence, explanation.
+- Behavior/planner: TODO after architecture reset.
 - Control/hardware: command age, deadman state, enable/disable state.
 - System: Jetson `tegrastats` summary (CPU/GPU/memory/temps/power).
 - Logs: filtered warnings/errors from runtime and DeepStream/GStreamer.

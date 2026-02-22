@@ -1,7 +1,7 @@
 # Legacy → New Structure Porting Plan
 
 ## Mode-Aligned Milestones (Planned)
-1. **dev**: all dummy backends; focus on behavior/planning quality and evaluation hooks.
+1. **dev**: all dummy backends; focus on core runtime verification.
 2. **jetson_perception**: on hold; needs careful design to avoid confusing closed-loop behavior.
 3. **jetson_full**: port control + servo backend; enable real motion with safety checks (near-term focus).
 
@@ -23,7 +23,7 @@
 1. **Hardware**: port camera + servos into Jetson-specific modules.
 2. **Perception**: port preprocess + detector/pose; keep dummy fallbacks.
 3. **Control**: port kinematics controller and primitives; wire into executor.
-4. **Behavior**: replace heuristic policy with Cosmos planner integration.
+4. **Behavior/Planner**: TODO (clean-slate reset in progress).
 
 ## Guardrails
 - Keep dummy implementations as defaults for Mac.

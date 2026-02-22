@@ -51,7 +51,14 @@ def test_dev_runtime_emits_perception_and_action(monkeypatch):
     assert result == 0
 
     assert any(getattr(st, "debug", {}).get("zone_hint") for st in perception_log.items)
-    assert any(getattr(a, "primitive", None) and a.primitive != PrimitiveKind.HOLD for a in action_log.items)
+    assert any(
+        isinstance(entry, dict)
+        and "ts_wall_s" in entry
+        and "action" in entry
+        and getattr(entry["action"], "primitive", None)
+        and entry["action"].primitive != PrimitiveKind.HOLD
+        for entry in action_log.items
+    )
 
 
 def test_hardware_respects_enable_false(monkeypatch):

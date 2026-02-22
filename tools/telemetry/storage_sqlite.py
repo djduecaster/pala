@@ -3,11 +3,14 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import shlex
 import time
+import re
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from .reasoning import format_reasoning_snippet, normalize_reasoning_message
 from .schema_v3 import SESSION_DB_PATH
+from .trace_join import build_reasoning_trace_rows
 from .trace_graph import TraceGraphBuilder, TraceRecord, load_trace_index, resolve_trace_index_path
 
 
@@ -137,6 +140,42 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_trace_events_trace ON trace_events(trace_id);
         CREATE INDEX IF NOT EXISTS idx_trace_events_event ON trace_events(event_index);
+
+        CREATE TABLE IF NOT EXISTS reasoning_traces (
+            row_id INTEGER PRIMARY KEY,
+            event_index INTEGER NOT NULL,
+            trace_id TEXT NOT NULL,
+            req_id INTEGER,
+            component TEXT,
+            source TEXT NOT NULL,
+            ts_wall_s REAL,
+            phase TEXT,
+            status TEXT,
+            severity TEXT,
+            latency_ms REAL,
+            primitive TEXT,
+            confidence REAL,
+            target_zone TEXT,
+            model TEXT,
+            provider TEXT,
+            delta_score REAL,
+            snippet TEXT,
+            input_preview TEXT,
+            output_preview TEXT,
+            perception_ts_wall_s REAL,
+            perception_person_conf REAL,
+            perception_zone_hint TEXT,
+            perception_frame_id INTEGER,
+            video_frame_event_index INTEGER,
+            video_frame_id INTEGER,
+            video_frame_ref TEXT,
+            video_frame_width INTEGER,
+            video_frame_height INTEGER
+        );
+        CREATE INDEX IF NOT EXISTS idx_reasoning_traces_trace ON reasoning_traces(trace_id);
+        CREATE INDEX IF NOT EXISTS idx_reasoning_traces_req ON reasoning_traces(req_id);
+        CREATE INDEX IF NOT EXISTS idx_reasoning_traces_comp ON reasoning_traces(component);
+        CREATE INDEX IF NOT EXISTS idx_reasoning_traces_ts ON reasoning_traces(ts_wall_s);
 
         CREATE TABLE IF NOT EXISTS meta (
             key TEXT PRIMARY KEY,
@@ -274,12 +313,15 @@ def build_session_db(
             )
         )
 
+    reasoning_trace_rows = build_reasoning_trace_rows(events, traces=traces)
+
     with sqlite3.connect(target_db) as conn:
         _ensure_schema(conn)
         conn.execute("DELETE FROM events")
         conn.execute("DELETE FROM reasoning")
         conn.execute("DELETE FROM traces")
         conn.execute("DELETE FROM trace_events")
+        conn.execute("DELETE FROM reasoning_traces")
         conn.execute("DELETE FROM meta")
 
         conn.executemany(
@@ -320,6 +362,54 @@ def build_session_db(
                     for trace in traces
                 ],
             )
+
+        if reasoning_trace_rows:
+            conn.executemany(
+                """
+                INSERT INTO reasoning_traces (
+                    row_id, event_index, trace_id, req_id, component, source, ts_wall_s, phase, status, severity,
+                    latency_ms, primitive, confidence, target_zone, model, provider, delta_score, snippet,
+                    input_preview, output_preview, perception_ts_wall_s, perception_person_conf, perception_zone_hint,
+                    perception_frame_id, video_frame_event_index, video_frame_id, video_frame_ref, video_frame_width,
+                    video_frame_height
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        int(row.get("row_id")),
+                        int(row.get("event_index")),
+                        _as_text(row.get("trace_id")),
+                        _as_int(row.get("req_id")),
+                        _as_text(row.get("component")),
+                        _as_text(row.get("source")),
+                        _as_float(row.get("ts_wall_s")),
+                        _as_text(row.get("phase")),
+                        _as_text(row.get("status")),
+                        _as_text(row.get("severity")),
+                        _as_float(row.get("latency_ms")),
+                        _as_text(row.get("primitive")),
+                        _as_float(row.get("confidence")),
+                        _as_text(row.get("target_zone")),
+                        _as_text(row.get("model")),
+                        _as_text(row.get("provider")),
+                        _as_float(row.get("delta_score")),
+                        _as_text(row.get("snippet")),
+                        _as_text(row.get("input_preview")),
+                        _as_text(row.get("output_preview")),
+                        _as_float(row.get("perception_ts_wall_s")),
+                        _as_float(row.get("perception_person_conf")),
+                        _as_text(row.get("perception_zone_hint")),
+                        _as_int(row.get("perception_frame_id")),
+                        _as_int(row.get("video_frame_event_index")),
+                        _as_int(row.get("video_frame_id")),
+                        _as_text(row.get("video_frame_ref")),
+                        _as_int(row.get("video_frame_width")),
+                        _as_int(row.get("video_frame_height")),
+                    )
+                    for row in reasoning_trace_rows
+                ],
+            )
+        if traces:
             conn.executemany(
                 """
                 INSERT INTO trace_events (
@@ -348,6 +438,7 @@ def build_session_db(
             ("event_count", str(len(event_rows))),
             ("reasoning_count", str(len(reasoning_rows))),
             ("trace_count", str(len(traces))),
+            ("reasoning_trace_count", str(len(reasoning_trace_rows))),
             ("source_counts_json", json.dumps(source_counts, separators=(",", ":"), ensure_ascii=True)),
         ]
         conn.executemany("INSERT INTO meta (key, value) VALUES (?, ?)", meta_rows)
@@ -358,6 +449,7 @@ def build_session_db(
         "event_count": len(event_rows),
         "reasoning_count": len(reasoning_rows),
         "trace_count": len(traces),
+        "reasoning_trace_count": len(reasoning_trace_rows),
         "source_counts": source_counts,
     }
 
@@ -370,21 +462,108 @@ def _parse_query_tokens(query: str) -> Dict[str, List[str]]:
         "phase": [],
         "req": [],
         "trace": [],
+        "component": [],
+        "kind": [],
+        "latency_ms": [],
+        "duration_ms": [],
+        "ts": [],
+        "sort": [],
+        "order": [],
         "text": [],
     }
-    for raw in str(query or "").split():
+    latency_re = re.compile(r"^latency_ms(<=|>=|<|>)(.+)$", re.IGNORECASE)
+    duration_re = re.compile(r"^duration_ms(<=|>=|<|>)(.+)$", re.IGNORECASE)
+    try:
+        tokens = shlex.split(str(query or ""))
+    except ValueError:
+        tokens = str(query or "").split()
+    for raw in tokens:
         token = raw.strip()
         if not token:
             continue
         if ":" in token:
             key, value = token.split(":", 1)
             key_l = key.strip().lower()
-            value = value.strip()
+            value = value.strip().strip("'").strip('"')
             if value and key_l in groups:
-                groups[key_l].append(value)
+                values = [v.strip() for v in value.split("|") if v.strip()]
+                if not values:
+                    values = [value]
+                groups[key_l].extend(values)
                 continue
+        lm = latency_re.match(token)
+        if lm:
+            groups["latency_ms"].append(f"{lm.group(1)}{lm.group(2).strip()}")
+            continue
+        dm = duration_re.match(token)
+        if dm:
+            groups["duration_ms"].append(f"{dm.group(1)}{dm.group(2).strip()}")
+            continue
         groups["text"].append(token)
     return groups
+
+
+def _append_numeric_filters(
+    clauses: List[str],
+    params: List[Any],
+    *,
+    column: str,
+    filters: Sequence[str],
+) -> None:
+    for expr in filters:
+        text = str(expr).strip()
+        if not text:
+            continue
+        op = None
+        for candidate in ("<=", ">=", "<", ">"):
+            if text.startswith(candidate):
+                op = candidate
+                text = text[len(candidate) :].strip()
+                break
+        if op is None:
+            continue
+        value = _as_float(text)
+        if value is None:
+            continue
+        clauses.append(f"{column} {op} ?")
+        params.append(float(value))
+
+
+def _append_ts_range(clauses: List[str], params: List[Any], *, column: str, filters: Sequence[str]) -> None:
+    for expr in filters:
+        text = str(expr).strip()
+        if not text:
+            continue
+        if text.startswith("[") and text.endswith("]"):
+            text = text[1:-1]
+        left, sep, right = text.partition(",")
+        if not sep:
+            continue
+        lo = _as_float(left.strip()) if left.strip() else None
+        hi = _as_float(right.strip()) if right.strip() else None
+        if lo is not None:
+            clauses.append(f"{column} >= ?")
+            params.append(float(lo))
+        if hi is not None:
+            clauses.append(f"{column} <= ?")
+            params.append(float(hi))
+
+
+def _severity_order_expr(column: str) -> str:
+    return (
+        f"CASE LOWER(COALESCE({column}, 'info')) "
+        f"WHEN 'error' THEN 3 "
+        f"WHEN 'warning' THEN 2 "
+        f"WHEN 'info' THEN 1 "
+        f"ELSE 0 END"
+    )
+
+
+def _sort_parts(groups: Mapping[str, List[str]]) -> Tuple[str, str]:
+    sort_key = str((groups.get("sort") or [""])[0]).strip().lower()
+    order = str((groups.get("order") or ["desc"])[0]).strip().lower()
+    order_sql = "ASC" if order == "asc" else "DESC"
+    return sort_key, order_sql
 
 
 def _append_or_equals(clauses: List[str], params: List[Any], column: str, values: Sequence[str]) -> None:
@@ -414,6 +593,11 @@ def query_session_db(
         raise FileNotFoundError(f"session db missing: {db_path}")
     groups = _parse_query_tokens(query)
     lim = max(1, int(limit))
+    kind_values = {str(v).strip().lower() for v in groups.get("kind", []) if str(v).strip()}
+    want_events = (not kind_values) or bool(kind_values & {"event", "events"})
+    want_reasoning = (not kind_values) or bool(kind_values & {"reasoning", "reason"})
+    want_traces = (not kind_values) or bool(kind_values & {"trace", "traces"})
+    want_joined = (not kind_values) or bool(kind_values & {"joined", "reasoning_trace", "reasoning_traces"})
 
     event_clauses: List[str] = []
     event_params: List[Any] = []
@@ -421,6 +605,8 @@ def query_session_db(
     _append_or_equals(event_clauses, event_params, "severity", groups["severity"])
     _append_or_equals(event_clauses, event_params, "status", groups["status"])
     _append_or_equals(event_clauses, event_params, "phase", groups["phase"])
+    _append_numeric_filters(event_clauses, event_params, column="latency_ms", filters=groups["latency_ms"])
+    _append_ts_range(event_clauses, event_params, column="ts_wall_s", filters=groups["ts"])
     if groups["trace"]:
         sub_clauses: List[str] = []
         sub_params: List[Any] = []
@@ -452,6 +638,8 @@ def query_session_db(
             trace_params.append(req_value)
     _append_or_equals(trace_clauses, trace_params, "status", groups["status"])
     _append_or_equals(trace_clauses, trace_params, "severity", groups["severity"])
+    _append_numeric_filters(trace_clauses, trace_params, column="duration_ms", filters=groups["duration_ms"])
+    _append_ts_range(trace_clauses, trace_params, column="start_ts_wall_s", filters=groups["ts"])
     for value in groups["text"]:
         trace_clauses.append("summary LIKE ?")
         trace_params.append(f"%{value}%")
@@ -466,41 +654,110 @@ def query_session_db(
     _append_or_equals(reasoning_clauses, reasoning_params, "status", groups["status"])
     _append_or_equals(reasoning_clauses, reasoning_params, "severity", groups["severity"])
     _append_or_equals(reasoning_clauses, reasoning_params, "phase", groups["phase"])
+    _append_numeric_filters(reasoning_clauses, reasoning_params, column="latency_ms", filters=groups["latency_ms"])
+    _append_ts_range(reasoning_clauses, reasoning_params, column="ts_wall_s", filters=groups["ts"])
     for value in groups["text"]:
         reasoning_clauses.append("snippet LIKE ?")
         reasoning_params.append(f"%{value}%")
 
+    joined_clauses: List[str] = []
+    joined_params: List[Any] = []
+    _append_or_equals(joined_clauses, joined_params, "source", groups["source"])
+    _append_or_equals(joined_clauses, joined_params, "severity", groups["severity"])
+    _append_or_equals(joined_clauses, joined_params, "status", groups["status"])
+    _append_or_equals(joined_clauses, joined_params, "phase", groups["phase"])
+    _append_or_equals(joined_clauses, joined_params, "component", groups["component"])
+    _append_numeric_filters(joined_clauses, joined_params, column="latency_ms", filters=groups["latency_ms"])
+    _append_ts_range(joined_clauses, joined_params, column="ts_wall_s", filters=groups["ts"])
+    for value in groups["trace"]:
+        joined_clauses.append("trace_id LIKE ?")
+        joined_params.append(f"%{value}%")
+    for value in groups["req"]:
+        req_value = _as_int(value)
+        if req_value is not None:
+            joined_clauses.append("req_id = ?")
+            joined_params.append(req_value)
+    for value in groups["text"]:
+        joined_clauses.append("(snippet LIKE ? OR input_preview LIKE ? OR output_preview LIKE ?)")
+        like = f"%{value}%"
+        joined_params.extend([like, like, like])
+
     where_events = f"WHERE {' AND '.join(event_clauses)}" if event_clauses else ""
     where_traces = f"WHERE {' AND '.join(trace_clauses)}" if trace_clauses else ""
     where_reasoning = f"WHERE {' AND '.join(reasoning_clauses)}" if reasoning_clauses else ""
+    where_joined = f"WHERE {' AND '.join(joined_clauses)}" if joined_clauses else ""
+    sort_key, order_sql = _sort_parts(groups)
+    if sort_key in {"latency", "latency_ms"}:
+        order_events = f"COALESCE(e.latency_ms,-1) {order_sql}, e.seq DESC"
+        order_reasoning = f"COALESCE(latency_ms,-1) {order_sql}, event_index DESC"
+        order_joined = f"COALESCE(latency_ms,-1) {order_sql}, row_id DESC"
+        order_traces = f"COALESCE(duration_ms,-1) {order_sql}, start_ts_wall_s DESC"
+    elif sort_key == "severity":
+        order_events = f"{_severity_order_expr('e.severity')} {order_sql}, e.seq DESC"
+        order_reasoning = f"{_severity_order_expr('severity')} {order_sql}, event_index DESC"
+        order_joined = f"{_severity_order_expr('severity')} {order_sql}, row_id DESC"
+        order_traces = f"{_severity_order_expr('severity')} {order_sql}, start_ts_wall_s DESC"
+    elif sort_key in {"ts", "time", "timestamp"}:
+        order_events = f"COALESCE(e.ts_wall_s,0) {order_sql}, e.seq DESC"
+        order_reasoning = f"COALESCE(ts_wall_s,0) {order_sql}, event_index DESC"
+        order_joined = f"COALESCE(ts_wall_s,0) {order_sql}, row_id DESC"
+        order_traces = f"COALESCE(start_ts_wall_s,0) {order_sql}, trace_id DESC"
+    else:
+        order_events = "e.seq DESC"
+        order_reasoning = "event_index DESC"
+        order_joined = "row_id DESC"
+        order_traces = "start_ts_wall_s DESC"
 
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
-        events = [
-            dict(row)
-            for row in conn.execute(
-                "SELECT e.seq, e.ts_wall_s, e.source, e.req_id, e.phase, e.status, e.severity, e.latency_ms, "
-                "e.snippet, (SELECT te.trace_id FROM trace_events te WHERE te.event_index = e.seq LIMIT 1) AS trace_id "
-                f"FROM events e {where_events} ORDER BY e.seq DESC LIMIT ?",
-                (*event_params, lim),
-            ).fetchall()
-        ]
-        traces = [
-            dict(row)
-            for row in conn.execute(
-                f"SELECT trace_id, req_id, status, severity, duration_ms, summary "
-                f"FROM traces {where_traces} ORDER BY start_ts_wall_s DESC LIMIT ?",
-                (*trace_params, lim),
-            ).fetchall()
-        ]
-        reasoning = [
-            dict(row)
-            for row in conn.execute(
-                f"SELECT event_index, ts_wall_s, req_id, phase, status, severity, latency_ms, snippet "
-                f"FROM reasoning {where_reasoning} ORDER BY event_index DESC LIMIT ?",
-                (*reasoning_params, lim),
-            ).fetchall()
-        ]
+        if want_events:
+            events = [
+                dict(row)
+                for row in conn.execute(
+                    "SELECT e.seq, e.ts_wall_s, e.source, e.req_id, e.phase, e.status, e.severity, e.latency_ms, "
+                    "e.snippet, (SELECT te.trace_id FROM trace_events te WHERE te.event_index = e.seq LIMIT 1) AS trace_id "
+                    f"FROM events e {where_events} ORDER BY {order_events} LIMIT ?",
+                    (*event_params, lim),
+                ).fetchall()
+            ]
+        else:
+            events = []
+        if want_traces:
+            traces = [
+                dict(row)
+                for row in conn.execute(
+                    f"SELECT trace_id, req_id, status, severity, duration_ms, summary "
+                    f"FROM traces {where_traces} ORDER BY {order_traces} LIMIT ?",
+                    (*trace_params, lim),
+                ).fetchall()
+            ]
+        else:
+            traces = []
+        if want_reasoning:
+            reasoning = [
+                dict(row)
+                for row in conn.execute(
+                    f"SELECT event_index, ts_wall_s, req_id, phase, status, severity, latency_ms, snippet "
+                    f"FROM reasoning {where_reasoning} ORDER BY {order_reasoning} LIMIT ?",
+                    (*reasoning_params, lim),
+                ).fetchall()
+            ]
+        else:
+            reasoning = []
+        if want_joined:
+            joined = [
+                dict(row)
+                for row in conn.execute(
+                    f"SELECT row_id, event_index, trace_id, req_id, component, source, ts_wall_s, phase, status, "
+                    f"severity, latency_ms, primitive, confidence, target_zone, model, provider, delta_score, snippet, "
+                    f"input_preview, output_preview, perception_person_conf, perception_zone_hint, perception_frame_id, "
+                    f"video_frame_id, video_frame_ref "
+                    f"FROM reasoning_traces {where_joined} ORDER BY {order_joined} LIMIT ?",
+                    (*joined_params, lim),
+                ).fetchall()
+            ]
+        else:
+            joined = []
         meta_rows = conn.execute("SELECT key, value FROM meta").fetchall()
     meta = {str(row["key"]): row["value"] for row in meta_rows}
     return {
@@ -509,5 +766,6 @@ def query_session_db(
         "events": events,
         "traces": traces,
         "reasoning": reasoning,
+        "joined": joined,
         "meta": meta,
     }

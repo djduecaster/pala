@@ -20,6 +20,8 @@ class ReasoningEvent:
     provider: Optional[str]
     snippet: str
     severity: str
+    component: Optional[str] = None
+    delta_score: Optional[float] = None
 
 
 _SENSITIVE_PAIR_RE = re.compile(
@@ -94,6 +96,13 @@ def _extract_snippet(data: Dict[str, Any], payload: Dict[str, Any], msg_payload:
     return ""
 
 
+def _decision_payload(data: Dict[str, Any]) -> Dict[str, Any]:
+    raw = data.get("decision_json")
+    if isinstance(raw, dict):
+        return raw
+    return {}
+
+
 def normalize_reasoning_message(msg: Dict[str, Any]) -> Optional[ReasoningEvent]:
     source = _as_optional_str(msg.get("source"))
     if not source:
@@ -147,6 +156,7 @@ def normalize_reasoning_message(msg: Dict[str, Any]) -> Optional[ReasoningEvent]
             provider=_pick_first([data_payload.get("provider"), data.get("provider")], _as_optional_str),
             snippet=_extract_snippet(data_payload, data, msg_payload),
             severity=_classify_severity(phase, status),
+            component="timeline",
         )
 
     if source == "actions_log":
@@ -167,6 +177,7 @@ def normalize_reasoning_message(msg: Dict[str, Any]) -> Optional[ReasoningEvent]
             provider=None,
             snippet=_extract_snippet(data, data, msg_payload),
             severity="info",
+            component="action",
         )
 
     if source == "agent":
@@ -187,6 +198,85 @@ def normalize_reasoning_message(msg: Dict[str, Any]) -> Optional[ReasoningEvent]
             provider=None,
             snippet=detail,
             severity="error",
+            component="agent",
+        )
+
+    if source in {"behavior_env_log", "behavior_env"}:
+        data = _as_dict(msg_payload.get("data"))
+        if not data:
+            data = msg_payload
+        if not data:
+            return None
+        phase = _pick_first([data.get("phase"), data.get("stage"), data.get("module")], _as_optional_str) or "env_processor"
+        status = _pick_first([data.get("status"), data.get("parse_status"), data.get("result")], _as_optional_str) or "ok"
+        return ReasoningEvent(
+            source=source,
+            ts_wall_s=ts_wall_s,
+            req_id=_pick_first([data.get("request_id"), data.get("req_id"), data.get("id")], _as_optional_int),
+            phase=phase,
+            status=status,
+            latency_ms=_pick_first([data.get("latency_ms"), data.get("duration_ms")], _as_optional_float),
+            primitive=None,
+            confidence=None,
+            target_zone=_pick_first([data.get("target_zone"), data.get("zone_hint")], _as_optional_str),
+            model=_pick_first([data.get("model"), data.get("model_name")], _as_optional_str),
+            provider=_pick_first([data.get("provider"), data.get("vendor")], _as_optional_str),
+            snippet=_extract_snippet(data, data, msg_payload),
+            severity=_classify_severity(phase, status),
+            component="env_processor",
+            delta_score=_as_optional_float(data.get("delta_score")),
+        )
+
+    if source in {"behavior_planner_log", "behavior_planner"}:
+        data = _as_dict(msg_payload.get("data"))
+        if not data:
+            data = msg_payload
+        if not data:
+            return None
+        decision = _decision_payload(data)
+        phase = _pick_first([data.get("phase"), data.get("stage"), data.get("module")], _as_optional_str) or "planner"
+        status = _pick_first([data.get("status"), data.get("parse_status"), data.get("result")], _as_optional_str) or "ok"
+        command = _as_dict(decision.get("command"))
+        return ReasoningEvent(
+            source=source,
+            ts_wall_s=ts_wall_s,
+            req_id=_pick_first([data.get("request_id"), data.get("req_id"), data.get("id")], _as_optional_int),
+            phase=phase,
+            status=status,
+            latency_ms=_pick_first([data.get("latency_ms"), data.get("duration_ms")], _as_optional_float),
+            primitive=_pick_first([data.get("primitive"), decision.get("primitive")], _as_optional_str),
+            confidence=_pick_first([data.get("confidence"), decision.get("confidence")], _as_optional_float),
+            target_zone=_pick_first([data.get("target_zone"), command.get("target_zone"), command.get("zone")], _as_optional_str),
+            model=_pick_first([data.get("model"), data.get("model_name")], _as_optional_str),
+            provider=_pick_first([data.get("provider"), data.get("vendor")], _as_optional_str),
+            snippet=_extract_snippet(decision, data, msg_payload),
+            severity=_classify_severity(phase, status),
+            component="planner",
+        )
+
+    if source in {"behavior_reasoning_log", "behavior_reasoning"}:
+        data = _as_dict(msg_payload.get("data"))
+        if not data:
+            data = msg_payload
+        if not data:
+            return None
+        phase = _pick_first([data.get("phase"), data.get("module"), data.get("stage")], _as_optional_str) or "behavior_reasoning"
+        status = _pick_first([data.get("status"), data.get("result")], _as_optional_str) or "ok"
+        return ReasoningEvent(
+            source=source,
+            ts_wall_s=ts_wall_s,
+            req_id=_pick_first([data.get("request_id"), data.get("req_id"), data.get("id")], _as_optional_int),
+            phase=phase,
+            status=status,
+            latency_ms=_pick_first([data.get("latency_ms"), data.get("duration_ms")], _as_optional_float),
+            primitive=_as_optional_str(data.get("primitive")),
+            confidence=_as_optional_float(data.get("confidence")),
+            target_zone=_pick_first([data.get("target_zone"), data.get("zone_hint")], _as_optional_str),
+            model=_pick_first([data.get("model"), data.get("model_name")], _as_optional_str),
+            provider=_pick_first([data.get("provider"), data.get("vendor")], _as_optional_str),
+            snippet=_extract_snippet(data, data, msg_payload),
+            severity=_classify_severity(phase, status),
+            component=_pick_first([data.get("component"), data.get("module")], _as_optional_str) or "reasoning",
         )
 
     return None

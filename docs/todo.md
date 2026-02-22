@@ -17,13 +17,13 @@ Last updated: 2026-02-07
    - Finalize primitive set for demo (`hold`, `glance`, `ack`, `breath`, optional `track`).
    - Add per-primitive constraints (rate/accel/safety gating).
 
-4. Behavior layer refinement
-   - Keep deterministic local policy as baseline.
-   - Add confidence/freshness gating so weak perception degrades safely.
+4. Behavior/planner reset
+   - TODO: define new behavior architecture from first principles.
+   - TODO: define new planner contract and execution semantics.
 
 5. Cosmos integration via Brev
-   - Define strict I/O contract from `PerceptionState` to planner requests.
-   - Add timeout/retry and guaranteed local fallback path.
+   - TODO: re-specify request/response contract after reset.
+   - TODO: re-validate timeout/retry strategy after reset.
 
 6. Telemetry and evaluation
    - Build reproducible eval harness (JSONL -> metrics summary).

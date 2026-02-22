@@ -25,7 +25,18 @@ PACKS: Dict[str, SignalPack] = {
     "reasoning_live": SignalPack(
         name="reasoning_live",
         description="Live orchestrator reasoning stream for on-call/demo monitoring.",
-        sources=("agent", "transport_stats", "timeline_log", "actions_log", "video", "video_frame", "tegrastats"),
+        sources=(
+            "agent",
+            "transport_stats",
+            "timeline_log",
+            "actions_log",
+            "behavior_env_log",
+            "behavior_planner_log",
+            "behavior_reasoning_log",
+            "video",
+            "video_frame",
+            "tegrastats",
+        ),
         journal_filters=(r"(orchestrator|cosmos|reasoning|parse_fail|timeout|inflight|fallback)",),
         panels=(
             "summary",
@@ -41,7 +52,16 @@ PACKS: Dict[str, SignalPack] = {
     "reasoning_failures": SignalPack(
         name="reasoning_failures",
         description="Failure-centric reasoning and transport diagnostics.",
-        sources=("agent", "transport_stats", "timeline_log", "actions_log", "journal"),
+        sources=(
+            "agent",
+            "transport_stats",
+            "timeline_log",
+            "actions_log",
+            "behavior_env_log",
+            "behavior_planner_log",
+            "behavior_reasoning_log",
+            "journal",
+        ),
         journal_filters=(r"(fail|error|invalid|timeout|fallback|traceback)",),
         panels=(
             "summary",
@@ -58,7 +78,18 @@ PACKS: Dict[str, SignalPack] = {
     "demo_overview": SignalPack(
         name="demo_overview",
         description="Balanced demo view with behavior context and system health.",
-        sources=("agent", "transport_stats", "timeline_log", "actions_log", "video", "video_frame", "perception_log", "tegrastats"),
+        sources=(
+            "agent",
+            "transport_stats",
+            "timeline_log",
+            "actions_log",
+            "behavior_env_log",
+            "behavior_planner_log",
+            "video",
+            "video_frame",
+            "perception_log",
+            "tegrastats",
+        ),
         journal_filters=(r"(orchestrator|reasoning|camera|deepstream|error)",),
         panels=(
             "summary",
@@ -111,9 +142,26 @@ PACKS: Dict[str, SignalPack] = {
     "cosmos_io": SignalPack(
         name="cosmos_io",
         description="Cosmos/planner I/O, response quality, and reasoning probes.",
-        sources=("timeline_log", "memory_log", "journal", "actions_log"),
+        sources=("timeline_log", "memory_log", "journal", "actions_log", "behavior_env_log", "behavior_planner_log", "behavior_reasoning_log"),
         journal_filters=(r"(cosmos|reasoning|probe|response|parse|fallback)",),
         panels=("timeline", "memory", "action", "logs", "events"),
+    ),
+    "behavior_v2_debug": SignalPack(
+        name="behavior_v2_debug",
+        description="BehaviorV2 environment/planner/reasoning traces with perception context.",
+        sources=(
+            "perception_log",
+            "behavior_env_log",
+            "behavior_planner_log",
+            "behavior_reasoning_log",
+            "timeline_log",
+            "actions_log",
+            "video_frame",
+            "agent",
+            "transport_stats",
+        ),
+        journal_filters=(r"(behavior|planner|env|reasoning|parse_fail|timeout)",),
+        panels=("summary", "reasoning_stream", "request_detail", "trace_list", "trace_detail", "query", "events"),
     ),
 }
 

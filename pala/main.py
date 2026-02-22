@@ -24,7 +24,7 @@ from .planner import (
     TimelineConfig,
     TimelineWriter,
 )
-from .behavior import BehaviorPolicy
+from .behavior import BehaviorPolicy, BehaviorPolicyConfig
 from .control import TrajectoryExecutor
 from .control.primitives import PrimitiveKind, HoldCommand
 from .hardware import DummyServo, PCA9685Servo, ServoCalibration
@@ -38,6 +38,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     cfg = load_config(args.config)
     _apply_mode_override(cfg, args.mode)
     max_runtime_s = _parse_max_runtime_s()
+    run_log_dir = _init_run_log_dir(cfg)
+    if run_log_dir:
+        logger.info("run log scope=%s", run_log_dir)
 
     stop = threading.Event()
     thread_failure_lock = threading.Lock()
@@ -47,19 +50,30 @@ def main(argv: Optional[list[str]] = None) -> int:
     latest_perception = LatestValue[PerceptionState]()
     latest_action = LatestValue[ActionPlan]()
     latest_command = LatestValue[HardwareCommand]()
+    latest_control_state = LatestValue[object]()
     latest_frame = LatestFrameCache()
 
     # Nodes
     perception = PerceptionNode(source=_build_frame_source(cfg), detector=_build_detector(cfg))
     planner = _build_planner(cfg, latest_frame)
-    behavior = BehaviorPolicy(planner=planner, dwell_s=2.0, cooldown_s=1.0)
+    behavior = BehaviorPolicy(
+        planner=planner,
+        config=_build_behavior_config(cfg, run_log_dir=run_log_dir),
+        frame_cache=latest_frame,
+        dwell_s=2.0,
+        cooldown_s=1.0,
+    )
     executor = TrajectoryExecutor(cfg.joint_limits_rad, style_profiles=getattr(cfg, "style_profiles", None))
     servo = _build_servo(cfg)
     preview_tap = _build_preview_tap(cfg)
 
     # Optional logging
-    perception_log = maybe_logger(cfg.logging.perception_jsonl if cfg.logging.enabled else None)
-    action_log = maybe_logger(cfg.logging.actions_jsonl if cfg.logging.enabled else None)
+    perception_log = maybe_logger(
+        _scope_log_path(cfg.logging.perception_jsonl, run_log_dir) if cfg.logging.enabled else None
+    )
+    action_log = maybe_logger(
+        _scope_log_path(cfg.logging.actions_jsonl, run_log_dir) if cfg.logging.enabled else None
+    )
 
     def _handle_sig(_sig, _frame):
         stop.set()
@@ -117,14 +131,51 @@ def main(argv: Optional[list[str]] = None) -> int:
     # --- Behavior loop ---
     def behavior_loop() -> None:
         rl = RateLimiter(cfg.loop_rates.behavior_hz)
+        last_action_id: Optional[str] = None
+        last_env_summary: Optional[str] = None
         while not stop.is_set():
             st, _ = latest_perception.get()
+            control_state, control_ts = latest_control_state.get()
+            if control_state is not None and control_ts is not None and hasattr(behavior, "set_control_state"):
+                behavior.set_control_state(control_state)
             action = behavior.step(st)
             ts = time.monotonic()
             latest_action.set(action, ts)
 
             if action_log:
-                action_log.write(action)
+                action_log.write(
+                    {
+                        "ts_wall_s": time.time(),
+                        "ts_monotonic_s": ts,
+                        "action": action,
+                    }
+                )
+
+            if action.action_id != last_action_id:
+                summary = _latest_env_summary(behavior)
+                if summary:
+                    logger.info(
+                        "decision primitive=%s style=%s conf=%.2f reason=%s env=%s",
+                        action.primitive.value,
+                        action.style,
+                        action.confidence,
+                        _short_text(action.explanation, max_chars=80),
+                        _short_text(summary, max_chars=110),
+                    )
+                else:
+                    logger.info(
+                        "decision primitive=%s style=%s conf=%.2f reason=%s",
+                        action.primitive.value,
+                        action.style,
+                        action.confidence,
+                        _short_text(action.explanation, max_chars=80),
+                    )
+                last_action_id = action.action_id
+
+            summary = _latest_env_summary(behavior)
+            if summary and summary != last_env_summary:
+                logger.info("env summary=%s", _short_text(summary, max_chars=140))
+                last_env_summary = summary
 
             rl.sleep()
 
@@ -136,7 +187,6 @@ def main(argv: Optional[list[str]] = None) -> int:
             primitive=PrimitiveKind.HOLD,
             command=HoldCommand(),
             confidence=0.1,
-            cancel_current=True,
         )
         while not stop.is_set():
             action, _ = latest_action.get()
@@ -149,6 +199,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
             cmd = executor.step(action, dt)
             latest_command.set(cmd, cmd.timestamp_monotonic_s)
+            latest_control_state.set(executor.control_state, now)
 
             rl.sleep()
 
@@ -157,7 +208,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         rl = RateLimiter(cfg.loop_rates.hardware_hz)
         deadman_s = cfg.deadman_timeout_ms / 1000.0
         enabled = True
-        last_print = time.monotonic()
+        last_state: Optional[str] = None
         while not stop.is_set():
             cmd, ts = latest_command.get()
             now = time.monotonic()
@@ -180,9 +231,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                     servo.set_angles(cmd.joint_angles_rad)
                     state = "enabled"
 
-            if now - last_print >= 2.0:
+            if state != last_state:
                 logger.info("hardware state=%s", state)
-                last_print = now
+                last_state = state
 
             rl.sleep()
 
@@ -211,6 +262,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         perception.shutdown()
         if hasattr(planner, "shutdown"):
             planner.shutdown()
+        if hasattr(behavior, "shutdown"):
+            behavior.shutdown()
         servo.shutdown()
         preview_tap.close()
         if perception_log:
@@ -297,6 +350,15 @@ def _build_frame_source(cfg):
 def _build_detector(cfg):
     if cfg.detector:
         if cfg.detector == "deepstream":
+            if cfg.mode == "jetson_full":
+                preflight_error = _deepstream_preflight_error()
+                if preflight_error is not None:
+                    logger.warning(
+                        "DeepStream detector unavailable at startup (%s). "
+                        "Using no-op detector (zero local detections).",
+                        preflight_error,
+                    )
+                    return _NoopDetector(reason=preflight_error)
             return DeepStreamDetector(
                 config_path=cfg.deepstream.config_path,
                 person_class_id=cfg.deepstream.person_class_id,
@@ -310,6 +372,34 @@ def _build_detector(cfg):
     if cfg.mode == "jetson_full":
         return JetsonDetector()
     return DummyDetector()
+
+
+class _NoopDetector:
+    """Fallback detector used when DeepStream dependencies are missing at startup."""
+
+    def __init__(self, *, reason: str):
+        self._reason = reason
+
+    def detect(self, _frame):
+        return []
+
+    def shutdown(self) -> None:
+        return None
+
+
+def _deepstream_preflight_error() -> Optional[str]:
+    try:
+        import gi
+
+        gi.require_version("Gst", "1.0")
+        from gi.repository import Gst  # noqa: F401
+    except Exception as exc:  # noqa: BLE001 - startup preflight diagnostics
+        return f"missing_gstreamer_bindings:{type(exc).__name__}:{exc}"
+    try:
+        import pyds  # noqa: F401
+    except Exception as exc:  # noqa: BLE001 - startup preflight diagnostics
+        return f"missing_pyds:{type(exc).__name__}:{exc}"
+    return None
 
 
 def _build_planner(cfg, latest_frame: LatestFrameCache):
@@ -453,6 +543,124 @@ def _build_preview_extra(cfg, cmd: Optional[HardwareCommand]) -> Optional[Dict[s
             "timestamp_monotonic_s": float(cmd.timestamp_monotonic_s),
         }
     }
+
+
+def _latest_env_summary(behavior: BehaviorPolicy) -> Optional[str]:
+    world_state = getattr(behavior, "world_state", None)
+    if world_state is None or not hasattr(world_state, "snapshot"):
+        return None
+    try:
+        snap = world_state.snapshot()
+    except Exception:  # noqa: BLE001 - best effort for logging only
+        return None
+    if not isinstance(snap, dict):
+        return None
+    env = snap.get("latest_env_snapshot")
+    if not isinstance(env, dict):
+        return None
+    summary = env.get("summary")
+    if summary is None:
+        return None
+    token = " ".join(str(summary).split()).strip()
+    return token if token else None
+
+
+def _short_text(value: Optional[str], *, max_chars: int) -> str:
+    token = " ".join(str(value or "").split()).strip()
+    if not token:
+        return "-"
+    if len(token) <= max_chars:
+        return token
+    return token[: max_chars - 3] + "..."
+
+
+def _init_run_log_dir(cfg) -> Optional[str]:
+    scope_enabled = str(os.getenv("PALA_RUN_SCOPED_LOGS", "1")).strip().lower()
+    if scope_enabled in {"0", "false", "no", "off"}:
+        return None
+    has_log_targets = bool(
+        getattr(cfg.logging, "enabled", False)
+        or (getattr(cfg, "cosmos", None) is not None and getattr(cfg.cosmos, "enabled", False))
+    )
+    if not has_log_targets:
+        return None
+    run_id = os.getenv("PALA_RUN_ID")
+    if not run_id:
+        run_id = time.strftime("%Y%m%d_%H%M%S")
+    root = os.getenv("PALA_RUN_LOG_ROOT", "logs/runs")
+    path = os.path.join(root, run_id)
+    os.makedirs(path, exist_ok=True)
+    return path
+
+
+def _scope_log_path(path: Optional[str], run_log_dir: Optional[str]) -> Optional[str]:
+    if not path:
+        return None
+    if not run_log_dir:
+        return path
+    filename = os.path.basename(path)
+    if not filename:
+        return path
+    return os.path.join(run_log_dir, filename)
+
+
+def _build_behavior_config(cfg, *, run_log_dir: Optional[str] = None) -> BehaviorPolicyConfig:
+    cosmos = getattr(cfg, "cosmos", None)
+    if cosmos is None:
+        return BehaviorPolicyConfig(remote_enabled=False)
+
+    base_url = os.getenv("PALA_COSMOS_BASE_URL") or cosmos.base_url
+    api_key = os.getenv("PALA_COSMOS_API_KEY")
+    model = os.getenv("PALA_COSMOS_MODEL") or cosmos.model
+    planner_prompt = os.getenv("PALA_COSMOS_PROMPT") or cosmos.planner_prompt
+
+    env_log_path = _scope_log_path(
+        str(getattr(cosmos, "behavior_env_log_path", "logs/behavior_env.jsonl")),
+        run_log_dir,
+    )
+    planner_log_path = _scope_log_path(
+        str(getattr(cosmos, "behavior_planner_log_path", "logs/behavior_planner.jsonl")),
+        run_log_dir,
+    )
+    reasoning_log_path = _scope_log_path(
+        str(getattr(cosmos, "behavior_reasoning_log_path", "logs/behavior_reasoning.jsonl")),
+        run_log_dir,
+    )
+
+    return BehaviorPolicyConfig(
+        remote_enabled=bool(cosmos.enabled),
+        provider=str(getattr(cosmos, "provider", "brev")),
+        base_url=None if base_url in (None, "") else str(base_url),
+        api_key=None if api_key in (None, "") else str(api_key),
+        model=str(model),
+        request_timeout_ms=int(getattr(cosmos, "request_timeout_ms", 6000)),
+        error_backoff_s=float(getattr(cosmos, "behavior_error_backoff_s", 1.5)),
+        client_error_backoff_s=float(getattr(cosmos, "behavior_client_error_backoff_s", 5.0)),
+        env_hz=float(getattr(cosmos, "summarizer_hz", 1.0)),
+        planner_hz=float(getattr(cosmos, "planner_hz", 0.5)),
+        planner_event_delta_threshold=float(getattr(cosmos, "planner_event_delta_threshold", 0.65)),
+        planner_event_cooldown_s=float(getattr(cosmos, "planner_event_cooldown_s", 0.7)),
+        max_frame_age_ms=int(getattr(cosmos, "max_frame_age_ms", 500)),
+        frame_window_s=float(getattr(cosmos, "summary_window_s", getattr(cosmos, "video_window_s", 6.0))),
+        env_max_frames=int(getattr(cosmos, "summary_max_frames", getattr(cosmos, "video_max_frames", 6))),
+        planner_max_frames=int(getattr(cosmos, "planner_max_frames", 1)),
+        frame_max_width=int(getattr(cosmos, "summary_max_width", getattr(cosmos, "video_max_width", 320))),
+        frame_jpeg_quality=int(getattr(cosmos, "summary_jpeg_quality", getattr(cosmos, "video_jpeg_quality", 60))),
+        request_min_fresh_frames=int(getattr(cosmos, "request_min_fresh_frames", 1)),
+        planner_include_latest_frame=bool(getattr(cosmos, "planner_include_latest_frame", True)),
+        env_max_tokens=int(getattr(cosmos, "env_max_tokens", 900)),
+        planner_max_tokens=int(getattr(cosmos, "planner_max_tokens", 900)),
+        policy_identity=str(getattr(cosmos, "policy_identity", "You are PALA.")),
+        policy_capabilities=str(getattr(cosmos, "policy_capabilities", "")),
+        policy_safety=str(getattr(cosmos, "policy_safety", "")),
+        policy_style=str(getattr(cosmos, "policy_style", "")),
+        planner_prompt=str(planner_prompt),
+        repeated_breath_guard_count=int(getattr(cosmos, "repeated_breath_guard_count", 4)),
+        stale_breath_hold_after_s=float(getattr(cosmos, "stale_breath_hold_after_s", 12.0)),
+        env_log_path=env_log_path,
+        planner_log_path=planner_log_path,
+        reasoning_log_path=reasoning_log_path,
+    )
 
 
 def _parse_max_runtime_s() -> Optional[float]:

@@ -217,6 +217,66 @@ def _make_event_ref(msg: Dict[str, Any], event_index: int) -> Optional[TraceEven
         phase = "journal"
         status = _status_from_text(line)
         summary = line
+    elif source in {"behavior_env_log", "behavior_env"}:
+        data = _as_dict(payload.get("data"))
+        if not data:
+            data = payload
+        if not data:
+            return None
+        req_id = _as_optional_int(data.get("request_id"))
+        if req_id is None:
+            req_id = _as_optional_int(data.get("req_id"))
+        if req_id is None:
+            req_id = _as_optional_int(data.get("id"))
+        phase = _as_optional_str(data.get("phase")) or _as_optional_str(data.get("stage")) or "env_processor"
+        status = _as_optional_str(data.get("status")) or _as_optional_str(data.get("parse_status")) or "ok"
+        latency_ms = _as_optional_float(data.get("latency_ms")) or _as_optional_float(data.get("duration_ms"))
+        summary = (
+            _as_optional_str(data.get("summary"))
+            or _as_optional_str(data.get("events"))
+            or _as_optional_str(data.get("message"))
+            or ""
+        )
+    elif source in {"behavior_planner_log", "behavior_planner"}:
+        data = _as_dict(payload.get("data"))
+        if not data:
+            data = payload
+        if not data:
+            return None
+        req_id = _as_optional_int(data.get("request_id"))
+        if req_id is None:
+            req_id = _as_optional_int(data.get("req_id"))
+        if req_id is None:
+            req_id = _as_optional_int(data.get("id"))
+        phase = _as_optional_str(data.get("phase")) or _as_optional_str(data.get("stage")) or "planner"
+        status = _as_optional_str(data.get("status")) or _as_optional_str(data.get("parse_status")) or "ok"
+        latency_ms = _as_optional_float(data.get("latency_ms")) or _as_optional_float(data.get("duration_ms"))
+        summary = (
+            _as_optional_str(data.get("rationale_short"))
+            or _as_optional_str(data.get("explanation"))
+            or _as_optional_str(data.get("message"))
+            or ""
+        )
+    elif source in {"behavior_reasoning_log", "behavior_reasoning"}:
+        data = _as_dict(payload.get("data"))
+        if not data:
+            data = payload
+        if not data:
+            return None
+        req_id = _as_optional_int(data.get("request_id"))
+        if req_id is None:
+            req_id = _as_optional_int(data.get("req_id"))
+        if req_id is None:
+            req_id = _as_optional_int(data.get("id"))
+        phase = _as_optional_str(data.get("phase")) or _as_optional_str(data.get("module")) or "behavior_reasoning"
+        status = _as_optional_str(data.get("status")) or _as_optional_str(data.get("result")) or "ok"
+        latency_ms = _as_optional_float(data.get("latency_ms")) or _as_optional_float(data.get("duration_ms"))
+        summary = (
+            _as_optional_str(data.get("summary"))
+            or _as_optional_str(data.get("reasoning"))
+            or _as_optional_str(data.get("message"))
+            or ""
+        )
     else:
         return None
 
@@ -421,6 +481,9 @@ def _trace_to_dict(trace: TraceRecord) -> Dict[str, Any]:
                 "status": ref.status,
                 "latency_ms": ref.latency_ms,
                 "ts_wall_s": ref.ts_wall_s,
+                "req_id": ref.req_id,
+                "severity": ref.severity,
+                "summary": ref.summary,
             }
             for ref in trace.event_refs
         ],

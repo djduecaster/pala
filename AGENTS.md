@@ -26,6 +26,7 @@ Goal: a reproducible, contest-ready demo with clean architecture and clear evalu
 5) Live preview/telemetry streaming is allowed when scoped for debugging or demos.
    - Prefer a sidecar/tooling implementation (for example under `tools/`) rather than core loop wiring.
    - Keep it optional and failure-isolated (core control/safety logic must run without it).
+6) Prefer to avoid keeping dead code or fallbacks. It's much easier to keep a simple architecture without a complicated mess of fallbacks and old code.
 
 ## Key files
 - `pala/main.py` — 4-loop runtime wiring

@@ -100,19 +100,15 @@ class TrajectoryExecutor:
         elif kind == PrimitiveKind.HOME and isinstance(command, HomeCommand):
             target = list(self._active_target or self._current)
             rate = command.rate_rad_s * style["rate_scale"]
-            done = self._within_tol(target, self._current)
         elif kind == PrimitiveKind.MOVE_TO and isinstance(command, MoveToCommand):
             target = list(self._active_target or self._current)
             rate = command.rate_rad_s * style["rate_scale"]
-            done = self._within_tol(target, self._current)
         elif kind == PrimitiveKind.GAZE_TO and isinstance(command, GazeToCommand):
             target = list(self._active_target or self._current)
             rate = command.rate_rad_s * style["rate_scale"]
-            done = self._gaze_done(command, now, target)
         elif kind == PrimitiveKind.ORIENT_TO_ZONE and isinstance(command, OrientToZoneCommand):
             target = list(self._active_target or self._current)
             rate = command.rate_rad_s * style["rate_scale"]
-            done = self._within_tol(target, self._current)
         elif kind == PrimitiveKind.GLANCE and isinstance(command, GlanceCommand):
             target = self._glance_target(command, elapsed, style)
             rate = command.rate_rad_s * style["rate_scale"]
@@ -132,6 +128,12 @@ class TrajectoryExecutor:
             target = list(self._current)
 
         self._target = _clamp(target, self._limits)
+        # Completion checks must use feasible (clamped) targets so out-of-limit
+        # requests do not leave primitives running indefinitely.
+        if kind in {PrimitiveKind.HOME, PrimitiveKind.MOVE_TO, PrimitiveKind.ORIENT_TO_ZONE}:
+            done = self._within_tol(self._target, self._current)
+        elif kind == PrimitiveKind.GAZE_TO and isinstance(command, GazeToCommand):
+            done = self._gaze_done(command, now, self._target)
         self._apply_rate_limit(self._target, rate, dt)
         self._current = _clamp(self._current, self._limits)
 
@@ -149,11 +151,14 @@ class TrajectoryExecutor:
             return
         if request.action_id == self._active_action.action_id:
             return
-        if not request.cancel_current:
+        # Latest-intent arbitration: any new, different action intent replaces
+        # the active primitive. Equivalent intents are ignored to avoid
+        # unnecessary re-activation churn.
+        if self._same_intent(self._active_action, request):
             return
         self._finish_active(
             status=ExecutionStatus.CANCELED,
-            reason=f"canceled_by:{request.action_id}",
+            reason=f"replaced_by:{request.action_id}",
         )
         self._activate(request, now)
 
@@ -292,6 +297,14 @@ class TrajectoryExecutor:
     def _style_profile(self, style_name: str) -> Dict[str, float]:
         key = str(style_name).strip().lower()
         return self._style_profiles.get(key, self._style_profiles["calm"])
+
+    @staticmethod
+    def _same_intent(active: ActionPlan, request: ActionPlan) -> bool:
+        return (
+            active.primitive == request.primitive
+            and active.command == request.command
+            and active.style == request.style
+        )
 
 
 def _clamp(vals: List[float], limits: List[List[float]]) -> List[float]:

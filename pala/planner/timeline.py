@@ -2,40 +2,27 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
-import os
-import threading
+from pathlib import Path
 import time
-from typing import Any
+from typing import Any, Dict, Optional
 
 
 @dataclass
 class TimelineConfig:
-    enabled: bool = True
+    enabled: bool = False
     jsonl_path: str = "logs/orchestrator_timeline.jsonl"
 
 
 class TimelineWriter:
-    def __init__(self, cfg: TimelineConfig):
-        self._cfg = cfg
-        self._lock = threading.Lock()
+    def __init__(self, config: Optional[TimelineConfig] = None):
+        self._cfg = config or TimelineConfig()
 
-    def write(self, event_type: str, payload: dict[str, Any]) -> None:
-        if not self._cfg.enabled or not self._cfg.jsonl_path:
+    def append(self, event_type: str, payload: Dict[str, Any]) -> None:
+        if not self._cfg.enabled:
             return
-        item = {
-            "type": str(event_type),
-            "ts_wall_s": time.time(),
-            "ts_mono_s": time.monotonic(),
-            "payload": payload,
-        }
-        directory = os.path.dirname(self._cfg.jsonl_path)
-        if directory:
-            os.makedirs(directory, exist_ok=True)
-        try:
-            with self._lock:
-                with open(self._cfg.jsonl_path, "a", encoding="utf-8") as f:
-                    f.write(json.dumps(item, separators=(",", ":"), ensure_ascii=True))
-                    f.write("\n")
-        except OSError:
-            # Timeline logging is best-effort and must not break control flow.
-            return
+        path = Path(self._cfg.jsonl_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        item = {"type": str(event_type), "ts_wall_s": time.time(), "payload": dict(payload)}
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(item, ensure_ascii=True) + "\n")
+

@@ -5,6 +5,7 @@ import pathlib
 import sys
 import base64
 import time
+import re
 
 import numpy as np
 from PIL import Image
@@ -19,6 +20,8 @@ from tools.telemetry.protocol import decode_message, encode_message, event
 from tools.telemetry.jetson_agent import _TapVideoSource, _encode_jpeg_frame, _parse_tegrastats
 from tools.telemetry.filters import parse_field_filter, matches_field_filters
 from tools.telemetry.mac_viewer import (
+    _build_in_memory_alignment_rows,
+    _build_in_memory_query_rows,
     _apply_panel_preset,
     _can_preload_trace_index,
     DashboardState,
@@ -26,17 +29,25 @@ from tools.telemetry.mac_viewer import (
     _build_remote_agent_command,
     _fit_image_to_window,
     _normalize_jetson_dir,
+    _paths_equivalent,
+    _resolve_live_save_session_dir,
+    _run_curation_export,
 )
 from tools.telemetry.packs import resolve_packs, apply_pack_overrides
 from tools.telemetry.capture import CaptureConfig, SessionCaptureWriter
 from tools.telemetry.dataset_export import export_dataset_rows
+from tools.telemetry.annotations import annotation_key, append_annotation, load_annotations
+from tools.telemetry.doctor import _check_session_dir
+from tools.telemetry.integrity import build_integrity_report, verify_integrity_report, write_integrity_report
+from tools.telemetry.presets import load_viewer_presets
 from tools.telemetry.replay import SessionReplayReader
 from tools.telemetry.reasoning import format_reasoning_snippet, normalize_reasoning_message, redact_reasoning_text
 from tools.telemetry.quality import evaluate_quality_gate, load_quality_report
 from tools.telemetry.labels import load_labels_jsonl
-from tools.telemetry.schema_v3 import TELEMETRY_SCHEMA_VERSION_V3
+from tools.telemetry.schema_v3 import REASONING_TRACE_INDEX_PATH, TELEMETRY_SCHEMA_VERSION_V3
 from tools.telemetry.storage_sqlite import build_session_db, query_session_db, resolve_session_db_path
-from tools.telemetry.trace_graph import TraceGraphBuilder, TraceRecord, load_trace_index
+from tools.telemetry.trace_join import load_reasoning_trace_index
+from tools.telemetry.trace_graph import TraceEventRef, TraceGraphBuilder, TraceRecord, load_trace_index
 
 
 def test_protocol_roundtrip():
@@ -121,11 +132,14 @@ def test_remote_command_forwards_pack_and_filters():
     args = _build_parser().parse_args([])
     args.pack = ["runtime_core", "memory_debug"]
     args.field_filter = ["actions_log.data.confidence<0.5"]
+    args.trace_max_events = 4096
     cmd = _build_remote_agent_command(args)
     assert "--pack runtime_core" in cmd
     assert "--pack memory_debug" in cmd
     assert "--field-filter" in cmd
     assert "confidence<0.5" in cmd
+    assert "--trace-max-events" in cmd
+    assert "4096" in cmd
 
 
 def test_preview_tap_writer_emits_files_and_throttles(tmp_path):
@@ -282,9 +296,11 @@ def test_capture_and_replay_roundtrip(tmp_path):
     assert manifest.get("schema_version") == TELEMETRY_SCHEMA_VERSION_V3
     assert manifest.get("trace_index_path") == "trace_index.json"
     assert isinstance(manifest.get("trace_count"), int)
+    assert manifest.get("reasoning_trace_index_path") == REASONING_TRACE_INDEX_PATH
     assert (session_dir / "session.db").exists()
     assert (session_dir / "quality_report.json").exists()
     assert (session_dir / "labels.weak.jsonl").exists()
+    assert (session_dir / REASONING_TRACE_INDEX_PATH).exists()
 
 
 def test_session_db_query_and_quality_gate(tmp_path):
@@ -359,6 +375,24 @@ def test_query_trace_filter_scopes_event_results(tmp_path):
     assert out["events"] == []
 
 
+def test_query_trace_filter_matches_journal_trace_without_reasoning_rows(tmp_path):
+    session_dir = tmp_path / "session"
+    writer = SessionCaptureWriter(CaptureConfig(directory=str(session_dir), frames_mode="off", max_seconds=0.0))
+    writer.write(
+        {
+            "type": "event",
+            "source": "journal",
+            "ts_wall_s": time.time(),
+            "payload": {"line": "planner warning request_id=42 timeout while waiting"},
+            "level": "warning",
+        }
+    )
+    writer.close()
+    out = query_session_db(str(session_dir), query="trace:req:42", limit=10)
+    assert len(out["events"]) == 1
+    assert out["events"][0].get("trace_id") == "req:42"
+
+
 def test_capture_reasoning_index_includes_confidence(tmp_path):
     session_dir = tmp_path / "session"
     writer = SessionCaptureWriter(CaptureConfig(directory=str(session_dir), frames_mode="off", max_seconds=0.0))
@@ -373,6 +407,84 @@ def test_capture_reasoning_index_includes_confidence(tmp_path):
     writer.close()
     reasoning_index = json.loads((session_dir / "reasoning_index.json").read_text(encoding="utf-8"))
     assert reasoning_index["events"][0].get("confidence") == 0.2
+
+
+def test_behavior_reasoning_normalization_and_joined_index(tmp_path):
+    session_dir = tmp_path / "session"
+    writer = SessionCaptureWriter(CaptureConfig(directory=str(session_dir), frames_mode="off", max_seconds=0.0))
+    writer.write(
+        {
+            "type": "event",
+            "source": "perception_log",
+            "ts_wall_s": 10.0,
+            "payload": {"data": {"primary_person_conf": 0.91, "debug": {"zone_hint": "desk"}, "frame_id": 77}},
+        }
+    )
+    writer.write(
+        {
+            "type": "event",
+            "source": "behavior_env_log",
+            "ts_wall_s": 10.1,
+            "payload": {
+                "data": {
+                    "request_id": 7,
+                    "phase": "env_processor",
+                    "status": "ok",
+                    "delta_score": 0.78,
+                    "summary": "person reached toward lamp",
+                    "latency_ms": 130.0,
+                }
+            },
+        }
+    )
+    writer.write(
+        {
+            "type": "event",
+            "source": "behavior_planner_log",
+            "ts_wall_s": 10.2,
+            "payload": {
+                "data": {
+                    "request_id": 7,
+                    "phase": "planner",
+                    "status": "ok",
+                    "decision_json": {"primitive": "hold", "confidence": 0.66, "command": {"target_zone": "desk"}},
+                    "rationale_short": "maintain gentle focus",
+                    "latency_ms": 220.0,
+                }
+            },
+        }
+    )
+    writer.close()
+
+    rows = load_reasoning_trace_index(str(session_dir))
+    assert rows
+    env_rows = [row for row in rows if row.get("component") == "env_processor"]
+    planner_rows = [row for row in rows if row.get("component") == "planner"]
+    assert env_rows
+    assert planner_rows
+    assert env_rows[0].get("perception_zone_hint") == "desk"
+    assert planner_rows[0].get("trace_id") == "req:7"
+
+
+def test_query_session_db_supports_joined_kind_and_component(tmp_path):
+    session_dir = tmp_path / "session"
+    writer = SessionCaptureWriter(CaptureConfig(directory=str(session_dir), frames_mode="off", max_seconds=0.0))
+    writer.write(
+        {
+            "type": "event",
+            "source": "behavior_env_log",
+            "ts_wall_s": 20.0,
+            "payload": {"data": {"request_id": 5, "phase": "env_processor", "status": "ok", "summary": "desk state stable"}},
+        }
+    )
+    writer.close()
+
+    out = query_session_db(str(session_dir), query="kind:joined component:env_processor", limit=5)
+    joined = out.get("joined")
+    assert isinstance(joined, list)
+    assert len(joined) >= 1
+    assert joined[0].get("component") == "env_processor"
+    assert out.get("events") == []
 
 
 def test_manifest_trace_index_override_used_for_index_and_export(tmp_path):
@@ -563,9 +675,10 @@ def test_panel_preset_changes_active_panels():
     state.configure_panels(["summary"], focus_panel="summary")
     _apply_panel_preset(state, args, "1")
     assert "reasoning_stream" in args.panel
-    assert "request_detail" in args.panel
+    assert "alignment" in args.panel
+    assert "video" in args.panel
     assert "trace_list" in args.panel
-    assert "trace_detail" in args.panel
+    assert "trace_detail" not in args.panel
 
 
 def test_dashboard_trace_selection_and_pin():
@@ -678,6 +791,426 @@ def test_trace_graph_extracts_id_from_orchestrator_text():
     assert traces[0].req_id == 77
 
 
+def test_trace_graph_roundtrip_preserves_event_ref_metadata(tmp_path):
+    b = TraceGraphBuilder(match_window_s=2.0, max_events=100)
+    b.ingest(
+        {
+            "seq": 1,
+            "source": "journal",
+            "ts_wall_s": 1.0,
+            "payload": {"line": "orchestrator timeout request_id=77 error path"},
+            "level": "warning",
+        }
+    )
+    path = tmp_path / "trace_index.json"
+    path.write_text(json.dumps(b.build_trace_index()), encoding="utf-8")
+    traces = load_trace_index(str(path))
+    assert traces
+    ref = traces[0].event_refs[0]
+    assert ref.req_id == 77
+    assert ref.severity == "error"
+    assert ref.summary
+
+
+def test_capture_rebuilds_trace_index_from_full_session_events(tmp_path):
+    session_dir = tmp_path / "session"
+    writer = SessionCaptureWriter(CaptureConfig(directory=str(session_dir), frames_mode="off", max_seconds=0.0, trace_max_events=64))
+    for req_id in range(70):
+        writer.write(
+            {
+                "type": "event",
+                "source": "timeline_log",
+                "ts_wall_s": float(req_id),
+                "payload": {"data": {"type": "req_end", "payload": {"request_id": req_id, "status": "ok"}}},
+            }
+        )
+    writer.close()
+    traces = load_trace_index(str(session_dir / "trace_index.json"))
+    req_ids = {trace.req_id for trace in traces}
+    assert 0 in req_ids
+    assert 69 in req_ids
+    assert len(req_ids) == 70
+
+
 def test_can_preload_trace_index_requires_no_field_filters():
     assert _can_preload_trace_index(field_filters=[]) is True
     assert _can_preload_trace_index(field_filters=[object()]) is False
+
+
+def test_query_session_db_supports_latency_ts_and_sort(tmp_path):
+    session_dir = tmp_path / "session"
+    writer = SessionCaptureWriter(CaptureConfig(directory=str(session_dir), frames_mode="off", max_seconds=0.0))
+    writer.write(
+        {
+            "type": "event",
+            "source": "timeline_log",
+            "ts_wall_s": 1.0,
+            "payload": {"data": {"type": "req_end", "payload": {"request_id": 1, "status": "ok", "latency_ms": 150}}},
+        }
+    )
+    writer.write(
+        {
+            "type": "event",
+            "source": "timeline_log",
+            "ts_wall_s": 2.5,
+            "payload": {"data": {"type": "req_end", "payload": {"request_id": 2, "status": "parse_fail", "latency_ms": 3100}}},
+        }
+    )
+    writer.close()
+
+    out = query_session_db(str(session_dir), query="kind:event latency_ms>1000 sort:latency order:desc", limit=10)
+    assert out["events"]
+    assert out["events"][0]["req_id"] == 2
+    out_ts = query_session_db(str(session_dir), query="kind:event ts:[2.0,3.0]", limit=10)
+    assert out_ts["events"]
+    assert out_ts["events"][0]["req_id"] == 2
+    out_or = query_session_db(str(session_dir), query="kind:event status:ok|parse_fail", limit=10)
+    assert len(out_or["events"]) == 2
+
+
+def test_annotations_append_and_load(tmp_path):
+    session_dir = tmp_path / "session"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    append_annotation(str(session_dir), {"tag": "bookmark", "trace_id": "req:7", "req_id": 7, "note": "interesting failure"})
+    rows = load_annotations(str(session_dir))
+    assert rows
+    assert rows[-1]["trace_id"] == "req:7"
+    all_rows = load_annotations(str(session_dir), limit=0)
+    assert len(all_rows) >= 1
+
+
+def test_annotation_key_includes_event_index():
+    a = {"tag": "bookmark", "trace_id": "req:1", "req_id": 1, "event_index": 11, "created_at_wall_s": 1.0}
+    b = {"tag": "bookmark", "trace_id": "req:1", "req_id": 1, "event_index": 12, "created_at_wall_s": 1.0}
+    assert annotation_key(a) != annotation_key(b)
+
+
+def test_dashboard_state_annotation_dedup():
+    state = DashboardState(host="jetson")
+    row = {
+        "tag": "bookmark",
+        "trace_id": "req:9",
+        "req_id": 9,
+        "note": "keep this",
+        "created_at_wall_s": 100.0,
+    }
+    assert state.add_annotation(dict(row)) is True
+    assert state.add_annotation(dict(row)) is False
+    assert len(state.annotations) == 1
+
+
+def test_dashboard_state_drops_monotonic_from_transport_and_agent():
+    state = DashboardState(host="jetson")
+    state.apply({"source": "transport_stats", "payload": {"dropped_events": 7}})
+    assert state.dropped_events_reported == 7
+    state.apply({"source": "agent", "payload": {"dropped_events": 3}})
+    assert state.dropped_events_reported == 7
+    state.apply({"source": "agent", "payload": {"dropped_events": 11}})
+    assert state.dropped_events_reported == 11
+
+
+def test_build_in_memory_query_rows_includes_trace_event_rows():
+    state = DashboardState(host="jetson")
+    state.query_text = "timeout"
+    state.set_traces(
+        [
+            TraceRecord(
+                trace_id="req:42",
+                req_id=42,
+                start_ts_wall_s=1.0,
+                end_ts_wall_s=1.2,
+                duration_ms=200.0,
+                status="timeout",
+                severity="error",
+                summary="timeout",
+                event_refs=(
+                    TraceEventRef(
+                        event_index=9,
+                        source="journal",
+                        ts_wall_s=1.1,
+                        req_id=42,
+                        phase="journal",
+                        status="timeout",
+                        latency_ms=None,
+                        severity="error",
+                        summary="planner timeout while waiting",
+                    ),
+                ),
+            )
+        ]
+    )
+    rows = _build_in_memory_query_rows(state, limit=10)
+    assert rows
+    assert any(row.get("kind") == "event" and row.get("trace_id") == "req:42" for row in rows)
+
+
+def test_build_in_memory_alignment_rows_from_trace_event_refs():
+    trace = TraceRecord(
+        trace_id="req:9",
+        req_id=9,
+        start_ts_wall_s=1.0,
+        end_ts_wall_s=1.2,
+        duration_ms=200.0,
+        status="warning",
+        severity="warning",
+        summary="trace",
+        event_refs=(
+            TraceEventRef(
+                event_index=2,
+                source="timeline_log",
+                ts_wall_s=1.1,
+                req_id=9,
+                phase="req_end",
+                status="parse_fail",
+                latency_ms=2100.0,
+                severity="error",
+                summary="parse fail",
+            ),
+        ),
+    )
+    rows = _build_in_memory_alignment_rows(trace=trace, limit=5)
+    assert rows
+    assert rows[0]["event_index"] == 2
+    assert rows[0]["component"] == "timeline_log"
+    assert rows[0]["status"] == "parse_fail"
+
+
+def test_integrity_report_write_and_verify(tmp_path):
+    session_dir = tmp_path / "session"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / "events.jsonl").write_text("{\"source\":\"x\"}\n", encoding="utf-8")
+    report = build_integrity_report(str(session_dir), files=["events.jsonl"])
+    write_integrity_report(str(session_dir), report)
+    verify_ok = verify_integrity_report(str(session_dir))
+    assert verify_ok["ok"] is True
+    (session_dir / "events.jsonl").write_text("{\"source\":\"y\"}\n", encoding="utf-8")
+    verify_bad = verify_integrity_report(str(session_dir))
+    assert verify_bad["ok"] is False
+    assert verify_bad["mismatch"] == ["events.jsonl"]
+
+
+def test_presets_loader_supports_custom_file(tmp_path):
+    cfg = tmp_path / "presets.yaml"
+    cfg.write_text(
+        json.dumps(
+            {
+                "presets": [
+                    {
+                        "name": "custom_one",
+                        "description": "custom preset",
+                        "packs": ["behavior_v2_debug"],
+                        "panels": ["summary", "trace_list"],
+                        "query": "status:parse_fail",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    presets = load_viewer_presets(str(cfg))
+    assert "baseline" in presets
+    assert "custom_one" in presets
+    assert presets["custom_one"].query == "status:parse_fail"
+
+
+def test_dataset_export_profiles_emit_manifest(tmp_path):
+    session_dir = tmp_path / "session"
+    writer = SessionCaptureWriter(CaptureConfig(directory=str(session_dir), frames_mode="off", max_seconds=0.0))
+    writer.write(
+        {
+            "type": "event",
+            "source": "timeline_log",
+            "ts_wall_s": 10.0,
+            "payload": {"data": {"type": "req_end", "payload": {"request_id": 1, "status": "ok", "latency_ms": 150}}},
+        }
+    )
+    writer.write(
+        {
+            "type": "event",
+            "source": "timeline_log",
+            "ts_wall_s": 11.0,
+            "payload": {"data": {"type": "req_end", "payload": {"request_id": 2, "status": "parse_fail", "latency_ms": 3200}}},
+        }
+    )
+    writer.close()
+    out = export_dataset_rows(str(session_dir), profile="strict")
+    assert out["row_count"] >= 1
+    manifest_path = pathlib.Path(out["manifest_path"])
+    assert manifest_path.exists()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["profile"] == "strict"
+
+
+def test_dataset_export_includes_annotation_linked_rows(tmp_path):
+    session_dir = tmp_path / "session"
+    writer = SessionCaptureWriter(CaptureConfig(directory=str(session_dir), frames_mode="off", max_seconds=0.0))
+    writer.write(
+        {
+            "type": "event",
+            "source": "timeline_log",
+            "ts_wall_s": 1.0,
+            "payload": {"data": {"type": "req_end", "payload": {"request_id": 55, "status": "ok", "latency_ms": 120}}},
+        }
+    )
+    writer.close()
+    append_annotation(
+        str(session_dir),
+        {
+            "tag": "bookmark",
+            "trace_id": "req:55",
+            "req_id": 55,
+            "note": "good reference",
+        },
+    )
+
+    out = export_dataset_rows(str(session_dir), profile="hard_cases", include_unlabeled=False)
+    assert out["row_count"] == 1
+    row_lines = (session_dir / "dataset_rows.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    row = json.loads(row_lines[0])
+    assert row["trace_id"] == "req:55"
+    assert row["annotations"]
+    assert row["annotations"][0]["tag"] == "bookmark"
+    assert "annotation" in row["inclusion_reasons"]
+    manifest = json.loads((session_dir / "dataset_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["annotated_row_count"] == 1
+    assert manifest["annotation_count"] >= 1
+    assert manifest["annotation_coverage_ratio"] > 0.0
+    assert manifest["source_counts"].get("timeline_log") == 1
+    assert manifest["status_counts"].get("ok") == 1
+    assert manifest["inclusion_reason_counts"].get("annotation") == 1
+
+
+def test_dataset_export_strict_keeps_annotation_curated_rows(tmp_path):
+    session_dir = tmp_path / "session"
+    writer = SessionCaptureWriter(CaptureConfig(directory=str(session_dir), frames_mode="off", max_seconds=0.0))
+    writer.write(
+        {
+            "type": "event",
+            "source": "timeline_log",
+            "ts_wall_s": 1.0,
+            "payload": {"data": {"type": "req_end", "payload": {"request_id": 88, "status": "ok", "latency_ms": 120}}},
+        }
+    )
+    writer.close()
+    append_annotation(
+        str(session_dir),
+        {
+            "tag": "bookmark",
+            "trace_id": "req:88",
+            "req_id": 88,
+            "note": "include this in strict curation",
+        },
+    )
+    out = export_dataset_rows(str(session_dir), profile="strict", include_unlabeled=False)
+    assert out["row_count"] == 1
+    row = json.loads((session_dir / "dataset_rows.jsonl").read_text(encoding="utf-8").strip().splitlines()[0])
+    assert "annotation" in row["inclusion_reasons"]
+    manifest = json.loads((session_dir / "dataset_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["annotated_row_count"] == 1
+
+
+def test_baseline_preset_is_lean():
+    presets = load_viewer_presets("")
+    baseline = presets["baseline"]
+    assert baseline.panels == ["summary", "trace_list", "reasoning_stream", "alignment", "quality", "video"]
+
+
+def test_run_curation_export_helper(tmp_path):
+    session_dir = tmp_path / "session"
+    writer = SessionCaptureWriter(CaptureConfig(directory=str(session_dir), frames_mode="off", max_seconds=0.0))
+    writer.write(
+        {
+            "type": "event",
+            "source": "timeline_log",
+            "ts_wall_s": 1.0,
+            "payload": {"data": {"type": "req_end", "payload": {"request_id": 9, "status": "parse_fail", "latency_ms": 2800}}},
+        }
+    )
+    writer.close()
+    out = _run_curation_export(session_dir=str(session_dir), profile="hard_cases")
+    assert out["ok"] is True
+    assert out["row_count"] >= 1
+    assert pathlib.Path(out["output_path"]).exists()
+
+
+def test_run_curation_export_helper_missing_dir(tmp_path):
+    out = _run_curation_export(session_dir=str(tmp_path / "missing"), profile="hard_cases")
+    assert out["ok"] is False
+    assert "session directory unavailable" in str(out["error"])
+
+
+def test_run_curation_export_helper_zero_rows_fails(tmp_path):
+    session_dir = tmp_path / "session"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    out = _run_curation_export(session_dir=str(session_dir), profile="hard_cases")
+    assert out["ok"] is False
+    assert "zero rows" in str(out["error"])
+
+
+def test_resolve_live_save_session_dir_auto_on_curate():
+    path, note = _resolve_live_save_session_dir(
+        replay_mode=False,
+        save_session_dir="",
+        curate_on_exit=True,
+        now_wall_s=1700000000.0,
+    )
+    assert path.startswith("logs/telemetry/session_curate_")
+    assert "auto save_session" in note
+
+
+def test_resolve_live_save_session_dir_expands_user_path():
+    home = pathlib.Path.home()
+    path, note = _resolve_live_save_session_dir(
+        replay_mode=False,
+        save_session_dir="~/pala_telemetry_test",
+        curate_on_exit=False,
+        now_wall_s=1700000000.0,
+    )
+    assert path.startswith(str(home))
+    assert note == ""
+
+
+def test_resolve_live_save_session_dir_preserves_existing():
+    path, note = _resolve_live_save_session_dir(
+        replay_mode=False,
+        save_session_dir="logs/telemetry/custom",
+        curate_on_exit=True,
+        now_wall_s=1700000000.0,
+    )
+    assert path == "logs/telemetry/custom"
+    assert note == ""
+
+
+def test_paths_equivalent_detects_same_directory(tmp_path):
+    target = tmp_path / "session"
+    target.mkdir(parents=True, exist_ok=True)
+    left = str(target)
+    right = str(target / ".." / "session")
+    assert _paths_equivalent(left, right) is True
+
+
+def test_doctor_session_dir_flags_missing_v3_artifacts(tmp_path):
+    session_dir = tmp_path / "session"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / "events.jsonl").write_text("{}", encoding="utf-8")
+    (session_dir / "manifest.json").write_text(json.dumps({"schema_version": 3}), encoding="utf-8")
+    checks = _check_session_dir(str(session_dir))
+    summary = {check.name: check for check in checks}
+    assert summary["session:v3_artifacts"].status == "fail"
+
+
+def test_doctor_session_dir_invalid_schema_value_warns(tmp_path):
+    session_dir = tmp_path / "session"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / "events.jsonl").write_text("{}", encoding="utf-8")
+    (session_dir / "manifest.json").write_text(json.dumps({"schema_version": "nope"}), encoding="utf-8")
+    checks = _check_session_dir(str(session_dir))
+    summary = {check.name: check for check in checks}
+    assert summary["session:schema_version"].status == "warn"
+
+
+def test_viewer_help_surface_is_compact():
+    parser = _build_parser()
+    help_text = parser.format_help()
+    options = sorted(set(re.findall(r"--[a-z0-9][a-z0-9-]*", help_text)))
+    assert len(options) <= 24

@@ -101,7 +101,7 @@ cd ~/pala
 uv run python -m pala.main
 ```
 
-Quick end-to-end planner smoke (Jetson or Mac):
+Quick endpoint smoke (Jetson or Mac):
 
 ```bash
 cd ~/pala

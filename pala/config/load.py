@@ -80,9 +80,13 @@ class CosmosConfig:
     # planner cadence
     max_hz: float = 1.0
     planner_hz: float = 1.0
+    planner_event_delta_threshold: float = 0.65
+    planner_event_cooldown_s: float = 0.7
     planner_strict_schema: bool = True
     planner_allow_frame_fetch: bool = True
     planner_max_tool_calls_per_cycle: int = 1
+    planner_max_frames: int = 1
+    planner_include_latest_frame: bool = True
     # summarizer cadence and media sampling
     summarizer_enabled: bool = True
     summarizer_hz: float = 1.0
@@ -99,6 +103,10 @@ class CosmosConfig:
     video_max_width: int = 320
     video_jpeg_quality: int = 60
     request_timeout_ms: int = 5000
+    behavior_error_backoff_s: float = 1.5
+    behavior_client_error_backoff_s: float = 5.0
+    env_max_tokens: int = 900
+    planner_max_tokens: int = 900
     response_ttl_ms: int = 1500
     memory_enabled: bool = True
     memory_jsonl_path: str = "logs/orchestrator_memory.jsonl"
@@ -123,6 +131,9 @@ class CosmosConfig:
     memory_recent_decisions: int = 8
     memory_recent_summaries: int = 8
     memory_recent_reasoning: int = 8
+    behavior_env_log_path: str = "logs/behavior_env.jsonl"
+    behavior_planner_log_path: str = "logs/behavior_planner.jsonl"
+    behavior_reasoning_log_path: str = "logs/behavior_reasoning.jsonl"
 
 
 @dataclass
@@ -342,6 +353,14 @@ def load_config(path: str) -> RobotConfig:
         ),
         max_hz=_as_float(cosmos_raw.get("max_hz", 1.0), "cosmos.max_hz"),
         planner_hz=_as_float(planner_hz_raw, "cosmos.planner_hz"),
+        planner_event_delta_threshold=_as_float(
+            cosmos_raw.get("planner_event_delta_threshold", 0.65),
+            "cosmos.planner_event_delta_threshold",
+        ),
+        planner_event_cooldown_s=_as_float(
+            cosmos_raw.get("planner_event_cooldown_s", 0.7),
+            "cosmos.planner_event_cooldown_s",
+        ),
         planner_strict_schema=_as_bool(cosmos_raw.get("planner_strict_schema", True), "cosmos.planner_strict_schema"),
         planner_allow_frame_fetch=_as_bool(
             cosmos_raw.get("planner_allow_frame_fetch", True),
@@ -350,6 +369,11 @@ def load_config(path: str) -> RobotConfig:
         planner_max_tool_calls_per_cycle=_as_int(
             cosmos_raw.get("planner_max_tool_calls_per_cycle", 1),
             "cosmos.planner_max_tool_calls_per_cycle",
+        ),
+        planner_max_frames=_as_int(cosmos_raw.get("planner_max_frames", 1), "cosmos.planner_max_frames"),
+        planner_include_latest_frame=_as_bool(
+            cosmos_raw.get("planner_include_latest_frame", True),
+            "cosmos.planner_include_latest_frame",
         ),
         summarizer_enabled=_as_bool(cosmos_raw.get("summarizer_enabled", True), "cosmos.summarizer_enabled"),
         summarizer_hz=_as_float(cosmos_raw.get("summarizer_hz", 1.0), "cosmos.summarizer_hz"),
@@ -384,6 +408,16 @@ def load_config(path: str) -> RobotConfig:
         video_max_width=_as_int(cosmos_raw.get("video_max_width", 320), "cosmos.video_max_width"),
         video_jpeg_quality=_as_int(cosmos_raw.get("video_jpeg_quality", 60), "cosmos.video_jpeg_quality"),
         request_timeout_ms=_as_int(cosmos_raw.get("request_timeout_ms", 5000), "cosmos.request_timeout_ms"),
+        behavior_error_backoff_s=_as_float(
+            cosmos_raw.get("behavior_error_backoff_s", 1.5),
+            "cosmos.behavior_error_backoff_s",
+        ),
+        behavior_client_error_backoff_s=_as_float(
+            cosmos_raw.get("behavior_client_error_backoff_s", 5.0),
+            "cosmos.behavior_client_error_backoff_s",
+        ),
+        env_max_tokens=_as_int(cosmos_raw.get("env_max_tokens", 900), "cosmos.env_max_tokens"),
+        planner_max_tokens=_as_int(cosmos_raw.get("planner_max_tokens", 900), "cosmos.planner_max_tokens"),
         response_ttl_ms=_as_int(cosmos_raw.get("response_ttl_ms", 1500), "cosmos.response_ttl_ms"),
         memory_enabled=_as_bool(cosmos_raw.get("memory_enabled", True), "cosmos.memory_enabled"),
         memory_jsonl_path=str(cosmos_raw.get("memory_jsonl_path", "logs/orchestrator_memory.jsonl")),
@@ -448,6 +482,13 @@ def load_config(path: str) -> RobotConfig:
         memory_recent_reasoning=_as_int(
             cosmos_raw.get("memory_recent_reasoning", 8),
             "cosmos.memory_recent_reasoning",
+        ),
+        behavior_env_log_path=str(cosmos_raw.get("behavior_env_log_path", "logs/behavior_env.jsonl")),
+        behavior_planner_log_path=str(
+            cosmos_raw.get("behavior_planner_log_path", "logs/behavior_planner.jsonl")
+        ),
+        behavior_reasoning_log_path=str(
+            cosmos_raw.get("behavior_reasoning_log_path", "logs/behavior_reasoning.jsonl")
         ),
     )
 

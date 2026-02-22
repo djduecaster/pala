@@ -10,6 +10,10 @@ SESSION_DB_PATH = "session.db"
 QUALITY_REPORT_PATH = "quality_report.json"
 WEAK_LABELS_PATH = "labels.weak.jsonl"
 DATASET_ROWS_PATH = "dataset_rows.jsonl"
+REASONING_TRACE_INDEX_PATH = "reasoning_trace_index.json"
+INTEGRITY_REPORT_PATH = "integrity.json"
+ANNOTATIONS_PATH = "annotations.jsonl"
+DATASET_MANIFEST_PATH = "dataset_manifest.json"
 
 
 def v3_artifact_paths() -> Dict[str, str]:
@@ -18,6 +22,10 @@ def v3_artifact_paths() -> Dict[str, str]:
         "quality_report_path": QUALITY_REPORT_PATH,
         "weak_labels_path": WEAK_LABELS_PATH,
         "dataset_rows_path": DATASET_ROWS_PATH,
+        "dataset_manifest_path": DATASET_MANIFEST_PATH,
+        "reasoning_trace_index_path": REASONING_TRACE_INDEX_PATH,
+        "integrity_report_path": INTEGRITY_REPORT_PATH,
+        "annotations_path": ANNOTATIONS_PATH,
     }
 
 
@@ -44,6 +52,8 @@ def upgrade_manifest_v3(
             out["indexed_trace_count"] = int(index_summary["trace_count"])
         if "reasoning_count" in index_summary:
             out["indexed_reasoning_count"] = int(index_summary["reasoning_count"])
+        if "reasoning_trace_count" in index_summary:
+            out["indexed_reasoning_trace_count"] = int(index_summary["reasoning_trace_count"])
 
     if quality_report is not None:
         score = quality_report.get("score")

@@ -84,9 +84,13 @@ cosmos:
   # Planner cadence and parser policy.
   max_hz: 0.6
   planner_hz: 0.6
+  planner_event_delta_threshold: 0.65
+  planner_event_cooldown_s: 0.7
   planner_strict_schema: true
   planner_allow_frame_fetch: true
   planner_max_tool_calls_per_cycle: 1
+  planner_max_frames: 1
+  planner_include_latest_frame: true
   # Scene summarizer cadence.
   summarizer_enabled: true
   summarizer_hz: 1.0
@@ -103,7 +107,14 @@ cosmos:
   video_max_width: 320
   video_jpeg_quality: 55
   request_timeout_ms: 6000
+  behavior_error_backoff_s: 1.5
+  behavior_client_error_backoff_s: 5.0
+  env_max_tokens: 900
+  planner_max_tokens: 900
   response_ttl_ms: 5000
+  behavior_env_log_path: "logs/behavior_env.jsonl"
+  behavior_planner_log_path: "logs/behavior_planner.jsonl"
+  behavior_reasoning_log_path: "logs/behavior_reasoning.jsonl"
   # Legacy memory knobs (deprecated): retained for compatibility only; current planner context uses rolling transcript.
   memory_enabled: true
   memory_jsonl_path: "logs/orchestrator_memory.jsonl"

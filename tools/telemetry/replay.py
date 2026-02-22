@@ -5,6 +5,8 @@ import json
 import os
 from typing import Any, Dict, Iterator, Optional, Tuple
 
+from .integrity import verify_integrity_report
+
 
 class SessionReplayReader:
     def __init__(self, session_dir: str) -> None:
@@ -13,6 +15,8 @@ class SessionReplayReader:
         self._events_path = os.path.join(self._session_dir, "events.jsonl")
         self._manifest_path = os.path.join(self._session_dir, "manifest.json")
         self._manifest: Optional[Dict[str, Any]] = None
+        self._integrity: Optional[Dict[str, Any]] = None
+        self._decode_errors: int = 0
         if os.path.exists(self._manifest_path):
             try:
                 with open(self._manifest_path, "r", encoding="utf-8") as fh:
@@ -21,10 +25,22 @@ class SessionReplayReader:
                     self._manifest = loaded
             except Exception:
                 self._manifest = None
+        try:
+            self._integrity = verify_integrity_report(self._session_dir)
+        except Exception:
+            self._integrity = None
 
     @property
     def manifest(self) -> Optional[Dict[str, Any]]:
         return self._manifest
+
+    @property
+    def integrity(self) -> Optional[Dict[str, Any]]:
+        return self._integrity
+
+    @property
+    def decode_errors(self) -> int:
+        return int(self._decode_errors)
 
     def _hydrate_frame(self, payload: Dict[str, Any]) -> None:
         if "bytes_b64" in payload:
@@ -60,8 +76,10 @@ class SessionReplayReader:
                 try:
                     msg = json.loads(text)
                 except json.JSONDecodeError:
+                    self._decode_errors += 1
                     continue
                 if not isinstance(msg, dict):
+                    self._decode_errors += 1
                     continue
                 payload = msg.get("payload")
                 if isinstance(payload, dict) and msg.get("source") == "video_frame":

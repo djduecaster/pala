@@ -797,6 +797,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--actions-log", default="logs/actions.jsonl")
     parser.add_argument("--memory-log", default="logs/orchestrator_memory.jsonl")
     parser.add_argument("--timeline-log", default="logs/orchestrator_timeline.jsonl")
+    parser.add_argument("--behavior-env-log", default="logs/behavior_env.jsonl")
+    parser.add_argument("--behavior-planner-log", default="logs/behavior_planner.jsonl")
+    parser.add_argument("--behavior-reasoning-log", default="logs/behavior_reasoning.jsonl")
     parser.add_argument("--poll-ms", type=int, default=200)
     parser.add_argument("--from-start", action="store_true", help="Read logs from beginning instead of tailing.")
     parser.add_argument("--no-tegrastats", action="store_true")
@@ -831,6 +834,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--capture-max-seconds", type=float, default=0.0)
     parser.add_argument("--capture-manifest-version", type=int, default=TELEMETRY_SCHEMA_VERSION_V3)
     parser.add_argument("--trace-match-window-s", type=float, default=2.0)
+    parser.add_argument("--trace-max-events", type=int, default=20_000)
+    parser.add_argument("--index-live-every", type=int, default=0)
     return parser
 
 
@@ -889,6 +894,8 @@ def main() -> int:
             max_seconds=max(0.0, float(args.capture_max_seconds)),
             manifest_version=int(args.capture_manifest_version),
             trace_match_window_s=max(0.1, float(args.trace_match_window_s)),
+            trace_max_events=max(128, int(args.trace_max_events)),
+            index_live_every=max(0, int(args.index_live_every)),
             metadata={
                 "packs": list(resolved_packs.names),
                 "field_filters": list(args.field_filter or []),
@@ -1008,6 +1015,54 @@ def main() -> int:
             },
         )
         if _source_enabled("timeline_log", enabled_sources)
+        else None,
+        _make_worker_thread(
+            name="behavior_env_log",
+            target=_tail_jsonl_file,
+            kwargs={
+                "stop": stop,
+                "out_q": out_q,
+                "drops": drops,
+                "source": "behavior_env_log",
+                "path": args.behavior_env_log,
+                "poll_s": poll_s,
+                "start_at_end": start_at_end,
+                "warning_interval_s": max(0.2, float(args.warning_throttle_s)),
+            },
+        )
+        if _source_enabled("behavior_env_log", enabled_sources)
+        else None,
+        _make_worker_thread(
+            name="behavior_planner_log",
+            target=_tail_jsonl_file,
+            kwargs={
+                "stop": stop,
+                "out_q": out_q,
+                "drops": drops,
+                "source": "behavior_planner_log",
+                "path": args.behavior_planner_log,
+                "poll_s": poll_s,
+                "start_at_end": start_at_end,
+                "warning_interval_s": max(0.2, float(args.warning_throttle_s)),
+            },
+        )
+        if _source_enabled("behavior_planner_log", enabled_sources)
+        else None,
+        _make_worker_thread(
+            name="behavior_reasoning_log",
+            target=_tail_jsonl_file,
+            kwargs={
+                "stop": stop,
+                "out_q": out_q,
+                "drops": drops,
+                "source": "behavior_reasoning_log",
+                "path": args.behavior_reasoning_log,
+                "poll_s": poll_s,
+                "start_at_end": start_at_end,
+                "warning_interval_s": max(0.2, float(args.warning_throttle_s)),
+            },
+        )
+        if _source_enabled("behavior_reasoning_log", enabled_sources)
         else None,
         _make_worker_thread(
             name="heartbeat",

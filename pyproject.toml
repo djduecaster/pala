@@ -15,7 +15,24 @@ dependencies = [
 dev = [
     "onnx>=1.20.1",
     "pytest>=9.0.2",
+    "pytest-cov>=7.0.0",
 ]
 
 [tool.setuptools.packages.find]
 include = ["pala*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["pala"]
+omit = [
+    "pala/hardware/camera_gst.py",
+    "pala/perception/detector/deepstream_backend.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+fail_under = 85

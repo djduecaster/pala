@@ -43,6 +43,11 @@ When `--mode jetson_full` or `--mode jetson_perception` is active and detector i
 - `uv` installed
 - Python pinned via `uv` (**3.10.12**)
 
+Telemetry quickstart:
+- `uv run python -m tools.telemetry.mac_viewer --jetson-host jetson`
+- `uv run python -m tools.telemetry.doctor --jetson-host jetson`
+- Full workflow/docs: `tools/telemetry/README.md`
+
 ### Jetson
 - `uv` installed (e.g. `~/.local/bin/uv`)
 - Python 3.x available (JetPack default is fine)
@@ -164,10 +169,9 @@ This script:
 - starts Cosmos NIM container,
 - waits for `http://127.0.0.1:8000/v1/health/ready`.
 
-On Jetson (or Mac in `--mode dev`) verify planner integration:
+On Jetson (or Mac in `--mode dev`) verify remote service connectivity:
 ```
 cd ~/pala
-export PALA_COSMOS_PROMPT="Prioritize calm, safe desk-companion behavior."
 ./tools/cosmos_planner_smoke.sh --base-url "http://<BREV_PUBLIC_IP>:8000" --mode dev --seconds 25
 ```
 
@@ -190,38 +194,14 @@ uv run python tools/cosmos_image_probe.py --base-url "http://<BREV_PUBLIC_IP>:80
 ```
 
 Pass criteria:
-- runtime logs include `orchestrator stats requests=... successes=...`,
-- `logs/orchestrator_timeline.jsonl` includes `run_start`, `request_start`, `request_end`, and `decision_event`.
+- Runtime starts cleanly.
+- Perception/control/action logs are produced.
 
-## Cosmos Orchestrator (Current Contract)
+## Behavior / Planner Reset
 
-The planner is now remote-first when Cosmos is enabled:
-- No local semantic fallback is synthesized while remote is configured.
-- Until first remote decision arrives, behavior emits a neutral hold action.
-- Reasoning probe exists for diagnostics but is disabled by default in `config/robot.yaml`.
+Behavior and planner internals are intentionally reset for a clean-slate rebuild.
 
-Request shape to Cosmos:
-- `system` message is short: `You are a helpful assistant.`
-- `user.content` is media-first:
-  - zero or more `image_url` entries (rolling multi-frame window),
-  - one `text` entry containing policy blocks + output instructions.
-- Text contract asks for:
-  - `<think>...</think>` reasoning,
-  - JSON decision object after `</think>`.
-
-Decision context currently passed in user text:
-- `control_state` (active primitive/age + latest accepted decision),
-- `memory.working_memory` (decision + reasoning lines),
-- `memory.active_commitment` (current short-lived intent/primitive commitment),
-- `memory.scene_memory` + `memory.long_term_memory` anchors,
-- `frame_meta` (frames sent + frame age).
-
-Notes:
-- Local perception belief/summary packets are intentionally not sent to Cosmos right now.
-- Legacy memory config keys are kept for compatibility, but planner context is transcript-driven.
-- Parser accepts plain JSON, fenced JSON, and mixed `<think>` + JSON replies.
-- Proposed next-step layered memory design is documented in `docs/memory_architecture.md`.
-
-Debug files:
-- `logs/runtime_debug.log` (request lifecycle, parse failures, reasoning previews).
-- `logs/orchestrator_timeline.jsonl` (structured event stream for replay/analysis).
+TODO:
+- Re-document the new behavior architecture.
+- Re-document the new planner/orchestrator contract.
+- Re-document memory/context payload contracts and debug expectations.
