@@ -72,9 +72,7 @@ def test_config_bool_string_false_is_parsed_false(tmp_path):
                 "  enabled: 'false'",
                 "cosmos:",
                 "  enabled: 'false'",
-                "  memory_enabled: 'false'",
-                "  inflight_guard_enabled: 'false'",
-                "  reasoning_probe_enabled: 'false'",
+                "  planner_include_latest_frame: 'false'",
             ]
         )
     )
@@ -82,9 +80,7 @@ def test_config_bool_string_false_is_parsed_false(tmp_path):
     assert cfg.logging.enabled is False
     assert cfg.telemetry_preview.enabled is False
     assert cfg.cosmos.enabled is False
-    assert cfg.cosmos.memory_enabled is False
-    assert cfg.cosmos.inflight_guard_enabled is False
-    assert cfg.cosmos.reasoning_probe_enabled is False
+    assert cfg.cosmos.planner_include_latest_frame is False
 
 
 def test_config_rejects_invalid_mode(tmp_path):

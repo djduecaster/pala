@@ -15,15 +15,6 @@ from .perception import PerceptionNode, LatestFrameCache
 from .perception.preview_tap import PreviewTapWriter
 from .perception.detector import DummyDetector, JetsonDetector, DeepStreamDetector
 from .perception.frame_source import DummyFrameSource, CameraFrameSource
-from .planner import (
-    HeuristicPlanner,
-    AsyncOrchestratorPlanner,
-    AsyncSceneSummarizer,
-    MemoryManager,
-    MemoryManagerConfig,
-    TimelineConfig,
-    TimelineWriter,
-)
 from .behavior import BehaviorPolicy, BehaviorPolicyConfig
 from .control import TrajectoryExecutor
 from .control.primitives import PrimitiveKind, HoldCommand
@@ -55,9 +46,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     # Nodes
     perception = PerceptionNode(source=_build_frame_source(cfg), detector=_build_detector(cfg))
-    planner = _build_planner(cfg, latest_frame)
     behavior = BehaviorPolicy(
-        planner=planner,
         config=_build_behavior_config(cfg, run_log_dir=run_log_dir),
         frame_cache=latest_frame,
         dwell_s=2.0,
@@ -260,8 +249,6 @@ def main(argv: Optional[list[str]] = None) -> int:
     finally:
         stop.set()
         perception.shutdown()
-        if hasattr(planner, "shutdown"):
-            planner.shutdown()
         if hasattr(behavior, "shutdown"):
             behavior.shutdown()
         servo.shutdown()
@@ -402,107 +389,6 @@ def _deepstream_preflight_error() -> Optional[str]:
     return None
 
 
-def _build_planner(cfg, latest_frame: LatestFrameCache):
-    if getattr(cfg, "cosmos", None) and cfg.cosmos.enabled:
-        base_url = os.getenv("PALA_COSMOS_BASE_URL") or cfg.cosmos.base_url
-        api_key = os.getenv("PALA_COSMOS_API_KEY")
-        model = os.getenv("PALA_COSMOS_MODEL") or cfg.cosmos.model
-        planner_prompt = os.getenv("PALA_COSMOS_PROMPT") or cfg.cosmos.planner_prompt
-        timeline = TimelineWriter(
-            TimelineConfig(
-                enabled=True,
-                jsonl_path=cfg.cosmos.orchestrator_timeline_jsonl_path,
-            )
-        )
-        memory_events = max(
-            64,
-            cfg.cosmos.memory_recent_decisions + cfg.cosmos.memory_recent_reasoning + (2 * cfg.cosmos.memory_recent_summaries),
-        )
-        memory_manager = MemoryManager(
-            MemoryManagerConfig(
-                enabled=cfg.cosmos.memory_enabled,
-                jsonl_path=cfg.cosmos.memory_jsonl_path,
-                recent_events=memory_events,
-                digest_items=0,
-                distill_every_n_events=0,
-            )
-        )
-        summarizer = None
-        if cfg.cosmos.summarizer_enabled:
-            summarizer = AsyncSceneSummarizer(
-                frame_cache=latest_frame,
-                provider=cfg.cosmos.provider,
-                base_url=base_url,
-                api_key=api_key,
-                model=model,
-                policy_version=cfg.cosmos.policy_version,
-                summarizer_hz=cfg.cosmos.summarizer_hz,
-                max_frame_age_ms=cfg.cosmos.max_frame_age_ms,
-                summary_window_s=cfg.cosmos.summary_window_s,
-                summary_max_frames=cfg.cosmos.summary_max_frames,
-                summary_max_width=cfg.cosmos.summary_max_width,
-                summary_jpeg_quality=cfg.cosmos.summary_jpeg_quality,
-                request_timeout_ms=cfg.cosmos.summarizer_timeout_ms,
-                request_min_fresh_frames=cfg.cosmos.request_min_fresh_frames,
-                timeline=timeline,
-                memory_manager=memory_manager,
-            )
-        return AsyncOrchestratorPlanner(
-            frame_cache=latest_frame,
-            fallback=HeuristicPlanner(),
-            summarizer=summarizer,
-            memory_manager=memory_manager,
-            timeline=timeline,
-            provider=cfg.cosmos.provider,
-            base_url=base_url,
-            api_key=api_key,
-            model=model,
-            planner_prompt=planner_prompt,
-            runtime_mode=cfg.mode,
-            policy_version=cfg.cosmos.policy_version,
-            policy_identity=cfg.cosmos.policy_identity,
-            identity_file_path=cfg.cosmos.identity_file_path,
-            policy_capabilities=cfg.cosmos.policy_capabilities,
-            policy_safety=cfg.cosmos.policy_safety,
-            policy_style=cfg.cosmos.policy_style,
-            policy_output_contract=cfg.cosmos.policy_output_contract,
-            orchestrator_hz=cfg.cosmos.planner_hz,
-            max_frame_age_ms=cfg.cosmos.max_frame_age_ms,
-            video_window_s=cfg.cosmos.video_window_s,
-            video_max_frames=cfg.cosmos.video_max_frames,
-            video_max_width=cfg.cosmos.video_max_width,
-            video_jpeg_quality=cfg.cosmos.video_jpeg_quality,
-            request_timeout_ms=cfg.cosmos.request_timeout_ms,
-            response_ttl_ms=cfg.cosmos.response_ttl_ms,
-            summary_ttl_ms=cfg.cosmos.summary_ttl_ms,
-            planner_strict_schema=cfg.cosmos.planner_strict_schema,
-            planner_allow_frame_fetch=cfg.cosmos.planner_allow_frame_fetch,
-            planner_max_tool_calls_per_cycle=cfg.cosmos.planner_max_tool_calls_per_cycle,
-            memory_recent_decisions=cfg.cosmos.memory_recent_decisions,
-            memory_recent_summaries=cfg.cosmos.memory_recent_summaries,
-            memory_recent_reasoning=cfg.cosmos.memory_recent_reasoning,
-            memory_enabled=cfg.cosmos.memory_enabled,
-            memory_jsonl_path=cfg.cosmos.memory_jsonl_path,
-            memory_recent_events=cfg.cosmos.memory_recent_events,
-            memory_digest_items=cfg.cosmos.memory_digest_items,
-            memory_distill_every_n_events=cfg.cosmos.memory_distill_every_n_events,
-            context_max_transcript_items=cfg.cosmos.context_max_transcript_items,
-            context_transcript_max_items=cfg.cosmos.context_transcript_max_items,
-            context_transcript_per_type_max_items=cfg.cosmos.context_transcript_per_type_max_items,
-            context_transcript_max_chars=cfg.cosmos.context_transcript_max_chars,
-            context_memory_digest_max_items=cfg.cosmos.context_memory_digest_max_items,
-            decision_repeat_detector_window=cfg.cosmos.decision_repeat_detector_window,
-            inflight_guard_enabled=cfg.cosmos.inflight_guard_enabled,
-            request_min_fresh_frames=cfg.cosmos.request_min_fresh_frames,
-            reasoning_probe_enabled=cfg.cosmos.reasoning_probe_enabled,
-            reasoning_probe_hz=cfg.cosmos.reasoning_probe_hz,
-            reasoning_probe_timeout_ms=cfg.cosmos.reasoning_probe_timeout_ms,
-            reasoning_probe_max_tokens=cfg.cosmos.reasoning_probe_max_tokens,
-            commitment_ttl_ms=cfg.cosmos.commitment_ttl_ms,
-        )
-    return HeuristicPlanner()
-
-
 def _build_preview_tap(cfg) -> PreviewTapWriter:
     tap_cfg = getattr(cfg, "telemetry_preview", None)
     if tap_cfg is None:
@@ -626,40 +512,59 @@ def _build_behavior_config(cfg, *, run_log_dir: Optional[str] = None) -> Behavio
         str(getattr(cosmos, "behavior_reasoning_log_path", "logs/behavior_reasoning.jsonl")),
         run_log_dir,
     )
+    trace_log_path = _scope_log_path(
+        str(getattr(cosmos, "behavior_trace_log_path", "logs/behavior_trace.jsonl")),
+        run_log_dir,
+    )
+    remote_enabled = bool(cosmos.enabled)
+    idle_after_cfg = float(getattr(cosmos, "idle_after_s", 6.0))
+    idle_glance_after_cfg = float(getattr(cosmos, "idle_glance_after_s", 10.0))
+    arbiter_margin_cfg = float(getattr(cosmos, "arbiter_base_margin", 0.10))
+    if not remote_enabled:
+        idle_after_cfg = 0.0
+        idle_glance_after_cfg = 0.8
+        arbiter_margin_cfg = 0.05
 
     return BehaviorPolicyConfig(
-        remote_enabled=bool(cosmos.enabled),
-        provider=str(getattr(cosmos, "provider", "brev")),
+        remote_enabled=remote_enabled,
         base_url=None if base_url in (None, "") else str(base_url),
         api_key=None if api_key in (None, "") else str(api_key),
         model=str(model),
         request_timeout_ms=int(getattr(cosmos, "request_timeout_ms", 6000)),
         error_backoff_s=float(getattr(cosmos, "behavior_error_backoff_s", 1.5)),
         client_error_backoff_s=float(getattr(cosmos, "behavior_client_error_backoff_s", 5.0)),
-        env_hz=float(getattr(cosmos, "summarizer_hz", 1.0)),
+        env_hz=float(getattr(cosmos, "summarizer_hz", 0.25)),
         planner_hz=float(getattr(cosmos, "planner_hz", 0.5)),
         planner_event_delta_threshold=float(getattr(cosmos, "planner_event_delta_threshold", 0.65)),
         planner_event_cooldown_s=float(getattr(cosmos, "planner_event_cooldown_s", 0.7)),
         max_frame_age_ms=int(getattr(cosmos, "max_frame_age_ms", 500)),
-        frame_window_s=float(getattr(cosmos, "summary_window_s", getattr(cosmos, "video_window_s", 6.0))),
-        env_max_frames=int(getattr(cosmos, "summary_max_frames", getattr(cosmos, "video_max_frames", 6))),
+        frame_window_s=float(getattr(cosmos, "summary_window_s", 6.0)),
+        env_max_frames=int(getattr(cosmos, "summary_max_frames", 1)),
         planner_max_frames=int(getattr(cosmos, "planner_max_frames", 1)),
-        frame_max_width=int(getattr(cosmos, "summary_max_width", getattr(cosmos, "video_max_width", 320))),
-        frame_jpeg_quality=int(getattr(cosmos, "summary_jpeg_quality", getattr(cosmos, "video_jpeg_quality", 60))),
+        frame_max_width=int(getattr(cosmos, "summary_max_width", 320)),
+        frame_jpeg_quality=int(getattr(cosmos, "summary_jpeg_quality", 55)),
         request_min_fresh_frames=int(getattr(cosmos, "request_min_fresh_frames", 1)),
         planner_include_latest_frame=bool(getattr(cosmos, "planner_include_latest_frame", True)),
-        env_max_tokens=int(getattr(cosmos, "env_max_tokens", 900)),
-        planner_max_tokens=int(getattr(cosmos, "planner_max_tokens", 900)),
+        env_max_tokens=int(getattr(cosmos, "env_max_tokens", 600)),
+        planner_max_tokens=int(getattr(cosmos, "planner_max_tokens", 360)),
+        proposer_max_age_s=max(0.2, float(getattr(cosmos, "response_ttl_ms", 2000)) / 1000.0),
+        planner_max_proposals=int(getattr(cosmos, "planner_max_proposals", 1)),
+        planner_use_env_context=bool(getattr(cosmos, "planner_use_env_context", True)),
+        arbiter_min_dwell_s=float(getattr(cosmos, "arbiter_min_dwell_s", 1.2)),
+        arbiter_base_margin=arbiter_margin_cfg,
+        arbiter_takeover_no_signal_streak=int(getattr(cosmos, "arbiter_takeover_no_signal_streak", 2)),
+        arbiter_takeover_no_commit_s=float(getattr(cosmos, "arbiter_takeover_no_commit_s", 2.0)),
+        idle_after_s=idle_after_cfg,
+        idle_glance_after_s=idle_glance_after_cfg,
         policy_identity=str(getattr(cosmos, "policy_identity", "You are PALA.")),
         policy_capabilities=str(getattr(cosmos, "policy_capabilities", "")),
         policy_safety=str(getattr(cosmos, "policy_safety", "")),
         policy_style=str(getattr(cosmos, "policy_style", "")),
         planner_prompt=str(planner_prompt),
-        repeated_breath_guard_count=int(getattr(cosmos, "repeated_breath_guard_count", 4)),
-        stale_breath_hold_after_s=float(getattr(cosmos, "stale_breath_hold_after_s", 12.0)),
         env_log_path=env_log_path,
         planner_log_path=planner_log_path,
         reasoning_log_path=reasoning_log_path,
+        trace_log_path=trace_log_path,
     )
 
 

@@ -7,7 +7,6 @@ import numpy as np
 
 from pala.behavior.world_state_store import DecisionSnapshot, WorldStateStore, WorldStateStoreConfig
 from pala.perception.preview_tap import PreviewTapWriter
-from pala.planner.memory_manager import MemoryManager, MemoryManagerConfig
 
 
 def test_world_state_store_write_failures_are_swallowed(monkeypatch, tmp_path, caplog):
@@ -107,38 +106,3 @@ def test_preview_tap_cleans_temp_files_when_write_fails_midway(tmp_path, monkeyp
     assert (tmp_path / "latest.jpg").exists() is False
     assert (tmp_path / "latest.json").exists() is False
 
-
-def test_memory_manager_ignores_malformed_existing_lines(tmp_path):
-    path = tmp_path / "memory.jsonl"
-    path.write_text(
-        "\n".join(
-            [
-                '{"type":"obs","payload":{"state":"tracking"}}',
-                "not json",
-                "[1,2,3]",
-                '{"type":"decision","payload":{"primitive":"hold"}}',
-            ]
-        )
-        + "\n",
-        encoding="utf-8",
-    )
-
-    mgr = MemoryManager(MemoryManagerConfig(enabled=True, jsonl_path=str(path), recent_events=10))
-    ctx = mgr.context()
-    assert len(ctx["recent_events"]) == 2
-    assert ctx["recent_events"][0]["type"] == "obs"
-    assert ctx["recent_events"][1]["type"] == "decision"
-
-
-def test_memory_manager_load_tolerates_read_errors(monkeypatch, tmp_path):
-    path = tmp_path / "memory.jsonl"
-    path.write_text("{}", encoding="utf-8")
-
-    def _raise_read(self, encoding="utf-8"):  # noqa: ARG001
-        raise OSError("permission denied")
-
-    monkeypatch.setattr(Path, "read_text", _raise_read)
-    mgr = MemoryManager(MemoryManagerConfig(enabled=True, jsonl_path=str(path)))
-    ctx = mgr.context()
-    assert ctx["recent_events"] == []
-    assert ctx["session_memory_digest"] == []

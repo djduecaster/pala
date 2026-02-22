@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import base64
+from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import datetime, timezone
 import io
 import logging
-import re
 import time
 from typing import Any, Callable, Dict, Mapping, Optional
 
@@ -15,13 +14,21 @@ from PIL import Image
 
 from ..types import ActionPlan, HoldCommand, PerceptionState, PrimitiveKind
 from ..utils import maybe_logger
-from .action_translator import ActionTranslator
-from .env_processor import CosmosEnvProcessor, EnvProcessorConfig, EnvProcessorParseResult
+from .action_compiler import ActionCompiler
+from .arbiter import Arbiter, ArbiterConfig
+from .context_builder import ContextBuilder
+from .env_summarizer import EnvSummarizer
 from .frame_window import RollingFrameWindow
-from .planner_client import CosmosPlannerClient, PlannerClientConfig, PlannerDecision
+from .governor import Governor
+from .health_manager import HealthManager
+from .idle_engine import IdleEngine, IdleEngineConfig
+from .intent_proposer import IntentProposer
 from .prompts import build_env_user_text, build_messages, build_planner_user_text
 from .remote_api import RemoteCallResult, extract_message_content, normalize_chat_url, post_chat_json
-from .world_state_store import DecisionSnapshot, WorldStateStore
+from .schemas import env_response_format, intent_response_format
+from .trace_bus import TraceBus
+from .types import ProposalCandidate, ProposerResponse
+from .world_state_store import DecisionSnapshot, EnvironmentSnapshot, WorldStateStore
 
 logger = logging.getLogger(__name__)
 
@@ -31,38 +38,55 @@ class BehaviorPolicyConfig:
     fallback_style: str = "calm"
     fallback_confidence: float = 0.1
     persist_every_step: bool = False
+
     remote_enabled: bool = False
-    provider: str = "brev"
     base_url: Optional[str] = None
     api_key: Optional[str] = None
     model: str = "nvidia/cosmos-reason2-2b"
-    request_timeout_ms: int = 6000
+
+    request_timeout_ms: int = 20000
     error_backoff_s: float = 1.5
     client_error_backoff_s: float = 5.0
-    env_hz: float = 1.0
-    planner_hz: float = 0.5
+
+    env_hz: float = 0.25
+    planner_hz: float = 0.6
     planner_event_delta_threshold: float = 0.65
     planner_event_cooldown_s: float = 0.7
+
     max_frame_age_ms: int = 500
     frame_window_s: float = 6.0
-    env_max_frames: int = 6
+    env_max_frames: int = 4
     planner_max_frames: int = 1
     frame_max_width: int = 320
     frame_jpeg_quality: int = 60
     request_min_fresh_frames: int = 1
     planner_include_latest_frame: bool = True
-    env_max_tokens: int = 900
-    planner_max_tokens: int = 900
+
+    env_max_tokens: int = 600
+    planner_max_tokens: int = 360
+
+    proposer_max_age_s: float = 2.0
+    planner_max_proposals: int = 1
+    planner_use_env_context: bool = True
+
+    arbiter_min_dwell_s: float = 1.2
+    arbiter_base_margin: float = 0.05
+    arbiter_takeover_no_signal_streak: int = 2
+    arbiter_takeover_no_commit_s: float = 2.0
+
+    idle_after_s: float = 0.0
+    idle_glance_after_s: float = 0.8
+
     policy_identity: str = "You are PALA, a social desk companion lamp."
     policy_capabilities: str = "Use available primitives for expressive lamp motion."
     policy_safety: str = "Prioritize safe, smooth, non-aggressive motion."
     policy_style: str = "Use calm by default."
     planner_prompt: str = ""
-    repeated_breath_guard_count: int = 4
-    stale_breath_hold_after_s: float = 12.0
+
     env_log_path: Optional[str] = "logs/behavior_env.jsonl"
     planner_log_path: Optional[str] = "logs/behavior_planner.jsonl"
     reasoning_log_path: Optional[str] = "logs/behavior_reasoning.jsonl"
+    trace_log_path: Optional[str] = "logs/behavior_trace.jsonl"
 
 
 @dataclass
@@ -74,45 +98,56 @@ class _InFlightCall:
 
 
 class BehaviorPolicy:
-    """Remote-first behavior policy with async env/planner workers."""
+    """Remote-first behavior policy with deterministic arbitration and strict JSON contracts."""
 
     owns_semantic_behavior = True
 
     def __init__(
         self,
         *,
-        planner: Any = None,
         world_state: Optional[WorldStateStore] = None,
         config: Optional[BehaviorPolicyConfig] = None,
         clock: Optional[Callable[[], float]] = None,
         frame_cache: Optional[Any] = None,
-        # accepted for runtime call-site compatibility
         dwell_s: float = 2.0,
         cooldown_s: float = 1.0,
         max_hold_s: float = 2.0,
     ):
         _ = (dwell_s, cooldown_s, max_hold_s)
-        self._planner_fallback = planner
-        self._world_state = world_state or WorldStateStore()
         self._cfg = config or BehaviorPolicyConfig()
+        self._world_state = world_state or WorldStateStore()
         self._clock = clock or time.monotonic
         self._frame_cache = frame_cache
         self._frame_window = RollingFrameWindow(window_s=self._cfg.frame_window_s)
         self._last_ingested_frame_ns: Optional[int] = None
 
-        self._env_processor = CosmosEnvProcessor(
-            EnvProcessorConfig(
-                max_inflight=1,
-                event_delta_threshold=self._cfg.planner_event_delta_threshold,
+        self._context_builder = ContextBuilder()
+        self._env_summarizer = EnvSummarizer()
+        self._intent_proposer = IntentProposer()
+        self._governor = Governor()
+        self._arbiter = Arbiter(
+            ArbiterConfig(
+                min_dwell_s=self._cfg.arbiter_min_dwell_s,
+                base_margin=self._cfg.arbiter_base_margin,
+                idle_after_s=self._cfg.idle_after_s,
+                takeover_no_signal_streak=max(1, int(self._cfg.arbiter_takeover_no_signal_streak)),
+                takeover_no_commit_s=max(0.2, float(self._cfg.arbiter_takeover_no_commit_s)),
             )
         )
-        self._planner_client = CosmosPlannerClient(PlannerClientConfig(max_inflight=1))
-        self._translator = ActionTranslator()
+        self._idle_engine = IdleEngine(
+            IdleEngineConfig(
+                idle_after_s=self._cfg.idle_after_s,
+                glance_after_s=self._cfg.idle_glance_after_s,
+            )
+        )
+        self._compiler = ActionCompiler()
+        self._health = HealthManager()
 
         self._chat_url = normalize_chat_url(self._cfg.base_url or "")
         self._remote_enabled = bool(self._cfg.remote_enabled and self._chat_url)
         self._executor: Optional[ThreadPoolExecutor] = None
         if self._remote_enabled:
+            # Keep planner responsive if env summarization stalls.
             self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="behavior_remote")
 
         self._env_inflight: Optional[_InFlightCall] = None
@@ -125,14 +160,21 @@ class BehaviorPolicy:
         self._pending_planner_event = False
         self._env_request_seq = 0
         self._planner_request_seq = 0
-        self._repeated_breath_decision_count = 0
+
+        self._latest_remote_proposals: Optional[ProposerResponse] = None
+        self._latest_remote_wall_s: float = 0.0
+
+        self._current_action: ActionPlan = self._new_hold_action("startup_hold")
         self._last_action_commit_s = self._clock()
+        self._last_commit_intent = "idle_presence"
+        self._last_commit_utility = 0.2
+        self._recent_commit_times: deque[float] = deque(maxlen=32)
+        self._idle_tick = 0
 
         self._env_log = maybe_logger(self._cfg.env_log_path) if self._cfg.env_log_path else None
         self._planner_log = maybe_logger(self._cfg.planner_log_path) if self._cfg.planner_log_path else None
         self._reasoning_log = maybe_logger(self._cfg.reasoning_log_path) if self._cfg.reasoning_log_path else None
-
-        self._current_action: ActionPlan = self._new_hold_action("startup_hold")
+        self._trace = TraceBus(maybe_logger(self._cfg.trace_log_path) if self._cfg.trace_log_path else None)
 
     @property
     def world_state(self) -> WorldStateStore:
@@ -141,42 +183,126 @@ class BehaviorPolicy:
     def set_control_state(self, control_state: Any) -> None:
         self._world_state.set_control_state(control_state)
 
+    def shutdown(self) -> None:
+        for logger_obj in (self._env_log, self._planner_log, self._reasoning_log):
+            if logger_obj is None:
+                continue
+            try:
+                logger_obj.close()
+            except Exception:  # noqa: BLE001
+                continue
+        self._trace.close()
+        if self._executor is not None:
+            self._executor.shutdown(wait=False, cancel_futures=True)
+
     def step(self, st: Optional[PerceptionState]) -> ActionPlan:
         now = self._clock()
-        self._ingest_latest_frame()
+        self._idle_tick += 1
 
+        self._ingest_latest_frame()
         self._drain_env_inflight(now=now)
         self._drain_planner_inflight(now=now)
 
         if self._remote_enabled:
             self._maybe_schedule_env(st=st, now=now)
             self._maybe_schedule_planner(st=st, now=now)
-        else:
-            fallback = self._plan_with_fallback(st)
-            if fallback is not None:
-                self._set_current_action(fallback, rationale=fallback.explanation or "")
+
+        chosen_source = "none"
+        arb_reason = "keep_current"
+        committed = False
+        commit_error = None
+
+        no_commit_s = max(0.0, now - self._last_action_commit_s)
+        self._update_perception_health(st=st)
+        snap = self._world_state.snapshot()
+
+        candidates: list[ProposalCandidate] = []
+        remote = self._latest_remote_candidates()
+        candidates.extend(remote)
+        zone_hint = self._zone_hint(st=st, snapshot=snap)
+        idle_candidates = [
+            ProposalCandidate(proposal=item, source="idle_engine")
+            for item in self._idle_engine.propose(
+                no_commit_s=no_commit_s,
+                zone_hint=zone_hint,
+                tick_index=self._idle_tick,
+            )
+        ]
+        candidates.extend(idle_candidates)
+
+        governed = self._governor.evaluate(candidates)
+        arbiter = self._arbiter.select(
+            candidates=governed,
+            current_action=self._current_action,
+            current_utility=self._last_commit_utility,
+            action_age_s=max(0.0, now - self._last_action_commit_s),
+            no_commit_s=no_commit_s,
+            last_intent=self._last_commit_intent,
+            recent_switches=self._recent_switch_count(now),
+            planner_open_breaker=self._health.planner_open_breaker(),
+            planner_no_signal_streak=self._health.planner_no_signal_streak(),
+            perception_degraded=self._health.perception_degraded(),
+        )
+
+        if arbiter.decision == "commit" and arbiter.chosen is not None:
+            proposal = arbiter.chosen.candidate.proposal
+            compiled = self._compiler.compile(proposal)
+            if compiled.action is None:
+                commit_error = compiled.error or "compile_failed"
+            else:
+                chosen_source = arbiter.chosen.candidate.source
+                self._set_current_action(
+                    compiled.action,
+                    rationale=proposal.rationale_short,
+                    intent=proposal.intent,
+                    utility=arbiter.best_utility,
+                    now=now,
+                )
+                committed = True
+
+        arb_reason = arbiter.reason if commit_error is None else commit_error
 
         if self._cfg.persist_every_step:
             self._world_state.persist()
-        self._maybe_decay_stale_breath(now=now)
-        return self._current_action
 
-    def shutdown(self) -> None:
-        for logger_obj in (self._env_log, self._planner_log, self._reasoning_log):
-            if logger_obj is not None:
-                try:
-                    logger_obj.close()
-                except Exception:  # noqa: BLE001 - shutdown best-effort
-                    continue
-        if self._executor is not None:
-            self._executor.shutdown(wait=False, cancel_futures=True)
+        self._trace.emit(
+            {
+                "ts_wall_s": time.time(),
+                "current_action": {
+                    "primitive": self._current_action.primitive.value,
+                    "style": self._current_action.style,
+                    "confidence": self._current_action.confidence,
+                },
+                "health": {
+                    "planner": self._health.planner.as_dict(),
+                    "env": self._health.env.as_dict(),
+                    "perception": self._health.perception.as_dict(),
+                },
+                "decision": {
+                    "committed": committed,
+                    "reason": arb_reason,
+                    "source": chosen_source,
+                    "best_utility": arbiter.best_utility,
+                },
+                "signals": {
+                    "no_commit_s": no_commit_s,
+                    "zone_hint": zone_hint,
+                    "env_delta": _as_float((snap.get("latest_env_snapshot") or {}).get("delta_score"), default=0.0),
+                    "detector_alive": _debug_get(st, "detector_alive"),
+                    "source_alive": _debug_get(st, "source_alive"),
+                },
+                "candidate_count": len(governed),
+            }
+        )
+
+        return self._current_action
 
     def _ingest_latest_frame(self) -> None:
         if self._frame_cache is None:
             return
         try:
             snap = self._frame_cache.get(max_age_ms=self._cfg.max_frame_age_ms)
-        except Exception:  # noqa: BLE001 - defensive
+        except Exception:  # noqa: BLE001
             return
         if snap is None:
             self._frame_window.prune()
@@ -188,35 +314,50 @@ class BehaviorPolicy:
         self._last_ingested_frame_ns = mono_ns
         self._frame_window.add_frame(np.asarray(snap.frame), mono_ns=mono_ns)
 
+    def _latest_remote_candidates(self) -> list[ProposalCandidate]:
+        response = self._latest_remote_proposals
+        if response is None:
+            return []
+        age = time.time() - self._latest_remote_wall_s
+        if age > max(0.2, float(self._cfg.proposer_max_age_s)):
+            return []
+        limited = response.proposals[: max(1, int(self._cfg.planner_max_proposals))]
+        return [ProposalCandidate(proposal=item, source="remote") for item in limited]
+
     def _maybe_schedule_env(self, *, st: Optional[PerceptionState], now: float) -> None:
         if self._executor is None:
+            return
+        if float(self._cfg.env_hz) <= 0.0:
             return
         if now < self._next_env_allowed_s:
             return
         if self._env_inflight is not None:
-            # Keep only "latest pending" intent; payload is rebuilt when worker frees.
-            self._env_processor.submit_or_replace({"queued": True, "ts_mono_s": now})
+            self._env_summarizer.submit_or_replace({"queued": True, "ts_mono_s": now})
             return
+
         period_s = 1.0 / max(0.05, float(self._cfg.env_hz))
         if (now - self._last_env_submit_s) < period_s:
             return
+
         payload = self._build_env_payload(st=st)
         if payload is None:
             return
-        accepted = self._env_processor.submit_or_replace(payload)
+        accepted = self._env_summarizer.submit_or_replace(payload)
         if not accepted:
             return
+
         self._env_request_seq += 1
         req_id = self._env_request_seq
         self._last_env_submit_s = now
+
         future = self._executor.submit(
             post_chat_json,
             url=self._chat_url,
             payload=payload["body"],
-            timeout_s=max(0.25, self._cfg.request_timeout_ms / 1000.0),
+            timeout_s=self._request_timeout_s(),
             api_key=self._cfg.api_key,
         )
-        self._env_inflight = _InFlightCall(request_id=req_id, started_mono_s=now, payload=payload, future=future)
+        self._env_inflight = _InFlightCall(req_id, now, payload, future)
         self._write_log(
             self._env_log,
             {
@@ -225,6 +366,7 @@ class BehaviorPolicy:
                 "phase": "env_processor",
                 "status": "req_start",
                 "frames": payload["frames"],
+                "response_format": "json_schema",
             },
         )
 
@@ -234,36 +376,40 @@ class BehaviorPolicy:
         if now < self._next_planner_allowed_s:
             return
         if self._planner_inflight is not None:
-            # Keep only "latest pending" intent; payload is rebuilt when worker frees.
-            self._planner_client.submit_or_replace({"queued": True, "ts_mono_s": now})
+            self._intent_proposer.submit_or_replace({"queued": True, "ts_mono_s": now})
             return
-        period_s = 1.0 / max(0.05, float(self._cfg.planner_hz))
+
+        planner_hz = self._health.planner_effective_hz(self._cfg.planner_hz)
+        period_s = 1.0 / max(0.05, planner_hz)
         due_periodic = (now - self._last_planner_submit_s) >= period_s
         due_event = self._pending_planner_event and (
             (now - self._last_planner_event_submit_s) >= max(0.05, self._cfg.planner_event_cooldown_s)
         )
         if not due_periodic and not due_event:
             return
-        payload = self._build_planner_payload(st=st)
+
+        payload = self._build_planner_payload(st=st, now=now)
         if payload is None:
             return
-        accepted = self._planner_client.submit_or_replace(payload)
+        accepted = self._intent_proposer.submit_or_replace(payload)
         if not accepted:
             return
+
         self._planner_request_seq += 1
         req_id = self._planner_request_seq
         self._last_planner_submit_s = now
         if due_event:
             self._last_planner_event_submit_s = now
             self._pending_planner_event = False
+
         future = self._executor.submit(
             post_chat_json,
             url=self._chat_url,
             payload=payload["body"],
-            timeout_s=max(0.25, self._cfg.request_timeout_ms / 1000.0),
+            timeout_s=self._request_timeout_s(),
             api_key=self._cfg.api_key,
         )
-        self._planner_inflight = _InFlightCall(request_id=req_id, started_mono_s=now, payload=payload, future=future)
+        self._planner_inflight = _InFlightCall(req_id, now, payload, future)
         self._write_log(
             self._planner_log,
             {
@@ -272,50 +418,84 @@ class BehaviorPolicy:
                 "phase": "planner",
                 "status": "req_start",
                 "frames": payload["frames"],
+                "env_context": bool(self._cfg.planner_use_env_context),
+                "response_format": "json_schema",
             },
         )
 
     def _drain_env_inflight(self, *, now: float) -> None:
         call = self._env_inflight
-        if call is None or not call.future.done():
+        if call is None:
             return
-        self._env_inflight = None
-        result = call.future.result()
-        content_text = None
-        reasoning_text = None
-        parse_result: Optional[EnvProcessorParseResult] = None
+
+        if not call.future.done():
+            if not self._watchdog_expired(call=call, now=now):
+                return
+            self._env_inflight = None
+            self._cancel_future(call.future)
+            result = self._synthetic_transport_error(
+                now=now,
+                started_mono_s=call.started_mono_s,
+                error="watchdog_timeout",
+            )
+        else:
+            self._env_inflight = None
+            result = self._safe_future_result(call=call, now=now)
+
         status = "transport_error"
         error = result.error
-        raw_delta: Optional[float] = None
+        summary = None
+        delta_score = None
+        zone_hint = None
+        person_present = None
+        content_text = None
+        reasoning_text = None
+        finish_reason = None
+        prompt_tokens = None
+        completion_tokens = None
+        total_tokens = None
 
         if result.ok and result.response_json is not None:
+            finish_reason, prompt_tokens, completion_tokens, total_tokens = _response_meta(result.response_json)
             content_text, reasoning_text = extract_message_content(result.response_json)
             if content_text is None:
                 status = "empty_content"
                 error = "missing_message_content"
-                parse_result = self._env_processor.complete_request("")
+                self._env_summarizer.complete_request("")
             else:
-                parse_result = self._env_processor.complete_request(content_text)
-                if parse_result is None:
+                parsed = self._env_summarizer.complete_request(content_text)
+                if parsed is None:
                     status = "parse_fail"
-                    error = "env_tag_parse_failed"
+                    detail = self._env_summarizer.last_parse_error or "unknown"
+                    error = f"env_json_parse_failed:{detail}"
                 else:
                     status = "ok"
                     error = None
-                    raw_delta = parse_result.snapshot.delta_score
-                    parse_result.snapshot.delta_score = self._normalize_env_delta(parse_result.snapshot)
-                    self._world_state.update_environment(parse_result.snapshot)
-                    if parse_result.snapshot.delta_score >= self._cfg.planner_event_delta_threshold:
+                    summary = parsed.summary.summary_short
+                    delta_score = parsed.summary.delta_score
+                    zone_hint = parsed.summary.features.get("zone_hint")
+                    person_present = bool(parsed.summary.features.get("person_present", False))
+                    self._world_state.update_environment(
+                        EnvironmentSnapshot(
+                            scene=parsed.summary.scene,
+                            events=parsed.summary.events,
+                            hypotheses=parsed.summary.hypotheses,
+                            summary=parsed.summary.summary_short,
+                            delta_score=parsed.summary.delta_score,
+                            features=dict(parsed.summary.features),
+                        )
+                    )
+                    if parsed.summary.delta_score >= self._cfg.planner_event_delta_threshold:
                         self._pending_planner_event = True
         else:
-            self._env_processor.complete_request("")
+            self._env_summarizer.complete_request("")
+
         if status == "ok":
             self._next_env_allowed_s = 0.0
         else:
-            self._next_env_allowed_s = max(
-                self._next_env_allowed_s,
-                now + self._compute_failure_backoff_s(result),
-            )
+            self._next_env_allowed_s = max(self._next_env_allowed_s, now + self._compute_failure_backoff_s(result))
+
+        self._health.on_env_result(status=status, latency_ms=result.latency_ms)
 
         self._write_log(
             self._env_log,
@@ -327,15 +507,18 @@ class BehaviorPolicy:
                 "latency_ms": round(result.latency_ms, 1),
                 "error": error,
                 "response_preview": None if content_text is None else self._preview_text(content_text),
-                "delta_score_raw": raw_delta,
-                "delta_score": None if parse_result is None else parse_result.snapshot.delta_score,
-                "summary": None if parse_result is None else parse_result.snapshot.summary,
+                "delta_score": delta_score,
+                "summary": summary,
+                "zone_hint": zone_hint,
+                "person_present": person_present,
+                "finish_reason": finish_reason,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": total_tokens,
             },
         )
-        reasoning_log_text = reasoning_text
-        if reasoning_log_text is None and parse_result is not None:
-            reasoning_log_text = parse_result.reasoning_text
-        if reasoning_log_text:
+
+        if reasoning_text:
             self._write_log(
                 self._reasoning_log,
                 {
@@ -343,69 +526,71 @@ class BehaviorPolicy:
                     "request_id": call.request_id,
                     "component": "env_processor",
                     "latency_ms": round(result.latency_ms, 1),
-                    "reasoning": reasoning_log_text,
+                    "reasoning": reasoning_text,
                 },
             )
 
-        pending = self._env_processor.take_latest_pending()
+        pending = self._env_summarizer.take_latest_pending()
         if pending is not None:
             self._last_env_submit_s = now - (1.0 / max(0.05, float(self._cfg.env_hz)))
             self._maybe_schedule_env(st=None, now=now)
 
     def _drain_planner_inflight(self, *, now: float) -> None:
         call = self._planner_inflight
-        if call is None or not call.future.done():
+        if call is None:
             return
-        self._planner_inflight = None
-        result = call.future.result()
-        content_text = None
-        reasoning_text = None
-        decision: Optional[PlannerDecision] = None
+
+        if not call.future.done():
+            if not self._watchdog_expired(call=call, now=now):
+                return
+            self._planner_inflight = None
+            self._cancel_future(call.future)
+            result = self._synthetic_transport_error(
+                now=now,
+                started_mono_s=call.started_mono_s,
+                error="watchdog_timeout",
+            )
+        else:
+            self._planner_inflight = None
+            result = self._safe_future_result(call=call, now=now)
+
         status = "transport_error"
         error = result.error
-        translation_error: Optional[str] = None
+        content_text = None
+        reasoning_text = None
+        parsed_response: Optional[ProposerResponse] = None
+        finish_reason = None
+        prompt_tokens = None
+        completion_tokens = None
+        total_tokens = None
 
         if result.ok and result.response_json is not None:
+            finish_reason, prompt_tokens, completion_tokens, total_tokens = _response_meta(result.response_json)
             content_text, reasoning_text = extract_message_content(result.response_json)
             if content_text is None:
                 status = "empty_content"
                 error = "missing_message_content"
-                decision = self._planner_client.complete_request("")
+                self._intent_proposer.complete_request("")
             else:
-                decision = self._planner_client.complete_request(content_text)
-                if decision is None:
+                parsed = self._intent_proposer.complete_request(content_text)
+                if parsed is None:
                     status = "parse_fail"
-                    error = "planner_tag_parse_failed"
+                    detail = self._intent_proposer.last_parse_error or "unknown"
+                    error = f"planner_json_parse_failed:{detail}"
                 else:
-                    decision = self._apply_repetition_guard(decision)
-                    decision = self._repair_planner_decision(decision)
                     status = "ok"
                     error = None
-                    translated = self._translator.translate(decision)
-                    translation_error = translated.error
-                    if translated.action is not None:
-                        if self._should_commit_action(translated.action):
-                            self._set_current_action(translated.action, rationale=decision.rationale_short)
-                        else:
-                            self._world_state.append_decision(
-                                DecisionSnapshot(
-                                    primitive=decision.primitive or "none",
-                                    style=decision.style,
-                                    confidence=decision.confidence,
-                                    rationale_short=(decision.rationale_short or "").strip()[:220],
-                                )
-                            )
-                    else:
-                        self._world_state.append_decision(
-                            DecisionSnapshot(
-                                primitive=decision.primitive or "none",
-                                style=decision.style,
-                                confidence=decision.confidence,
-                                rationale_short=(decision.rationale_short or "").strip()[:220],
-                            )
-                        )
+                    parsed_response = parsed.response
+                    parsed_response = ProposerResponse(
+                        schema_version=parsed_response.schema_version,
+                        proposals=parsed_response.proposals[: max(1, int(self._cfg.planner_max_proposals))],
+                        notes_short=parsed_response.notes_short,
+                    )
+                    self._latest_remote_proposals = parsed_response
+                    self._latest_remote_wall_s = time.time()
         else:
-            self._planner_client.complete_request("")
+            self._intent_proposer.complete_request("")
+
         if status == "ok":
             self._next_planner_allowed_s = 0.0
         else:
@@ -413,6 +598,18 @@ class BehaviorPolicy:
                 self._next_planner_allowed_s,
                 now + self._compute_failure_backoff_s(result),
             )
+
+        self._health.on_planner_result(status=status, latency_ms=result.latency_ms, response=parsed_response)
+
+        top = None
+        if parsed_response and parsed_response.proposals:
+            item = parsed_response.proposals[0]
+            top = {
+                "intent": item.intent,
+                "primitive": item.primitive,
+                "score": item.score,
+                "confidence": item.confidence,
+            }
 
         self._write_log(
             self._planner_log,
@@ -424,23 +621,16 @@ class BehaviorPolicy:
                 "latency_ms": round(result.latency_ms, 1),
                 "error": error,
                 "response_preview": None if content_text is None else self._preview_text(content_text),
-                "decision_json": None
-                if decision is None
-                else {
-                    "act_now": decision.act_now,
-                    "primitive": decision.primitive,
-                    "command": decision.command,
-                    "style": decision.style,
-                    "confidence": decision.confidence,
-                },
-                "rationale_short": None if decision is None else decision.rationale_short,
-                "translation_error": translation_error,
+                "proposal_count": 0 if parsed_response is None else len(parsed_response.proposals),
+                "top_proposal": top,
+                "finish_reason": finish_reason,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": total_tokens,
             },
         )
-        reasoning_log_text = reasoning_text
-        if reasoning_log_text is None and decision is not None:
-            reasoning_log_text = decision.reasoning_text
-        if reasoning_log_text:
+
+        if reasoning_text:
             self._write_log(
                 self._reasoning_log,
                 {
@@ -448,19 +638,21 @@ class BehaviorPolicy:
                     "request_id": call.request_id,
                     "component": "planner",
                     "latency_ms": round(result.latency_ms, 1),
-                    "reasoning": reasoning_log_text,
+                    "reasoning": reasoning_text,
                 },
             )
 
-        pending = self._planner_client.take_latest_pending()
+        pending = self._intent_proposer.take_latest_pending()
         if pending is not None:
-            self._last_planner_submit_s = now - (1.0 / max(0.05, float(self._cfg.planner_hz)))
+            planner_hz = self._health.planner_effective_hz(self._cfg.planner_hz)
+            self._last_planner_submit_s = now - (1.0 / max(0.05, planner_hz))
             self._maybe_schedule_planner(st=None, now=now)
 
     def _build_env_payload(self, *, st: Optional[PerceptionState]) -> Optional[Dict[str, Any]]:
         frames = self._frame_window.sample(max_frames=self._cfg.env_max_frames)
         if len(frames) < max(1, int(self._cfg.request_min_fresh_frames)):
             return None
+
         newest_ns = max(item.mono_ns for item in frames)
         frame_timeline = [
             {
@@ -469,6 +661,7 @@ class BehaviorPolicy:
             }
             for idx, item in enumerate(frames)
         ]
+
         image_data_urls = [
             _encode_frame_data_url(
                 frame=item.frame,
@@ -477,18 +670,26 @@ class BehaviorPolicy:
             )
             for item in frames
         ]
-        context = self._build_env_context(st=st, frame_timeline=frame_timeline)
+
+        context = self._context_builder.build_env_context(
+            world_snapshot=self._world_state.snapshot(),
+            current_action=self._current_action,
+            frame_timeline=frame_timeline,
+        )
         user_text = build_env_user_text(context=context, policy_identity=self._cfg.policy_identity)
-        body = {
+
+        body: Dict[str, Any] = {
             "model": self._cfg.model,
             "messages": build_messages(user_text=user_text, image_data_urls=image_data_urls),
             "temperature": 0.0,
             "max_tokens": int(self._cfg.env_max_tokens),
             "stream": False,
+            "response_format": env_response_format(),
         }
+
         return {"body": body, "frames": len(frames)}
 
-    def _build_planner_payload(self, *, st: Optional[PerceptionState]) -> Optional[Dict[str, Any]]:
+    def _build_planner_payload(self, *, st: Optional[PerceptionState], now: float) -> Optional[Dict[str, Any]]:
         image_data_urls = []
         if self._cfg.planner_include_latest_frame:
             latest = self._frame_window.latest()
@@ -500,7 +701,22 @@ class BehaviorPolicy:
                         jpeg_quality=self._cfg.frame_jpeg_quality,
                     )
                 )
-        context = self._build_planner_context(st=st)
+
+        snap = self._world_state.snapshot()
+        if not bool(self._cfg.planner_use_env_context):
+            snap = dict(snap)
+            snap["latest_env_snapshot"] = {}
+            snap["event_tail"] = []
+        no_commit_s = max(0.0, now - self._last_action_commit_s)
+        context = self._context_builder.build_planner_context(
+            st=st,
+            world_snapshot=snap,
+            current_action=self._current_action,
+            planner_health=self._health.planner.as_dict(),
+            now_mono_s=now,
+            last_commit_mono_s=self._last_action_commit_s,
+            no_commit_s=no_commit_s,
+        )
         user_text = build_planner_user_text(
             context=context,
             policy_identity=self._cfg.policy_identity,
@@ -508,79 +724,38 @@ class BehaviorPolicy:
             policy_safety=self._cfg.policy_safety,
             policy_style=self._cfg.policy_style,
             planner_prompt=self._cfg.planner_prompt,
+            max_proposals=max(1, int(self._cfg.planner_max_proposals)),
         )
-        body = {
+
+        body: Dict[str, Any] = {
             "model": self._cfg.model,
-            "messages": build_messages(user_text=user_text, image_data_urls=image_data_urls[: self._cfg.planner_max_frames]),
+            "messages": build_messages(
+                user_text=user_text,
+                image_data_urls=image_data_urls[: max(0, int(self._cfg.planner_max_frames))],
+            ),
             "temperature": 0.0,
             "max_tokens": int(self._cfg.planner_max_tokens),
             "stream": False,
+            "response_format": intent_response_format(),
         }
+
         return {"body": body, "frames": len(image_data_urls)}
 
-    def _build_env_context(
+    def _set_current_action(
         self,
+        action: ActionPlan,
         *,
-        st: Optional[PerceptionState],
-        frame_timeline: Optional[list[dict[str, float]]] = None,
-    ) -> Dict[str, Any]:
-        _ = st
-        snap = self._world_state.snapshot()
-        event_tail = snap.get("event_tail", [])[-2:]
-        compact_events = [
-            {
-                "t": self._format_ts_seconds(item.get("timestamp_wall_s")),
-                "summary": self._preview_text(str(item.get("summary", "")), max_chars=240),
-            }
-            for item in event_tail
-        ]
-        latest = snap.get("latest_env_snapshot") or {}
-        return {
-            "control_state": snap.get("control_state_latest"),
-            "latest_env_summary": latest.get("summary"),
-            "recent_env_events": compact_events,
-            "frame_timeline": frame_timeline or [],
-        }
-
-    def _build_planner_context(self, *, st: Optional[PerceptionState]) -> Dict[str, Any]:
-        _ = st
-        snap = self._world_state.snapshot()
-        event_tail = snap.get("event_tail", [])[-6:]
-        compact_events = [
-            {
-                "t": self._format_ts_seconds(item.get("timestamp_wall_s")),
-                "summary": self._preview_text(str(item.get("summary", "")), max_chars=300),
-            }
-            for item in event_tail
-        ]
-        decision_tail = snap.get("decision_tail", [])[-5:]
-        compact_decisions = [
-            {
-                "t": self._format_ts_seconds(item.get("timestamp_wall_s")),
-                "primitive": item.get("primitive"),
-                "style": item.get("style"),
-                "confidence": item.get("confidence"),
-                "rationale_short": self._preview_text(str(item.get("rationale_short", "")), max_chars=220),
-            }
-            for item in decision_tail
-        ]
-        return {
-            "identity_core": snap.get("identity_core"),
-            "latest_env_snapshot": snap.get("latest_env_snapshot"),
-            "event_tail": compact_events,
-            "decision_tail": compact_decisions,
-            "control_state": snap.get("control_state_latest"),
-            "session_digest": snap.get("session_digest"),
-            "current_action": {
-                "primitive": self._current_action.primitive.value,
-                "style": self._current_action.style,
-                "confidence": self._current_action.confidence,
-            },
-        }
-
-    def _set_current_action(self, action: ActionPlan, *, rationale: str) -> None:
+        rationale: str,
+        intent: str,
+        utility: float,
+        now: float,
+    ) -> None:
         self._current_action = action
-        self._last_action_commit_s = self._clock()
+        self._last_action_commit_s = now
+        self._last_commit_intent = intent
+        self._last_commit_utility = max(0.0, min(1.5, float(utility)))
+        self._recent_commit_times.append(now)
+
         self._world_state.append_decision(
             DecisionSnapshot(
                 primitive=action.primitive.value,
@@ -590,167 +765,42 @@ class BehaviorPolicy:
             )
         )
 
-    def _apply_repetition_guard(self, decision: PlannerDecision) -> PlannerDecision:
-        if decision.primitive == "breath" and decision.act_now and self._current_action.primitive == PrimitiveKind.BREATH:
-            self._repeated_breath_decision_count += 1
-        elif decision.primitive == "breath" and decision.act_now:
-            self._repeated_breath_decision_count = 1
-        else:
-            self._repeated_breath_decision_count = 0
+    def _recent_switch_count(self, now: float) -> int:
+        window_s = 8.0
+        while self._recent_commit_times and (now - self._recent_commit_times[0]) > window_s:
+            self._recent_commit_times.popleft()
+        return len(self._recent_commit_times)
 
-        if self._repeated_breath_decision_count < max(1, int(self._cfg.repeated_breath_guard_count)):
-            return decision
-
-        return PlannerDecision(
-            act_now=False,
-            primitive=None,
-            command={},
-            style=decision.style,
-            confidence=min(0.4, decision.confidence),
-            rationale_short="local guard: suppress repeated breath decision",
-            reasoning_text=decision.reasoning_text,
-            raw_text=decision.raw_text,
-        )
-
-    def _repair_planner_decision(self, decision: PlannerDecision) -> PlannerDecision:
-        if decision.primitive != "orient_to_zone":
-            return decision
-        zone = decision.command.get("zone")
-        if isinstance(zone, str) and zone.strip().lower() in {"left", "center", "right"}:
-            return decision
-
-        resolved = self._infer_zone_from_context(decision)
-        if resolved is None:
-            # Fail-safe default when orient request omits explicit zone.
-            resolved = "center"
-
-        command = dict(decision.command)
-        command["zone"] = resolved
-        return PlannerDecision(
-            act_now=decision.act_now,
-            primitive=decision.primitive,
-            command=command,
-            style=decision.style,
-            confidence=decision.confidence,
-            rationale_short=decision.rationale_short,
-            reasoning_text=decision.reasoning_text,
-            raw_text=decision.raw_text,
-        )
-
-    def _infer_zone_from_context(self, decision: PlannerDecision) -> Optional[str]:
-        # Prefer explicit textual hints from planner rationale/raw response.
-        zone = self._infer_zone_from_text(
-            decision.rationale_short,
-            decision.raw_text,
-        )
-        if zone is not None:
+    def _zone_hint(self, *, st: Optional[PerceptionState], snapshot: Mapping[str, Any]) -> str:
+        if st is not None and st.debug:
+            zone = str(st.debug.get("zone_hint", "")).strip().lower()
+            if zone in {"left", "center", "right"}:
+                return zone
+        latest_env = snapshot.get("latest_env_snapshot") or {}
+        features = latest_env.get("features") or {}
+        zone = str(features.get("zone_hint", "unknown")).strip().lower()
+        if zone in {"left", "center", "right"}:
             return zone
+        return "unknown"
 
-        snap = self._world_state.snapshot()
-        latest = snap.get("latest_env_snapshot") or {}
-        zone = self._infer_zone_from_text(
-            latest.get("events"),
-            latest.get("hypotheses"),
-            latest.get("summary"),
-            latest.get("scene"),
-        )
-        if zone is not None:
-            return zone
-
-        active_cmd = getattr(self._current_action, "command", None)
-        if self._current_action.primitive == PrimitiveKind.ORIENT_TO_ZONE:
-            active_zone = getattr(active_cmd, "zone", None)
-            if isinstance(active_zone, str) and active_zone in {"left", "center", "right"}:
-                return active_zone
-        return None
-
-    def _maybe_decay_stale_breath(self, *, now: float) -> None:
-        if self._current_action.primitive != PrimitiveKind.BREATH:
+    def _update_perception_health(self, *, st: Optional[PerceptionState]) -> None:
+        if st is None or not isinstance(st.debug, Mapping):
             return
-        if (now - self._last_action_commit_s) < max(1.0, float(self._cfg.stale_breath_hold_after_s)):
+        detector_raw = st.debug.get("detector_alive")
+        source_raw = st.debug.get("source_alive")
+        stale = bool(st.debug.get("stale_frame", False))
+        detector_alive = detector_raw if isinstance(detector_raw, bool) else None
+        source_alive = source_raw if isinstance(source_raw, bool) else None
+        if detector_alive is None and source_alive is None and not stale:
             return
-        snap = self._world_state.snapshot()
-        latest = snap.get("latest_env_snapshot") or {}
-        try:
-            delta = float(latest.get("delta_score", 0.0))
-        except (TypeError, ValueError):
-            delta = 0.0
-        if delta > 0.35:
-            return
-        hold = self._new_hold_action("local guard: stale breath -> hold")
-        self._set_current_action(hold, rationale=hold.explanation or "")
-        self._repeated_breath_decision_count = 0
-
-    def _normalize_env_delta(self, snapshot: Any) -> float:
-        try:
-            delta = float(snapshot.delta_score)
-        except (TypeError, ValueError):
-            delta = 0.2
-        text = " ".join(
-            [
-                str(getattr(snapshot, "scene", "") or ""),
-                str(getattr(snapshot, "events", "") or ""),
-                str(getattr(snapshot, "summary", "") or ""),
-            ]
-        ).lower()
-        static_markers = (
-            "none applicable",
-            "no observable changes",
-            "does not show any specific actions",
-            "static scene",
-            "unchanged",
-            "no movement",
-            "no significant change",
+        self._health.on_perception_result(
+            detector_alive=detector_alive,
+            source_alive=source_alive,
+            stale_frame=stale,
         )
-        if any(marker in text for marker in static_markers):
-            return 0.2
 
-        snap = self._world_state.snapshot()
-        prev = snap.get("latest_env_snapshot") or {}
-        prev_summary = self._preview_text(str(prev.get("summary", "") or ""), max_chars=300).lower()
-        curr_summary = self._preview_text(str(getattr(snapshot, "summary", "") or ""), max_chars=300).lower()
-        if prev_summary and curr_summary:
-            if prev_summary == curr_summary:
-                delta = min(delta, 0.15)
-            else:
-                overlap = self._token_overlap(prev_summary, curr_summary)
-                if overlap >= 0.9:
-                    delta = min(delta, 0.25)
-                elif overlap >= 0.8:
-                    delta = min(delta, 0.35)
-                elif overlap >= 0.65:
-                    delta = min(delta, 0.5)
-        return max(0.0, min(1.0, delta))
-
-    def _should_commit_action(self, action: ActionPlan) -> bool:
-        same_action = (
-            action.primitive == self._current_action.primitive
-            and action.command == self._current_action.command
-            and action.style == self._current_action.style
-        )
-        if not same_action:
-            return True
-        if action.primitive not in {PrimitiveKind.HOME, PrimitiveKind.HOLD}:
-            return False
-        snap = self._world_state.snapshot()
-        latest = snap.get("latest_env_snapshot") or {}
-        try:
-            delta = float(latest.get("delta_score", 0.0))
-        except (TypeError, ValueError):
-            delta = 0.0
-        return delta >= max(0.75, float(self._cfg.planner_event_delta_threshold))
-
-    def _plan_with_fallback(self, st: Optional[PerceptionState]) -> Optional[ActionPlan]:
-        if self._planner_fallback is None or not hasattr(self._planner_fallback, "plan"):
-            return self._new_hold_action("fallback hold")
-        try:
-            action = self._planner_fallback.plan(st)
-        except Exception as exc:  # noqa: BLE001 - fail closed in behavior loop
-            logger.warning("behavior fallback planner failed error=%s", exc)
-            return self._new_hold_action("fallback hold")
-        if isinstance(action, ActionPlan):
-            return action
-        return self._new_hold_action("fallback hold")
+    def _same_action_signature(self, a: ActionPlan, b: ActionPlan) -> bool:
+        return a.primitive == b.primitive and a.command == b.command and a.style == b.style
 
     def _new_hold_action(self, reason: str) -> ActionPlan:
         return ActionPlan(
@@ -762,60 +812,71 @@ class BehaviorPolicy:
             explanation=reason,
         )
 
-    @staticmethod
-    def _write_log(log_obj: Any, payload: Dict[str, Any]) -> None:
-        if log_obj is None:
-            return
-        try:
-            log_obj.write(payload)
-        except Exception:  # noqa: BLE001 - logging must never break runtime
-            return
-
     def _compute_failure_backoff_s(self, result: RemoteCallResult) -> float:
         base = max(0.0, float(self._cfg.error_backoff_s))
         if 400 <= int(result.status_code) < 500:
             return max(base, float(self._cfg.client_error_backoff_s))
         return base
 
+    def _request_timeout_s(self) -> float:
+        return max(0.25, self._cfg.request_timeout_ms / 1000.0)
+
+    def _watchdog_timeout_s(self) -> float:
+        # Guard against futures that never transition to done().
+        return self._request_timeout_s() + 0.75
+
+    def _watchdog_expired(self, *, call: _InFlightCall, now: float) -> bool:
+        return (now - call.started_mono_s) > self._watchdog_timeout_s()
+
     @staticmethod
-    def _preview_text(text: str, *, max_chars: int = 260) -> str:
+    def _cancel_future(future: Future[RemoteCallResult]) -> None:
+        try:
+            future.cancel()
+        except Exception:  # noqa: BLE001
+            return
+
+    def _safe_future_result(self, *, call: _InFlightCall, now: float) -> RemoteCallResult:
+        try:
+            result = call.future.result()
+        except Exception as exc:  # noqa: BLE001
+            return self._synthetic_transport_error(
+                now=now,
+                started_mono_s=call.started_mono_s,
+                error=f"future_exception:{type(exc).__name__}:{exc}",
+            )
+        if isinstance(result, RemoteCallResult):
+            return result
+        return self._synthetic_transport_error(
+            now=now,
+            started_mono_s=call.started_mono_s,
+            error=f"future_invalid_result:{type(result).__name__}",
+        )
+
+    @staticmethod
+    def _synthetic_transport_error(*, now: float, started_mono_s: float, error: str) -> RemoteCallResult:
+        return RemoteCallResult(
+            ok=False,
+            status_code=0,
+            latency_ms=max(0.0, now - started_mono_s) * 1000.0,
+            response_json=None,
+            error=error,
+        )
+
+    @staticmethod
+    def _write_log(log_obj: Any, payload: Dict[str, Any]) -> None:
+        if log_obj is None:
+            return
+        try:
+            log_obj.write(payload)
+        except Exception:  # noqa: BLE001
+            return
+
+    @staticmethod
+    def _preview_text(text: str, *, max_chars: int = 280) -> str:
         token = " ".join(str(text).split()).strip()
         if len(token) <= max_chars:
             return token
         return token[: max_chars - 3] + "..."
-
-    @staticmethod
-    def _format_ts_seconds(ts_wall_s: Any) -> Optional[str]:
-        try:
-            ts = float(ts_wall_s)
-        except (TypeError, ValueError):
-            return None
-        return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat(timespec="seconds")
-
-    @staticmethod
-    def _token_overlap(a: str, b: str) -> float:
-        aset = {tok for tok in a.split() if len(tok) > 2}
-        bset = {tok for tok in b.split() if len(tok) > 2}
-        if not aset or not bset:
-            return 0.0
-        inter = len(aset & bset)
-        union = len(aset | bset)
-        if union <= 0:
-            return 0.0
-        return inter / union
-
-    @staticmethod
-    def _infer_zone_from_text(*segments: Any) -> Optional[str]:
-        text = " ".join(str(seg or "") for seg in segments).lower()
-        if not text:
-            return None
-        if re.search(r"\bleft\b|\bleft-side\b|\bleftward\b", text):
-            return "left"
-        if re.search(r"\bright\b|\bright-side\b|\brightward\b", text):
-            return "right"
-        if re.search(r"\bcenter\b|\bcentre\b|\bmiddle\b|\bforward\b|\bfront\b", text):
-            return "center"
-        return None
 
 
 def _encode_frame_data_url(*, frame: np.ndarray, max_width: int, jpeg_quality: int) -> str:
@@ -823,11 +884,61 @@ def _encode_frame_data_url(*, frame: np.ndarray, max_width: int, jpeg_quality: i
     if arr.dtype != np.uint8:
         arr = arr.astype(np.uint8, copy=False)
     img = Image.fromarray(arr, mode="RGB")
+
     max_width = max(16, int(max_width))
     if img.width > max_width:
         new_h = int(round((max_width / float(img.width)) * img.height))
         img = img.resize((max_width, max(1, new_h)))
+
     out = io.BytesIO()
     img.save(out, format="JPEG", quality=max(30, min(95, int(jpeg_quality))), optimize=True)
     b64 = base64.b64encode(out.getvalue()).decode("ascii")
     return f"data:image/jpeg;base64,{b64}"
+
+
+def _as_float(value: Any, *, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _debug_get(st: Optional[PerceptionState], key: str) -> Any:
+    if st is None or not isinstance(st.debug, Mapping):
+        return None
+    return st.debug.get(key)
+
+
+def _response_meta(response_json: Mapping[str, Any]) -> tuple[Optional[str], Optional[int], Optional[int], Optional[int]]:
+    finish_reason: Optional[str] = None
+    prompt_tokens: Optional[int] = None
+    completion_tokens: Optional[int] = None
+    total_tokens: Optional[int] = None
+
+    try:
+        choices = response_json.get("choices")
+        if isinstance(choices, list) and choices:
+            first = choices[0]
+            if isinstance(first, Mapping):
+                raw_reason = first.get("finish_reason")
+                if isinstance(raw_reason, str) and raw_reason.strip():
+                    finish_reason = raw_reason.strip()
+    except Exception:  # noqa: BLE001
+        pass
+
+    try:
+        usage = response_json.get("usage")
+        if isinstance(usage, Mapping):
+            prompt_raw = usage.get("prompt_tokens")
+            completion_raw = usage.get("completion_tokens")
+            total_raw = usage.get("total_tokens")
+            if isinstance(prompt_raw, int):
+                prompt_tokens = prompt_raw
+            if isinstance(completion_raw, int):
+                completion_tokens = completion_raw
+            if isinstance(total_raw, int):
+                total_tokens = total_raw
+    except Exception:  # noqa: BLE001
+        pass
+
+    return finish_reason, prompt_tokens, completion_tokens, total_tokens

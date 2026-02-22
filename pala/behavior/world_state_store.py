@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+import json
 import logging
 import threading
 import time
@@ -21,10 +22,9 @@ class EnvironmentSnapshot:
     scene: str
     events: str
     hypotheses: str
-    opportunities: str
-    uncertainties: str
     summary: str
     delta_score: float
+    features: Dict[str, Any] = field(default_factory=dict)
     timestamp_wall_s: float = field(default_factory=time.time)
 
 
@@ -48,7 +48,7 @@ class WorldStateStoreConfig:
 
 
 class WorldStateStore:
-    """Compact local behavior memory with markdown persistence."""
+    """Small persistent behavior memory: identity, env summary, event tail, decision tail."""
 
     def __init__(self, config: Optional[WorldStateStoreConfig] = None):
         self._cfg = config or WorldStateStoreConfig()
@@ -66,13 +66,9 @@ class WorldStateStore:
         with self._lock:
             self.latest_env_snapshot = snapshot
             self.updated_at_wall_s = time.time()
-            summary = self._dense_event_summary(snapshot)
+            summary = self._event_summary_text(snapshot)
             if summary:
-                self._append_event_locked(
-                    summary,
-                    ts_wall_s=snapshot.timestamp_wall_s,
-                    source="env_processor",
-                )
+                self._append_event_locked(summary, ts_wall_s=snapshot.timestamp_wall_s, source="env_processor")
             self._persist_world_state_locked()
 
     def append_event(self, text: str, *, ts_wall_s: Optional[float] = None) -> None:
@@ -87,9 +83,8 @@ class WorldStateStore:
     def append_decision(self, decision: DecisionSnapshot) -> None:
         with self._lock:
             self.decision_tail.append(decision)
-            max_decisions = self._max_decisions()
-            if len(self.decision_tail) > max_decisions:
-                self.decision_tail = self.decision_tail[-max_decisions:]
+            if len(self.decision_tail) > self._max_decisions():
+                self.decision_tail = self.decision_tail[-self._max_decisions() :]
             self.updated_at_wall_s = time.time()
             self._persist_world_state_locked()
 
@@ -118,26 +113,28 @@ class WorldStateStore:
                     "scene": self.latest_env_snapshot.scene,
                     "events": self.latest_env_snapshot.events,
                     "hypotheses": self.latest_env_snapshot.hypotheses,
-                    "opportunities": self.latest_env_snapshot.opportunities,
-                    "uncertainties": self.latest_env_snapshot.uncertainties,
                     "summary": self.latest_env_snapshot.summary,
                     "delta_score": self.latest_env_snapshot.delta_score,
+                    "features": dict(self.latest_env_snapshot.features),
                     "timestamp_wall_s": self.latest_env_snapshot.timestamp_wall_s,
                 }
+
+            decisions = [
+                {
+                    "primitive": item.primitive,
+                    "style": item.style,
+                    "confidence": item.confidence,
+                    "rationale_short": item.rationale_short,
+                    "timestamp_wall_s": item.timestamp_wall_s,
+                }
+                for item in self.decision_tail
+            ]
+
             return {
                 "identity_core": self.identity_core,
                 "latest_env_snapshot": env,
                 "event_tail": list(self.event_tail),
-                "decision_tail": [
-                    {
-                        "primitive": d.primitive,
-                        "style": d.style,
-                        "confidence": d.confidence,
-                        "rationale_short": d.rationale_short,
-                        "timestamp_wall_s": d.timestamp_wall_s,
-                    }
-                    for d in self.decision_tail
-                ],
+                "decision_tail": decisions,
                 "control_state_latest": self.control_state_latest,
                 "session_digest": self.session_digest,
                 "updated_at_wall_s": self.updated_at_wall_s,
@@ -151,9 +148,8 @@ class WorldStateStore:
     def _append_event_locked(self, text: str, *, ts_wall_s: Optional[float], source: str) -> None:
         ts = float(ts_wall_s if ts_wall_s is not None else time.time())
         self.event_tail.append({"timestamp_wall_s": ts, "summary": text, "source": source})
-        max_events = self._max_events()
-        if len(self.event_tail) > max_events:
-            self.event_tail = self.event_tail[-max_events:]
+        if len(self.event_tail) > self._max_events():
+            self.event_tail = self.event_tail[-self._max_events() :]
 
     def _persist_world_state_locked(self) -> None:
         path = Path(self._cfg.world_state_path)
@@ -161,15 +157,16 @@ class WorldStateStore:
 
     def _persist_session_digest_locked(self) -> None:
         path = Path(self._cfg.session_digest_path)
-        self._write_file(path, (self.session_digest.strip() + "\n") if self.session_digest else "")
+        payload = (self.session_digest.strip() + "\n") if self.session_digest else ""
+        self._write_file(path, payload)
 
     def _load_identity_core(self) -> str:
         path = Path(self._cfg.identity_path)
         if not path.exists():
             return self._cfg.default_identity_core
         try:
-            text = path.read_text(encoding="utf-8").strip()
-            return text if text else self._cfg.default_identity_core
+            token = path.read_text(encoding="utf-8").strip()
+            return token if token else self._cfg.default_identity_core
         except OSError as exc:
             logger.warning("world_state_store identity load failed path=%s error=%s", path, exc)
             return self._cfg.default_identity_core
@@ -190,9 +187,10 @@ class WorldStateStore:
         lines.append("")
         lines.append(f"Last updated: {self._format_wall_time(self.updated_at_wall_s)}")
         lines.append("")
+
         lines.append("## Identity Core")
         lines.append("")
-        lines.append(self.identity_core.strip() if self.identity_core.strip() else DEFAULT_IDENTITY_CORE)
+        lines.append(self.identity_core.strip() or DEFAULT_IDENTITY_CORE)
         lines.append("")
 
         lines.append("## Latest Environment Snapshot")
@@ -213,14 +211,16 @@ class WorldStateStore:
             lines.append("### Hypotheses")
             lines.append(snap.hypotheses.strip() or "_empty_")
             lines.append("")
-            lines.append("### Opportunities")
-            lines.append(snap.opportunities.strip() or "_empty_")
-            lines.append("")
-            lines.append("### Uncertainties")
-            lines.append(snap.uncertainties.strip() or "_empty_")
-            lines.append("")
             lines.append("### Summary")
             lines.append(snap.summary.strip() or "_empty_")
+            lines.append("")
+            lines.append("### Features")
+            if snap.features:
+                lines.append("```json")
+                lines.append(json.dumps(snap.features, ensure_ascii=True, indent=2, sort_keys=True))
+                lines.append("```")
+            else:
+                lines.append("_none_")
         lines.append("")
 
         lines.append("## Event Tail")
@@ -228,11 +228,11 @@ class WorldStateStore:
         if not self.event_tail:
             lines.append("_none_")
         else:
-            for i, event in enumerate(self.event_tail[-self._max_events() :], start=1):
-                ts = float(event.get("timestamp_wall_s", 0.0))
-                summary = str(event.get("summary", "")).strip() or "_empty_"
-                source = str(event.get("source", "")).strip() or "unknown"
-                lines.append(f"{i}. [{self._format_wall_time(ts)}] source={source} {summary}")
+            for idx, item in enumerate(self.event_tail[-self._max_events() :], start=1):
+                ts = self._format_wall_time(float(item.get("timestamp_wall_s", 0.0)))
+                source = str(item.get("source", "unknown")).strip() or "unknown"
+                summary = str(item.get("summary", "")).strip() or "_empty_"
+                lines.append(f"{idx}. [{ts}] source={source} {summary}")
         lines.append("")
 
         lines.append("## Decision Tail")
@@ -240,11 +240,11 @@ class WorldStateStore:
         if not self.decision_tail:
             lines.append("_none_")
         else:
-            for i, item in enumerate(self.decision_tail[-self._max_decisions() :], start=1):
+            for idx, item in enumerate(self.decision_tail[-self._max_decisions() :], start=1):
                 lines.append(
-                    f"{i}. [{self._format_wall_time(item.timestamp_wall_s)}] "
-                    f"primitive={item.primitive} style={item.style} "
-                    f"confidence={item.confidence:.2f} rationale={item.rationale_short}"
+                    f"{idx}. [{self._format_wall_time(item.timestamp_wall_s)}] "
+                    f"primitive={item.primitive} style={item.style} confidence={item.confidence:.2f} "
+                    f"rationale={item.rationale_short}"
                 )
         lines.append("")
 
@@ -260,6 +260,22 @@ class WorldStateStore:
         return "\n".join(lines)
 
     @staticmethod
+    def _event_summary_text(snapshot: EnvironmentSnapshot) -> str:
+        events = WorldStateStore._compact_text(snapshot.events)
+        hypotheses = WorldStateStore._compact_text(snapshot.hypotheses)
+        summary = WorldStateStore._compact_text(snapshot.summary)
+        zone = str(snapshot.features.get("zone_hint", "unknown")) if snapshot.features else "unknown"
+        token = (
+            f"events={events} | hypotheses={hypotheses} | summary={summary} | "
+            f"delta={snapshot.delta_score:.2f} | zone={zone}"
+        )
+        return token[:1200]
+
+    @staticmethod
+    def _compact_text(value: Any) -> str:
+        return " ".join(str(value or "").split()).strip()
+
+    @staticmethod
     def _format_control_state(control_state: Any) -> str:
         if control_state is None:
             return "unknown"
@@ -267,6 +283,7 @@ class WorldStateStore:
             return control_state
         if isinstance(control_state, Mapping):
             return ", ".join(f"{k}={v}" for k, v in control_state.items())
+
         active_kind = getattr(control_state, "active_kind", None)
         status = getattr(control_state, "status", None)
         reason = getattr(control_state, "reason", None)
@@ -277,29 +294,6 @@ class WorldStateStore:
     def _format_wall_time(ts_wall_s: float) -> str:
         dt = datetime.fromtimestamp(float(ts_wall_s), tz=timezone.utc)
         return dt.isoformat(timespec="seconds")
-
-    @classmethod
-    def _dense_event_summary(cls, snapshot: EnvironmentSnapshot) -> str:
-        fields = [
-            ("scene", snapshot.scene),
-            ("events", snapshot.events),
-            ("hypotheses", snapshot.hypotheses),
-            ("opportunities", snapshot.opportunities),
-            ("uncertainties", snapshot.uncertainties),
-            ("summary", snapshot.summary),
-        ]
-        segments = []
-        for key, value in fields:
-            token = cls._compact_text(value)
-            if token:
-                segments.append(f"{key}={token}")
-        dense = " | ".join(segments).strip()
-        return dense[:1200]
-
-    @staticmethod
-    def _compact_text(value: str) -> str:
-        token = " ".join(str(value or "").split()).strip()
-        return token
 
     @staticmethod
     def _write_file(path: Path, text: str) -> None:

@@ -6,7 +6,6 @@ from types import SimpleNamespace
 import pytest
 
 from pala.config.load import CameraConfig, CosmosConfig, DeepStreamConfig, LoggingConfig, LoopRates, RobotConfig
-from pala.perception.frame_cache import LatestFrameCache
 import pala.main as pala_main
 
 
@@ -187,76 +186,6 @@ def test_build_frame_source_jetson_uses_gstreamer_camera(monkeypatch):
     assert captured["kwargs"]["width"] == 640
     assert captured["kwargs"]["height"] == 480
     assert captured["kwargs"]["fps"] == 30
-
-
-def test_build_planner_returns_heuristic_when_cosmos_disabled():
-    cfg = _cfg(mode="dev", detector="dummy", cosmos_enabled=False)
-    planner = pala_main._build_planner(cfg, LatestFrameCache())
-    assert planner.__class__.__name__ == "HeuristicPlanner"
-
-
-def test_build_planner_cosmos_wires_components(monkeypatch):
-    captured = {}
-
-    class _TimelineWriter:
-        def __init__(self, cfg):
-            captured["timeline_cfg"] = cfg
-
-    class _MemoryManager:
-        def __init__(self, cfg):
-            captured["memory_cfg"] = cfg
-
-    class _Summarizer:
-        def __init__(self, **kwargs):
-            captured["summarizer_kwargs"] = kwargs
-
-    class _Orchestrator:
-        def __init__(self, **kwargs):
-            captured["orchestrator_kwargs"] = kwargs
-
-    monkeypatch.setattr(pala_main, "TimelineWriter", _TimelineWriter)
-    monkeypatch.setattr(pala_main, "MemoryManager", _MemoryManager)
-    monkeypatch.setattr(pala_main, "AsyncSceneSummarizer", _Summarizer)
-    monkeypatch.setattr(pala_main, "AsyncOrchestratorPlanner", _Orchestrator)
-
-    cfg = _cfg(mode="jetson_full", detector="deepstream", cosmos_enabled=True)
-    cfg.cosmos.summarizer_enabled = True
-    frame_cache = LatestFrameCache()
-
-    planner = pala_main._build_planner(cfg, frame_cache)
-    assert planner.__class__.__name__ == "_Orchestrator"
-    assert captured["timeline_cfg"].enabled is True
-    assert captured["memory_cfg"].enabled == cfg.cosmos.memory_enabled
-    assert captured["summarizer_kwargs"]["frame_cache"] is frame_cache
-    assert captured["orchestrator_kwargs"]["summarizer"].__class__.__name__ == "_Summarizer"
-    assert captured["orchestrator_kwargs"]["frame_cache"] is frame_cache
-
-
-def test_build_planner_cosmos_without_summarizer(monkeypatch):
-    captured = {}
-
-    class _TimelineWriter:
-        def __init__(self, cfg):
-            captured["timeline_cfg"] = cfg
-
-    class _MemoryManager:
-        def __init__(self, cfg):
-            captured["memory_cfg"] = cfg
-
-    class _Orchestrator:
-        def __init__(self, **kwargs):
-            captured["orchestrator_kwargs"] = kwargs
-
-    monkeypatch.setattr(pala_main, "TimelineWriter", _TimelineWriter)
-    monkeypatch.setattr(pala_main, "MemoryManager", _MemoryManager)
-    monkeypatch.setattr(pala_main, "AsyncOrchestratorPlanner", _Orchestrator)
-
-    cfg = _cfg(mode="jetson_full", detector="deepstream", cosmos_enabled=True)
-    cfg.cosmos.summarizer_enabled = False
-
-    planner = pala_main._build_planner(cfg, LatestFrameCache())
-    assert planner.__class__.__name__ == "_Orchestrator"
-    assert captured["orchestrator_kwargs"]["summarizer"] is None
 
 
 def test_build_preview_tap_uses_defaults_when_missing_config():

@@ -53,14 +53,12 @@ class DeepStreamConfig:
 @dataclass
 class CosmosConfig:
     enabled: bool = False
-    provider: str = "brev"
     base_url: Optional[str] = None
     model: str = "nvidia/cosmos-reason2-2b"
     planner_prompt: str = (
-        "Prioritize calm, safe, desk-companion behavior with minimal sudden motion. "
-        "Prefer hold or gentle breath unless confidence is high."
+        "Prioritize calm, safe desk-companion behavior. "
+        "Always choose one concrete next action."
     )
-    policy_version: str = "v1"
     policy_identity: str = (
         "You are PALA, a social desk companion lamp that should feel alive, expressive, and safe."
     )
@@ -69,71 +67,46 @@ class CosmosConfig:
         "You cannot manipulate external objects, move base position, or physically touch users."
     )
     policy_safety: str = (
-        "Avoid sudden aggressive motion. Prefer stable behavior. If uncertain, choose conservative actions."
+        "Avoid sudden aggressive motion. Prefer stable conservative actions."
     )
     policy_style: str = (
         "Default style is calm; use curious for gentle tracking and focused for attentive task support."
     )
-    policy_output_contract: str = (
-        "Return JSON only with target_state,intent,style,primitive_hint,target_zone,allow_interrupt,urgency,confidence,rationale."
-    )
-    # planner cadence
-    max_hz: float = 1.0
-    planner_hz: float = 1.0
+    # Remote behavior cadence.
+    planner_hz: float = 0.5
+    summarizer_hz: float = 0.25
     planner_event_delta_threshold: float = 0.65
     planner_event_cooldown_s: float = 0.7
-    planner_strict_schema: bool = True
-    planner_allow_frame_fetch: bool = True
-    planner_max_tool_calls_per_cycle: int = 1
+    planner_max_proposals: int = 1
+    planner_use_env_context: bool = True
+    # Deterministic arbitration.
+    arbiter_min_dwell_s: float = 1.2
+    arbiter_base_margin: float = 0.10
+    arbiter_takeover_no_signal_streak: int = 2
+    arbiter_takeover_no_commit_s: float = 2.0
+    idle_after_s: float = 6.0
+    idle_glance_after_s: float = 10.0
+    # Frame sampling and media packaging.
     planner_max_frames: int = 1
     planner_include_latest_frame: bool = True
-    # summarizer cadence and media sampling
-    summarizer_enabled: bool = True
-    summarizer_hz: float = 1.0
-    summarizer_timeout_ms: int = 6000
     summary_window_s: float = 6.0
-    summary_max_frames: int = 4
+    summary_max_frames: int = 1
     summary_max_width: int = 320
     summary_jpeg_quality: int = 55
-    summary_ttl_ms: int = 6000
-    identity_file_path: str = "memory/identity.md"
     max_frame_age_ms: int = 500
-    video_window_s: float = 8.0
-    video_max_frames: int = 8
-    video_max_width: int = 320
-    video_jpeg_quality: int = 60
-    request_timeout_ms: int = 5000
+    request_min_fresh_frames: int = 1
+    # Remote request and token budgets.
+    request_timeout_ms: int = 20000
     behavior_error_backoff_s: float = 1.5
     behavior_client_error_backoff_s: float = 5.0
-    env_max_tokens: int = 900
-    planner_max_tokens: int = 900
-    response_ttl_ms: int = 1500
-    memory_enabled: bool = True
-    memory_jsonl_path: str = "logs/orchestrator_memory.jsonl"
-    memory_recent_events: int = 10
-    memory_digest_items: int = 3
-    memory_distill_every_n_events: int = 20
-    context_max_transcript_items: int = 0
-    context_transcript_max_items: int = 24
-    context_transcript_per_type_max_items: int = 8
-    context_transcript_max_chars: int = 4000
-    context_memory_digest_max_items: int = 3
-    decision_repeat_detector_window: int = 6
-    orchestrator_timeline_jsonl_path: str = "logs/orchestrator_timeline.jsonl"
-    inflight_guard_enabled: bool = True
-    request_min_fresh_frames: int = 1
-    reasoning_probe_enabled: bool = False
-    reasoning_probe_hz: float = 0.1
-    reasoning_probe_timeout_ms: int = 8000
-    reasoning_probe_max_tokens: int = 1024
-    commitment_ttl_ms: int = 12000
-    mock_latency_ms: int = 150
-    memory_recent_decisions: int = 8
-    memory_recent_summaries: int = 8
-    memory_recent_reasoning: int = 8
+    env_max_tokens: int = 600
+    planner_max_tokens: int = 360
+    response_ttl_ms: int = 12000
+    # Behavior V3 logs.
     behavior_env_log_path: str = "logs/behavior_env.jsonl"
     behavior_planner_log_path: str = "logs/behavior_planner.jsonl"
     behavior_reasoning_log_path: str = "logs/behavior_reasoning.jsonl"
+    behavior_trace_log_path: str = "logs/behavior_trace.jsonl"
 
 
 @dataclass
@@ -302,22 +275,19 @@ def load_config(path: str) -> RobotConfig:
     cosmos_raw = data.get("cosmos", {})
     if not isinstance(cosmos_raw, dict):
         _fail("cosmos", "expected mapping")
-    planner_hz_raw = cosmos_raw.get("planner_hz", cosmos_raw.get("max_hz", 1.0))
     cosmos = CosmosConfig(
         enabled=_as_bool(cosmos_raw.get("enabled", False), "cosmos.enabled"),
-        provider=str(cosmos_raw.get("provider", "brev")),
         base_url=None if cosmos_raw.get("base_url") in (None, "") else str(cosmos_raw.get("base_url")),
         model=str(cosmos_raw.get("model", "nvidia/cosmos-reason2-2b")),
         planner_prompt=str(
             cosmos_raw.get(
                 "planner_prompt",
                 (
-                    "Prioritize calm, safe, desk-companion behavior with minimal sudden motion. "
-                    "Prefer hold or gentle breath unless confidence is high."
+                    "Prioritize calm, safe desk-companion behavior. "
+                    "Always choose one concrete next action."
                 ),
             )
         ),
-        policy_version=str(cosmos_raw.get("policy_version", "v1")),
         policy_identity=str(
             cosmos_raw.get(
                 "policy_identity",
@@ -336,7 +306,7 @@ def load_config(path: str) -> RobotConfig:
         policy_safety=str(
             cosmos_raw.get(
                 "policy_safety",
-                "Avoid sudden aggressive motion. Prefer stable behavior. If uncertain, choose conservative actions.",
+                "Avoid sudden aggressive motion. Prefer stable conservative actions.",
             )
         ),
         policy_style=str(
@@ -345,14 +315,8 @@ def load_config(path: str) -> RobotConfig:
                 "Default style is calm; use curious for gentle tracking and focused for attentive task support.",
             )
         ),
-        policy_output_contract=str(
-            cosmos_raw.get(
-                "policy_output_contract",
-                "Return JSON only with target_state,intent,style,primitive_hint,target_zone,allow_interrupt,urgency,confidence,rationale.",
-            )
-        ),
-        max_hz=_as_float(cosmos_raw.get("max_hz", 1.0), "cosmos.max_hz"),
-        planner_hz=_as_float(planner_hz_raw, "cosmos.planner_hz"),
+        planner_hz=_as_float(cosmos_raw.get("planner_hz", 0.5), "cosmos.planner_hz"),
+        summarizer_hz=_as_float(cosmos_raw.get("summarizer_hz", 0.25), "cosmos.summarizer_hz"),
         planner_event_delta_threshold=_as_float(
             cosmos_raw.get("planner_event_delta_threshold", 0.65),
             "cosmos.planner_event_delta_threshold",
@@ -361,53 +325,59 @@ def load_config(path: str) -> RobotConfig:
             cosmos_raw.get("planner_event_cooldown_s", 0.7),
             "cosmos.planner_event_cooldown_s",
         ),
-        planner_strict_schema=_as_bool(cosmos_raw.get("planner_strict_schema", True), "cosmos.planner_strict_schema"),
-        planner_allow_frame_fetch=_as_bool(
-            cosmos_raw.get("planner_allow_frame_fetch", True),
-            "cosmos.planner_allow_frame_fetch",
+        planner_max_proposals=_as_int(cosmos_raw.get("planner_max_proposals", 1), "cosmos.planner_max_proposals"),
+        planner_use_env_context=_as_bool(
+            cosmos_raw.get("planner_use_env_context", True),
+            "cosmos.planner_use_env_context",
         ),
-        planner_max_tool_calls_per_cycle=_as_int(
-            cosmos_raw.get("planner_max_tool_calls_per_cycle", 1),
-            "cosmos.planner_max_tool_calls_per_cycle",
+        arbiter_min_dwell_s=_as_float(
+            cosmos_raw.get("arbiter_min_dwell_s", 1.2),
+            "cosmos.arbiter_min_dwell_s",
+        ),
+        arbiter_base_margin=_as_float(
+            cosmos_raw.get("arbiter_base_margin", 0.10),
+            "cosmos.arbiter_base_margin",
+        ),
+        arbiter_takeover_no_signal_streak=_as_int(
+            cosmos_raw.get("arbiter_takeover_no_signal_streak", 2),
+            "cosmos.arbiter_takeover_no_signal_streak",
+        ),
+        arbiter_takeover_no_commit_s=_as_float(
+            cosmos_raw.get("arbiter_takeover_no_commit_s", 2.0),
+            "cosmos.arbiter_takeover_no_commit_s",
+        ),
+        idle_after_s=_as_float(cosmos_raw.get("idle_after_s", 6.0), "cosmos.idle_after_s"),
+        idle_glance_after_s=_as_float(
+            cosmos_raw.get("idle_glance_after_s", 10.0),
+            "cosmos.idle_glance_after_s",
         ),
         planner_max_frames=_as_int(cosmos_raw.get("planner_max_frames", 1), "cosmos.planner_max_frames"),
         planner_include_latest_frame=_as_bool(
             cosmos_raw.get("planner_include_latest_frame", True),
             "cosmos.planner_include_latest_frame",
         ),
-        summarizer_enabled=_as_bool(cosmos_raw.get("summarizer_enabled", True), "cosmos.summarizer_enabled"),
-        summarizer_hz=_as_float(cosmos_raw.get("summarizer_hz", 1.0), "cosmos.summarizer_hz"),
-        summarizer_timeout_ms=_as_int(
-            cosmos_raw.get("summarizer_timeout_ms", cosmos_raw.get("request_timeout_ms", 6000)),
-            "cosmos.summarizer_timeout_ms",
-        ),
         summary_window_s=_as_float(
-            cosmos_raw.get("summary_window_s", cosmos_raw.get("video_window_s", 6.0)),
+            cosmos_raw.get("summary_window_s", 6.0),
             "cosmos.summary_window_s",
         ),
         summary_max_frames=_as_int(
-            cosmos_raw.get("summary_max_frames", cosmos_raw.get("video_max_frames", 4)),
+            cosmos_raw.get("summary_max_frames", 1),
             "cosmos.summary_max_frames",
         ),
         summary_max_width=_as_int(
-            cosmos_raw.get("summary_max_width", cosmos_raw.get("video_max_width", 320)),
+            cosmos_raw.get("summary_max_width", 320),
             "cosmos.summary_max_width",
         ),
         summary_jpeg_quality=_as_int(
-            cosmos_raw.get("summary_jpeg_quality", cosmos_raw.get("video_jpeg_quality", 55)),
+            cosmos_raw.get("summary_jpeg_quality", 55),
             "cosmos.summary_jpeg_quality",
         ),
-        summary_ttl_ms=_as_int(
-            cosmos_raw.get("summary_ttl_ms", cosmos_raw.get("response_ttl_ms", 6000)),
-            "cosmos.summary_ttl_ms",
-        ),
-        identity_file_path=str(cosmos_raw.get("identity_file_path", "memory/identity.md")),
         max_frame_age_ms=_as_int(cosmos_raw.get("max_frame_age_ms", 500), "cosmos.max_frame_age_ms"),
-        video_window_s=_as_float(cosmos_raw.get("video_window_s", 8.0), "cosmos.video_window_s"),
-        video_max_frames=_as_int(cosmos_raw.get("video_max_frames", 8), "cosmos.video_max_frames"),
-        video_max_width=_as_int(cosmos_raw.get("video_max_width", 320), "cosmos.video_max_width"),
-        video_jpeg_quality=_as_int(cosmos_raw.get("video_jpeg_quality", 60), "cosmos.video_jpeg_quality"),
-        request_timeout_ms=_as_int(cosmos_raw.get("request_timeout_ms", 5000), "cosmos.request_timeout_ms"),
+        request_min_fresh_frames=_as_int(
+            cosmos_raw.get("request_min_fresh_frames", 1),
+            "cosmos.request_min_fresh_frames",
+        ),
+        request_timeout_ms=_as_int(cosmos_raw.get("request_timeout_ms", 20000), "cosmos.request_timeout_ms"),
         behavior_error_backoff_s=_as_float(
             cosmos_raw.get("behavior_error_backoff_s", 1.5),
             "cosmos.behavior_error_backoff_s",
@@ -416,73 +386,9 @@ def load_config(path: str) -> RobotConfig:
             cosmos_raw.get("behavior_client_error_backoff_s", 5.0),
             "cosmos.behavior_client_error_backoff_s",
         ),
-        env_max_tokens=_as_int(cosmos_raw.get("env_max_tokens", 900), "cosmos.env_max_tokens"),
-        planner_max_tokens=_as_int(cosmos_raw.get("planner_max_tokens", 900), "cosmos.planner_max_tokens"),
-        response_ttl_ms=_as_int(cosmos_raw.get("response_ttl_ms", 1500), "cosmos.response_ttl_ms"),
-        memory_enabled=_as_bool(cosmos_raw.get("memory_enabled", True), "cosmos.memory_enabled"),
-        memory_jsonl_path=str(cosmos_raw.get("memory_jsonl_path", "logs/orchestrator_memory.jsonl")),
-        memory_recent_events=_as_int(cosmos_raw.get("memory_recent_events", 10), "cosmos.memory_recent_events"),
-        memory_digest_items=_as_int(cosmos_raw.get("memory_digest_items", 3), "cosmos.memory_digest_items"),
-        memory_distill_every_n_events=_as_int(
-            cosmos_raw.get("memory_distill_every_n_events", 20),
-            "cosmos.memory_distill_every_n_events",
-        ),
-        context_max_transcript_items=_as_int(
-            cosmos_raw.get("context_max_transcript_items", 0),
-            "cosmos.context_max_transcript_items",
-        ),
-        context_transcript_max_items=_as_int(
-            cosmos_raw.get("context_transcript_max_items", 24),
-            "cosmos.context_transcript_max_items",
-        ),
-        context_transcript_per_type_max_items=_as_int(
-            cosmos_raw.get("context_transcript_per_type_max_items", 8),
-            "cosmos.context_transcript_per_type_max_items",
-        ),
-        context_transcript_max_chars=_as_int(
-            cosmos_raw.get("context_transcript_max_chars", 4000),
-            "cosmos.context_transcript_max_chars",
-        ),
-        context_memory_digest_max_items=_as_int(
-            cosmos_raw.get("context_memory_digest_max_items", 3),
-            "cosmos.context_memory_digest_max_items",
-        ),
-        decision_repeat_detector_window=_as_int(
-            cosmos_raw.get("decision_repeat_detector_window", 6),
-            "cosmos.decision_repeat_detector_window",
-        ),
-        orchestrator_timeline_jsonl_path=str(
-            cosmos_raw.get("orchestrator_timeline_jsonl_path", "logs/orchestrator_timeline.jsonl")
-        ),
-        inflight_guard_enabled=_as_bool(cosmos_raw.get("inflight_guard_enabled", True), "cosmos.inflight_guard_enabled"),
-        request_min_fresh_frames=_as_int(
-            cosmos_raw.get("request_min_fresh_frames", 1),
-            "cosmos.request_min_fresh_frames",
-        ),
-        reasoning_probe_enabled=_as_bool(cosmos_raw.get("reasoning_probe_enabled", False), "cosmos.reasoning_probe_enabled"),
-        reasoning_probe_hz=_as_float(cosmos_raw.get("reasoning_probe_hz", 0.1), "cosmos.reasoning_probe_hz"),
-        reasoning_probe_timeout_ms=_as_int(
-            cosmos_raw.get("reasoning_probe_timeout_ms", 8000),
-            "cosmos.reasoning_probe_timeout_ms",
-        ),
-        reasoning_probe_max_tokens=_as_int(
-            cosmos_raw.get("reasoning_probe_max_tokens", 1024),
-            "cosmos.reasoning_probe_max_tokens",
-        ),
-        commitment_ttl_ms=_as_int(cosmos_raw.get("commitment_ttl_ms", 12000), "cosmos.commitment_ttl_ms"),
-        mock_latency_ms=_as_int(cosmos_raw.get("mock_latency_ms", 150), "cosmos.mock_latency_ms"),
-        memory_recent_decisions=_as_int(
-            cosmos_raw.get("memory_recent_decisions", 8),
-            "cosmos.memory_recent_decisions",
-        ),
-        memory_recent_summaries=_as_int(
-            cosmos_raw.get("memory_recent_summaries", 8),
-            "cosmos.memory_recent_summaries",
-        ),
-        memory_recent_reasoning=_as_int(
-            cosmos_raw.get("memory_recent_reasoning", 8),
-            "cosmos.memory_recent_reasoning",
-        ),
+        env_max_tokens=_as_int(cosmos_raw.get("env_max_tokens", 600), "cosmos.env_max_tokens"),
+        planner_max_tokens=_as_int(cosmos_raw.get("planner_max_tokens", 360), "cosmos.planner_max_tokens"),
+        response_ttl_ms=_as_int(cosmos_raw.get("response_ttl_ms", 12000), "cosmos.response_ttl_ms"),
         behavior_env_log_path=str(cosmos_raw.get("behavior_env_log_path", "logs/behavior_env.jsonl")),
         behavior_planner_log_path=str(
             cosmos_raw.get("behavior_planner_log_path", "logs/behavior_planner.jsonl")
@@ -490,6 +396,7 @@ def load_config(path: str) -> RobotConfig:
         behavior_reasoning_log_path=str(
             cosmos_raw.get("behavior_reasoning_log_path", "logs/behavior_reasoning.jsonl")
         ),
+        behavior_trace_log_path=str(cosmos_raw.get("behavior_trace_log_path", "logs/behavior_trace.jsonl")),
     )
 
     style_profiles_raw = data.get("styles", {})

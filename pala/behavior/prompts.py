@@ -3,38 +3,27 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List
 
-from ..types import PrimitiveKind
-
 
 SYSTEM_PROMPT = "You are a helpful assistant."
 
 
 def build_env_user_text(*, context: Dict[str, Any], policy_identity: str) -> str:
-    contract = (
-        "You are the PALA environment processor.\n"
-        "Use visual evidence from the provided frames to describe the scene and recent changes.\n"
-        "Frames are provided in strict chronological order (oldest to newest) from one short rolling video window.\n"
-        "Treat them as one temporal sequence of the same scene unless there is explicit evidence of a hard scene cut.\n"
-        "Do not propose actions.\n"
-        "Return exactly one instance of each required tag with plain text content:\n"
-        "<scene></scene>\n"
-        "<events></events>\n"
-        "<hypotheses></hypotheses>\n"
-        "Optional tags (only when useful):\n"
-        "<delta_score></delta_score>\n"
-        "<summary></summary>\n"
-        "Rules:\n"
-        "- scene: dense scene description (people, objects, layout, spatial relations).\n"
-        "- events: what changed from earlier frames to later frames.\n"
-        "- hypotheses: likely user activity/intent grounded in visible evidence.\n"
-        "- Describe continuity through time, not separate image variations.\n"
-        "- delta_score: numeric 0.0 to 1.0.\n"
-        "- summary: one concise sentence.\n"
-        "- Never output placeholder text, markdown fences, or format instructions.\n"
-        "Optional: <think></think>\n"
-    )
-    ctx = json.dumps(context, separators=(",", ":"), ensure_ascii=True)
-    return f"{contract}\nidentity_scope={policy_identity}\ncontext_json={ctx}"
+    contract = [
+        "You are the PALA environment processor.",
+        "Analyze the provided frame sequence (oldest to newest) as one continuous timeline.",
+        "Return JSON only matching schema `pala.env_summary.v1`.",
+        "Do not output markdown or code fences.",
+        "Do not propose actions.",
+        "Output exactly these top-level keys: schema_version,scene,events,hypotheses,summary_short,delta_score,features.",
+        "features must contain exactly: person_present,zone_hint,activity_level,novelty.",
+        "Do not emit alternate keys like description, changes, or inference.",
+        "scene describes layout, relevant objects, and spatial relationships.",
+        "events focuses on what changed over time in this short window.",
+        "hypotheses infers likely user activity from visible evidence.",
+        "summary_short is one concise sentence.",
+    ]
+    ctx_json = json.dumps(context, separators=(",", ":"), ensure_ascii=True)
+    return "\n".join(contract) + f"\nidentity_scope={policy_identity}\ncontext_json={ctx_json}"
 
 
 def build_planner_user_text(
@@ -45,34 +34,34 @@ def build_planner_user_text(
     policy_safety: str,
     policy_style: str,
     planner_prompt: str,
+    max_proposals: int,
 ) -> str:
-    primitives = [kind.value for kind in PrimitiveKind]
-    decision_schema = {
-        "act_now": True,
-        "primitive": "<one_of_allowed_primitives_or_null>",
-        "command": {},
-        "style": "calm",
-        "confidence": 0.0,
-    }
-    contract_lines = [
-        "You are the PALA planner. Decide what lamp action to take now.",
-        "Return exactly one instance of each required tag:",
-        "<decision_json></decision_json>",
-        "<rationale_short></rationale_short>",
-        "Optional: <think></think>",
-        "decision_json content must be valid JSON object and use this shape:",
-        json.dumps(decision_schema, separators=(",", ":"), ensure_ascii=True),
-        f"Allowed primitive values: {primitives}",
-        "If no action should be taken now, set act_now=false and primitive=null.",
-        'If primitive is "orient_to_zone", command must include zone as one of: left, center, right.',
-        'For orient_to_zone, do not use keys like "target", "target_zone", "direction", or "rate". Use "zone", "amp_rad", "rate_rad_s".',
-        "Only set act_now=true when initiating or changing behavior.",
-        "If the lamp is already doing the same primitive/command/style and scene change is minor, set act_now=false and primitive=null.",
-        "Use home only for deliberate reset; do not repeat home without new evidence.",
-        "If uncertain, prefer act_now=false over repetitive actions.",
-        "Do not output markdown fences or malformed tags.",
+    proposal_count = max(1, int(max_proposals))
+    contract = [
+        "You are the PALA intent proposer.",
+        "Return JSON only matching schema `pala.intent_proposals.v1`.",
+        "Do not output markdown or code fences.",
+        "Output one compact single-line JSON object.",
+        f"Return exactly {proposal_count} ranked proposal(s).",
+        "Return one concrete, safe next action proposal each cycle.",
+        "Avoid indecision language; do not output no-op style text.",
+        "Each proposal must include: intent, primitive, command.",
+        "Optional keys: style, score, confidence, urgency, risk, allow_interrupt, evidence, rationale_short.",
+        "Keep responses terse: evidence <= 1 short token, rationale_short <= 48 chars.",
+        "Allowed intents: idle_presence, acknowledge_presence, track_user, scan_environment, react_to_change, reset_pose, affirmation.",
+        "Allowed primitives: hold, home, breath, glance, nod, orient_to_zone.",
+        "Use home only for explicit reset_pose intent; otherwise prefer breath, glance, or orient_to_zone.",
+        "Do not use keys such as likelihood, probability, description, details, or id.",
+        "Types are strict: command is an object, evidence is an array of strings, risk is one of low|medium|high, urgency is a number 0..1.",
+        "rationale_short must be concise (max 80 chars).",
+        "For primitive=hold, set command to {} (an empty object).",
+        "Use evidence IDs from context when possible.",
+        'For orient_to_zone, command must include zone in {"left","center","right"}.',
+        'For breath, command may include amp_rad, period_s, rate_rad_s.',
+        'For glance, command may include direction, amp_rad, duration_s, rate_rad_s.',
+        'For nod, command may include amp_rad, duration_s, cycles, rate_rad_s.',
+        "Output only the JSON object.",
     ]
-    ctx = json.dumps(context, separators=(",", ":"), ensure_ascii=True)
     policy = {
         "identity": policy_identity,
         "capabilities": policy_capabilities,
@@ -80,8 +69,9 @@ def build_planner_user_text(
         "style": policy_style,
         "planner_prompt": planner_prompt,
     }
-    policy_text = json.dumps(policy, separators=(",", ":"), ensure_ascii=True)
-    return "\n".join(contract_lines) + f"\npolicy_json={policy_text}\ncontext_json={ctx}"
+    policy_json = json.dumps(policy, separators=(",", ":"), ensure_ascii=True)
+    ctx_json = json.dumps(context, separators=(",", ":"), ensure_ascii=True)
+    return "\n".join(contract) + f"\npolicy_json={policy_json}\ncontext_json={ctx_json}"
 
 
 def build_messages(*, user_text: str, image_data_urls: List[str]) -> List[Dict[str, Any]]:
