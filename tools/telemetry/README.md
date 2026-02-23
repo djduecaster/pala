@@ -14,12 +14,12 @@ Telemetry remains a sidecar under `tools/telemetry` and does not change the core
   - `--index-mode auto|off|sqlite`
   - `--query '...'` + `--query-limit N`
   - `--quality-gate off|warn|strict`
-  - New panels: `quality`, `query`, `alignment`, `integrity`, `annotations`
+  - Core panels: `quality`, `query`, `alignment`, `annotations`
 - Capture manifest defaults now ship as schema version `3`.
 - New V3.x robustness:
   - `integrity.json` artifact checksums + replay verification
   - Optional live indexing (`--index-live-every N`) for long runs
-- Preset-driven viewer UX (`--preset ...`) with compact primary CLI
+- Mode-driven viewer UX (`--mode live|replay|curate`) with compact primary CLI
 - Bookmark annotations (`annotations.jsonl`) for post-training curation
 - Dataset export profiles (`fast|strict|hard_cases`)
 - One-click curation export on viewer exit (`--curate-on-exit`)
@@ -50,23 +50,23 @@ PALA_LOG_LEVEL=INFO uv run python -m pala.main
 ```bash
 cd /Users/djduecaster/development/pala
 UV_PYTHON=/opt/homebrew/bin/python3.10 uv run python -m tools.telemetry.mac_viewer \
-  --preset baseline \
+  --mode live \
   --jetson-host jetson
 ```
 
 ### 3) Capture a V3 session bundle
 ```bash
 uv run python -m tools.telemetry.mac_viewer \
-  --preset baseline \
+  --mode live \
   --save-session logs/telemetry/session_v3_001 \
-  --capture-frames keyframes
+  --query 'status:parse_fail|timeout'
 ```
 
 ### 4) Replay with indexed query + quality gate
 ```bash
 uv run python -m tools.telemetry.mac_viewer \
+  --mode replay \
   --replay logs/telemetry/session_v3_001 \
-  --preset posttrain-curation \
   --query 'status:parse_fail severity:error' \
   --quality-gate strict
 ```
@@ -74,8 +74,8 @@ uv run python -m tools.telemetry.mac_viewer \
 ### 5) One-click post-training curation export
 ```bash
 uv run python -m tools.telemetry.mac_viewer \
+  --mode curate \
   --replay logs/telemetry/session_v3_001 \
-  --curate-on-exit \
   --curate-profile hard_cases
 ```
 
@@ -137,41 +137,22 @@ Example:
 ```
 
 ## BehaviorV2 Sources (Jetson Agent)
-Agent can tail BehaviorV2 logs directly:
+Agent tails BehaviorV2 logs directly:
 - `--behavior-env-log` (default `logs/behavior_env.jsonl`)
 - `--behavior-planner-log` (default `logs/behavior_planner.jsonl`)
 - `--behavior-reasoning-log` (default `logs/behavior_reasoning.jsonl`)
 
-Use pack:
-```bash
---pack behavior_v2_debug
-```
+## Modes + Compact CLI
+Viewer now defaults to a compact mode-driven CLI surface.
 
-## Presets + Compact CLI
-Viewer now defaults to a compact, preset-driven CLI surface (roughly <=20 primary flags).
-
-List presets:
-```bash
-uv run python -m tools.telemetry.mac_viewer --list-presets
-```
-
-Common presets:
-- `baseline`
-- `headless-debug`
-- `posttrain-curation`
-- `demo`
-
-`baseline` is now intentionally lean: summary + trace list + reasoning stream + alignment + quality + video.
-
-Preset file override:
-```bash
-uv run python -m tools.telemetry.mac_viewer --preset-file tools/telemetry/presets.yaml --preset baseline
-```
+Common mode workflow:
+- `--mode live`: stream from Jetson
+- `--mode replay`: inspect a saved session
+- `--mode curate`: replay + export dataset rows on exit
 
 ## Bookmarks / Annotations
 - Press `b` in viewer to bookmark the currently selected trace/reasoning context.
 - Writes to `annotations.jsonl` in the active replay/capture session directory.
-- Annotation panel can be enabled with `--panel annotations`.
 - `--curate-on-exit` exports `dataset_rows.jsonl` + `dataset_manifest.json` using the selected curation profile.
 
 ## Quality Gate Behavior

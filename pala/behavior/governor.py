@@ -40,6 +40,11 @@ class Governor:
                 if zone not in {"left", "center", "right"}:
                     out.append(GovernedCandidate(candidate=cand, valid=False, reject_reason="invalid_zone"))
                     continue
+            if proposal.primitive == "glance":
+                direction = proposal.command.get("direction")
+                if direction not in {"left", "right", "up", "down"}:
+                    out.append(GovernedCandidate(candidate=cand, valid=False, reject_reason="invalid_direction"))
+                    continue
 
             # Base utility from model confidence and urgency. Arbiter applies hysteresis/switch rules.
             utility = (

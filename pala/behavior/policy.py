@@ -41,6 +41,7 @@ class BehaviorPolicyConfig:
 
     remote_enabled: bool = False
     base_url: Optional[str] = None
+    remote_provider: str = "auto"
     api_key: Optional[str] = None
     model: str = "nvidia/cosmos-reason2-2b"
 
@@ -63,16 +64,16 @@ class BehaviorPolicyConfig:
     planner_include_latest_frame: bool = True
 
     env_max_tokens: int = 600
-    planner_max_tokens: int = 360
+    planner_max_tokens: int = 480
 
-    proposer_max_age_s: float = 2.0
-    planner_max_proposals: int = 1
+    proposer_max_age_s: float = 10.0
+    planner_max_proposals: int = 2
     planner_use_env_context: bool = True
 
     arbiter_min_dwell_s: float = 1.2
     arbiter_base_margin: float = 0.05
     arbiter_takeover_no_signal_streak: int = 2
-    arbiter_takeover_no_commit_s: float = 2.0
+    arbiter_takeover_no_commit_s: float = 2.8
 
     idle_after_s: float = 0.0
     idle_glance_after_s: float = 0.8
@@ -143,7 +144,7 @@ class BehaviorPolicy:
         self._compiler = ActionCompiler()
         self._health = HealthManager()
 
-        self._chat_url = normalize_chat_url(self._cfg.base_url or "")
+        self._chat_url = normalize_chat_url(self._cfg.base_url or "", provider=self._cfg.remote_provider)
         self._remote_enabled = bool(self._cfg.remote_enabled and self._chat_url)
         self._executor: Optional[ThreadPoolExecutor] = None
         if self._remote_enabled:
@@ -169,6 +170,7 @@ class BehaviorPolicy:
         self._last_commit_intent = "idle_presence"
         self._last_commit_utility = 0.2
         self._recent_commit_times: deque[float] = deque(maxlen=32)
+        self._last_valid_zone_hint: Optional[str] = None
         self._idle_tick = 0
 
         self._env_log = maybe_logger(self._cfg.env_log_path) if self._cfg.env_log_path else None
@@ -200,8 +202,8 @@ class BehaviorPolicy:
         self._idle_tick += 1
 
         self._ingest_latest_frame()
-        self._drain_env_inflight(now=now)
-        self._drain_planner_inflight(now=now)
+        self._drain_env_inflight(st=st, now=now)
+        self._drain_planner_inflight(st=st, now=now)
 
         if self._remote_enabled:
             self._maybe_schedule_env(st=st, now=now)
@@ -331,12 +333,16 @@ class BehaviorPolicy:
             return
         if now < self._next_env_allowed_s:
             return
-        if self._env_inflight is not None:
-            self._env_summarizer.submit_or_replace({"queued": True, "ts_mono_s": now})
-            return
-
         period_s = 1.0 / max(0.05, float(self._cfg.env_hz))
         if (now - self._last_env_submit_s) < period_s:
+            return
+
+        # Planner is the primary low-latency control path; avoid concurrent env calls on the same endpoint.
+        if self._planner_inflight is not None:
+            self._env_summarizer.mark_pending({"queued": True, "ts_mono_s": now})
+            return
+        if self._env_inflight is not None:
+            self._env_summarizer.mark_pending({"queued": True, "ts_mono_s": now})
             return
 
         payload = self._build_env_payload(st=st)
@@ -356,6 +362,7 @@ class BehaviorPolicy:
             payload=payload["body"],
             timeout_s=self._request_timeout_s(),
             api_key=self._cfg.api_key,
+            provider=self._cfg.remote_provider,
         )
         self._env_inflight = _InFlightCall(req_id, now, payload, future)
         self._write_log(
@@ -375,9 +382,6 @@ class BehaviorPolicy:
             return
         if now < self._next_planner_allowed_s:
             return
-        if self._planner_inflight is not None:
-            self._intent_proposer.submit_or_replace({"queued": True, "ts_mono_s": now})
-            return
 
         planner_hz = self._health.planner_effective_hz(self._cfg.planner_hz)
         period_s = 1.0 / max(0.05, planner_hz)
@@ -386,6 +390,9 @@ class BehaviorPolicy:
             (now - self._last_planner_event_submit_s) >= max(0.05, self._cfg.planner_event_cooldown_s)
         )
         if not due_periodic and not due_event:
+            return
+        if self._planner_inflight is not None:
+            self._intent_proposer.mark_pending({"queued": True, "ts_mono_s": now})
             return
 
         payload = self._build_planner_payload(st=st, now=now)
@@ -408,6 +415,7 @@ class BehaviorPolicy:
             payload=payload["body"],
             timeout_s=self._request_timeout_s(),
             api_key=self._cfg.api_key,
+            provider=self._cfg.remote_provider,
         )
         self._planner_inflight = _InFlightCall(req_id, now, payload, future)
         self._write_log(
@@ -423,7 +431,7 @@ class BehaviorPolicy:
             },
         )
 
-    def _drain_env_inflight(self, *, now: float) -> None:
+    def _drain_env_inflight(self, *, st: Optional[PerceptionState], now: float) -> None:
         call = self._env_inflight
         if call is None:
             return
@@ -454,6 +462,7 @@ class BehaviorPolicy:
         prompt_tokens = None
         completion_tokens = None
         total_tokens = None
+        parse_stage = "none"
 
         if result.ok and result.response_json is not None:
             finish_reason, prompt_tokens, completion_tokens, total_tokens = _response_meta(result.response_json)
@@ -462,8 +471,10 @@ class BehaviorPolicy:
                 status = "empty_content"
                 error = "missing_message_content"
                 self._env_summarizer.complete_request("")
+                parse_stage = self._env_summarizer.last_parse_stage
             else:
                 parsed = self._env_summarizer.complete_request(content_text)
+                parse_stage = self._env_summarizer.last_parse_stage
                 if parsed is None:
                     status = "parse_fail"
                     detail = self._env_summarizer.last_parse_error or "unknown"
@@ -489,6 +500,7 @@ class BehaviorPolicy:
                         self._pending_planner_event = True
         else:
             self._env_summarizer.complete_request("")
+            parse_stage = self._env_summarizer.last_parse_stage
 
         if status == "ok":
             self._next_env_allowed_s = 0.0
@@ -507,6 +519,7 @@ class BehaviorPolicy:
                 "latency_ms": round(result.latency_ms, 1),
                 "error": error,
                 "response_preview": None if content_text is None else self._preview_text(content_text),
+                "parse_stage": parse_stage,
                 "delta_score": delta_score,
                 "summary": summary,
                 "zone_hint": zone_hint,
@@ -517,6 +530,24 @@ class BehaviorPolicy:
                 "total_tokens": total_tokens,
             },
         )
+        if status == "ok":
+            logger.info(
+                "env req=%s ok latency_ms=%.1f delta=%.2f person=%s zone=%s summary=%s",
+                call.request_id,
+                round(result.latency_ms, 1),
+                float(delta_score or 0.0),
+                person_present,
+                zone_hint,
+                self._preview_text(summary or "", max_chars=140),
+            )
+        else:
+            logger.info(
+                "env req=%s status=%s latency_ms=%.1f error=%s",
+                call.request_id,
+                status,
+                round(result.latency_ms, 1),
+                error,
+            )
 
         if reasoning_text:
             self._write_log(
@@ -533,9 +564,9 @@ class BehaviorPolicy:
         pending = self._env_summarizer.take_latest_pending()
         if pending is not None:
             self._last_env_submit_s = now - (1.0 / max(0.05, float(self._cfg.env_hz)))
-            self._maybe_schedule_env(st=None, now=now)
+            self._maybe_schedule_env(st=st, now=now)
 
-    def _drain_planner_inflight(self, *, now: float) -> None:
+    def _drain_planner_inflight(self, *, st: Optional[PerceptionState], now: float) -> None:
         call = self._planner_inflight
         if call is None:
             return
@@ -563,6 +594,7 @@ class BehaviorPolicy:
         prompt_tokens = None
         completion_tokens = None
         total_tokens = None
+        parse_stage = "none"
 
         if result.ok and result.response_json is not None:
             finish_reason, prompt_tokens, completion_tokens, total_tokens = _response_meta(result.response_json)
@@ -571,8 +603,10 @@ class BehaviorPolicy:
                 status = "empty_content"
                 error = "missing_message_content"
                 self._intent_proposer.complete_request("")
+                parse_stage = self._intent_proposer.last_parse_stage
             else:
                 parsed = self._intent_proposer.complete_request(content_text)
+                parse_stage = self._intent_proposer.last_parse_stage
                 if parsed is None:
                     status = "parse_fail"
                     detail = self._intent_proposer.last_parse_error or "unknown"
@@ -590,6 +624,7 @@ class BehaviorPolicy:
                     self._latest_remote_wall_s = time.time()
         else:
             self._intent_proposer.complete_request("")
+            parse_stage = self._intent_proposer.last_parse_stage
 
         if status == "ok":
             self._next_planner_allowed_s = 0.0
@@ -621,6 +656,7 @@ class BehaviorPolicy:
                 "latency_ms": round(result.latency_ms, 1),
                 "error": error,
                 "response_preview": None if content_text is None else self._preview_text(content_text),
+                "parse_stage": parse_stage,
                 "proposal_count": 0 if parsed_response is None else len(parsed_response.proposals),
                 "top_proposal": top,
                 "finish_reason": finish_reason,
@@ -629,6 +665,31 @@ class BehaviorPolicy:
                 "total_tokens": total_tokens,
             },
         )
+        if status == "ok":
+            primitive = None if top is None else top.get("primitive")
+            intent = None if top is None else top.get("intent")
+            score = None if top is None else top.get("score")
+            confidence = None if top is None else top.get("confidence")
+            logger.info(
+                "planner req=%s ok latency_ms=%.1f proposals=%s top=%s/%s score=%s conf=%s response=%s",
+                call.request_id,
+                round(result.latency_ms, 1),
+                0 if parsed_response is None else len(parsed_response.proposals),
+                intent,
+                primitive,
+                None if score is None else round(float(score), 3),
+                None if confidence is None else round(float(confidence), 3),
+                self._preview_text(content_text or "", max_chars=180),
+            )
+        else:
+            logger.info(
+                "planner req=%s status=%s latency_ms=%.1f error=%s response=%s",
+                call.request_id,
+                status,
+                round(result.latency_ms, 1),
+                error,
+                None if content_text is None else self._preview_text(content_text, max_chars=180),
+            )
 
         if reasoning_text:
             self._write_log(
@@ -646,7 +707,7 @@ class BehaviorPolicy:
         if pending is not None:
             planner_hz = self._health.planner_effective_hz(self._cfg.planner_hz)
             self._last_planner_submit_s = now - (1.0 / max(0.05, planner_hz))
-            self._maybe_schedule_planner(st=None, now=now)
+            self._maybe_schedule_planner(st=st, now=now)
 
     def _build_env_payload(self, *, st: Optional[PerceptionState]) -> Optional[Dict[str, Any]]:
         frames = self._frame_window.sample(max_frames=self._cfg.env_max_frames)
@@ -682,9 +743,11 @@ class BehaviorPolicy:
             "model": self._cfg.model,
             "messages": build_messages(user_text=user_text, image_data_urls=image_data_urls),
             "temperature": 0.0,
+            "top_p": 0.3,
+            "presence_penalty": 0.0,
             "max_tokens": int(self._cfg.env_max_tokens),
             "stream": False,
-            "response_format": env_response_format(),
+            "response_format": env_response_format(provider=self._cfg.remote_provider),
         }
 
         return {"body": body, "frames": len(frames)}
@@ -734,9 +797,11 @@ class BehaviorPolicy:
                 image_data_urls=image_data_urls[: max(0, int(self._cfg.planner_max_frames))],
             ),
             "temperature": 0.0,
+            "top_p": 0.3,
+            "presence_penalty": 0.0,
             "max_tokens": int(self._cfg.planner_max_tokens),
             "stream": False,
-            "response_format": intent_response_format(),
+            "response_format": intent_response_format(provider=self._cfg.remote_provider),
         }
 
         return {"body": body, "frames": len(image_data_urls)}
@@ -775,12 +840,24 @@ class BehaviorPolicy:
         if st is not None and st.debug:
             zone = str(st.debug.get("zone_hint", "")).strip().lower()
             if zone in {"left", "center", "right"}:
+                self._last_valid_zone_hint = zone
                 return zone
         latest_env = snapshot.get("latest_env_snapshot") or {}
         features = latest_env.get("features") or {}
-        zone = str(features.get("zone_hint", "unknown")).strip().lower()
+        zone = str(features.get("zone_hint", "")).strip().lower()
         if zone in {"left", "center", "right"}:
+            self._last_valid_zone_hint = zone
             return zone
+        inferred = _infer_zone_hint_from_text(
+            latest_env.get("scene"),
+            latest_env.get("events"),
+            latest_env.get("summary"),
+        )
+        if inferred in {"left", "center", "right"}:
+            self._last_valid_zone_hint = inferred
+            return inferred
+        if self._last_valid_zone_hint in {"left", "center", "right"}:
+            return self._last_valid_zone_hint
         return "unknown"
 
     def _update_perception_health(self, *, st: Optional[PerceptionState]) -> None:
@@ -907,6 +984,31 @@ def _debug_get(st: Optional[PerceptionState], key: str) -> Any:
     if st is None or not isinstance(st.debug, Mapping):
         return None
     return st.debug.get(key)
+
+
+def _infer_zone_hint_from_text(*parts: Any) -> str:
+    token = " ".join(" ".join(str(part or "").split()) for part in parts if part).lower()
+    if not token:
+        return "unknown"
+
+    padded = f" {token} "
+    markers = {
+        "left": ("to my left", "on my left", " left side ", " left "),
+        "right": ("to my right", "on my right", " right side ", " right "),
+        "center": ("in front of me", "ahead of me", " center ", " middle "),
+    }
+
+    best_zone = "unknown"
+    best_idx: Optional[int] = None
+    for zone, variants in markers.items():
+        for marker in variants:
+            idx = padded.find(marker)
+            if idx < 0:
+                continue
+            if best_idx is None or idx < best_idx:
+                best_idx = idx
+                best_zone = zone
+    return best_zone
 
 
 def _response_meta(response_json: Mapping[str, Any]) -> tuple[Optional[str], Optional[int], Optional[int], Optional[int]]:

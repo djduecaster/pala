@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 
 INTENT_PROPOSALS_SCHEMA: Dict[str, Any] = {
@@ -59,7 +59,7 @@ INTENT_PROPOSALS_SCHEMA: Dict[str, Any] = {
             "type": "object",
             "additionalProperties": False,
             "properties": {
-                "direction": {"type": "string"},
+                "direction": {"$ref": "#/$defs/Direction"},
                 "amp_rad": {"type": "number", "minimum": 0.0, "maximum": 0.8},
                 "duration_s": {"type": "number", "minimum": 0.1, "maximum": 2.0},
                 "rate_rad_s": {"type": "number", "minimum": 0.2, "maximum": 5.0},
@@ -78,6 +78,7 @@ INTENT_PROPOSALS_SCHEMA: Dict[str, Any] = {
         "OrientToZoneCommand": {
             "type": "object",
             "additionalProperties": False,
+            "required": ["zone"],
             "properties": {
                 "zone": {"$ref": "#/$defs/Zone"},
                 "amp_rad": {"type": "number", "minimum": 0.0, "maximum": 0.8},
@@ -92,6 +93,14 @@ INTENT_PROPOSALS_SCHEMA: Dict[str, Any] = {
                 "intent",
                 "primitive",
                 "command",
+                "style",
+                "score",
+                "confidence",
+                "urgency",
+                "risk",
+                "allow_interrupt",
+                "evidence",
+                "rationale_short",
             ],
             "properties": {
                 "intent": {"$ref": "#/$defs/Intent"},
@@ -179,10 +188,10 @@ ENV_SUMMARY_SCHEMA: Dict[str, Any] = {
     ],
     "properties": {
         "schema_version": {"type": "string", "const": "pala.env_summary.v1"},
-        "scene": {"type": "string", "minLength": 1, "maxLength": 1200},
-        "events": {"type": "string", "minLength": 1, "maxLength": 800},
-        "hypotheses": {"type": "string", "minLength": 1, "maxLength": 800},
-        "summary_short": {"type": "string", "minLength": 1, "maxLength": 180},
+        "scene": {"type": "string", "minLength": 1, "maxLength": 360},
+        "events": {"type": "string", "minLength": 1, "maxLength": 220},
+        "hypotheses": {"type": "string", "minLength": 1, "maxLength": 220},
+        "summary_short": {"type": "string", "minLength": 1, "maxLength": 120},
         "delta_score": {"type": "number", "minimum": 0.0, "maximum": 1.0},
         "features": {
             "type": "object",
@@ -199,21 +208,32 @@ ENV_SUMMARY_SCHEMA: Dict[str, Any] = {
 }
 
 
-def intent_response_format() -> Dict[str, Any]:
+def intent_response_format(*, provider: Optional[str] = None) -> Dict[str, Any]:
+    if _use_json_object_mode(provider):
+        return {"type": "json_object"}
     return {
         "type": "json_schema",
         "json_schema": {
             "name": "pala_intent_proposals_v1",
+            "strict": True,
             "schema": INTENT_PROPOSALS_SCHEMA,
         },
     }
 
 
-def env_response_format() -> Dict[str, Any]:
+def env_response_format(*, provider: Optional[str] = None) -> Dict[str, Any]:
+    if _use_json_object_mode(provider):
+        return {"type": "json_object"}
     return {
         "type": "json_schema",
         "json_schema": {
             "name": "pala_env_summary_v1",
+            "strict": True,
             "schema": ENV_SUMMARY_SCHEMA,
         },
     }
+
+
+def _use_json_object_mode(provider: Optional[str]) -> bool:
+    token = str(provider or "").strip().lower()
+    return token == "gemini"

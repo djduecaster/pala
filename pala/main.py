@@ -497,6 +497,17 @@ def _build_behavior_config(cfg, *, run_log_dir: Optional[str] = None) -> Behavio
 
     base_url = os.getenv("PALA_COSMOS_BASE_URL") or cosmos.base_url
     api_key = os.getenv("PALA_COSMOS_API_KEY")
+    remote_provider = (
+        os.getenv("PALA_MODEL_PROVIDER")
+        or os.getenv("PALA_COSMOS_PROVIDER")
+        or getattr(cosmos, "provider", "auto")
+    )
+    provider_token = str(remote_provider or "auto").strip().lower()
+    base_token = str(base_url or "").strip().lower()
+    if provider_token == "auto" and (
+        "generativelanguage.googleapis.com" in base_token or "/v1beta/openai" in base_token
+    ):
+        provider_token = "gemini"
     model = os.getenv("PALA_COSMOS_MODEL") or cosmos.model
     planner_prompt = os.getenv("PALA_COSMOS_PROMPT") or cosmos.planner_prompt
 
@@ -525,16 +536,21 @@ def _build_behavior_config(cfg, *, run_log_dir: Optional[str] = None) -> Behavio
         idle_glance_after_cfg = 0.8
         arbiter_margin_cfg = 0.05
 
+    planner_hz_cfg = float(getattr(cosmos, "planner_hz", 0.5))
+    base_ttl_s = max(0.2, float(getattr(cosmos, "response_ttl_ms", 10000)) / 1000.0)
+    min_ttl_s = max(10.0, 2.5 * (1.0 / max(0.05, planner_hz_cfg)))
+
     return BehaviorPolicyConfig(
         remote_enabled=remote_enabled,
         base_url=None if base_url in (None, "") else str(base_url),
+        remote_provider=provider_token,
         api_key=None if api_key in (None, "") else str(api_key),
         model=str(model),
         request_timeout_ms=int(getattr(cosmos, "request_timeout_ms", 6000)),
         error_backoff_s=float(getattr(cosmos, "behavior_error_backoff_s", 1.5)),
         client_error_backoff_s=float(getattr(cosmos, "behavior_client_error_backoff_s", 5.0)),
-        env_hz=float(getattr(cosmos, "summarizer_hz", 0.25)),
-        planner_hz=float(getattr(cosmos, "planner_hz", 0.5)),
+        env_hz=float(getattr(cosmos, "summarizer_hz", 0.10)),
+        planner_hz=planner_hz_cfg,
         planner_event_delta_threshold=float(getattr(cosmos, "planner_event_delta_threshold", 0.65)),
         planner_event_cooldown_s=float(getattr(cosmos, "planner_event_cooldown_s", 0.7)),
         max_frame_age_ms=int(getattr(cosmos, "max_frame_age_ms", 500)),
@@ -546,14 +562,14 @@ def _build_behavior_config(cfg, *, run_log_dir: Optional[str] = None) -> Behavio
         request_min_fresh_frames=int(getattr(cosmos, "request_min_fresh_frames", 1)),
         planner_include_latest_frame=bool(getattr(cosmos, "planner_include_latest_frame", True)),
         env_max_tokens=int(getattr(cosmos, "env_max_tokens", 600)),
-        planner_max_tokens=int(getattr(cosmos, "planner_max_tokens", 360)),
-        proposer_max_age_s=max(0.2, float(getattr(cosmos, "response_ttl_ms", 2000)) / 1000.0),
-        planner_max_proposals=int(getattr(cosmos, "planner_max_proposals", 1)),
+        planner_max_tokens=int(getattr(cosmos, "planner_max_tokens", 480)),
+        proposer_max_age_s=max(base_ttl_s, min_ttl_s),
+        planner_max_proposals=int(getattr(cosmos, "planner_max_proposals", 2)),
         planner_use_env_context=bool(getattr(cosmos, "planner_use_env_context", True)),
         arbiter_min_dwell_s=float(getattr(cosmos, "arbiter_min_dwell_s", 1.2)),
         arbiter_base_margin=arbiter_margin_cfg,
         arbiter_takeover_no_signal_streak=int(getattr(cosmos, "arbiter_takeover_no_signal_streak", 2)),
-        arbiter_takeover_no_commit_s=float(getattr(cosmos, "arbiter_takeover_no_commit_s", 2.0)),
+        arbiter_takeover_no_commit_s=float(getattr(cosmos, "arbiter_takeover_no_commit_s", 2.8)),
         idle_after_s=idle_after_cfg,
         idle_glance_after_s=idle_glance_after_cfg,
         policy_identity=str(getattr(cosmos, "policy_identity", "You are PALA.")),

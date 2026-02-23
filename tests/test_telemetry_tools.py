@@ -20,10 +20,9 @@ from tools.telemetry.protocol import decode_message, encode_message, event
 from tools.telemetry.jetson_agent import _TapVideoSource, _encode_jpeg_frame, _parse_tegrastats
 from tools.telemetry.filters import parse_field_filter, matches_field_filters
 from tools.telemetry.mac_viewer import (
+    _apply_mode_defaults,
     _build_in_memory_alignment_rows,
     _build_in_memory_query_rows,
-    _apply_panel_preset,
-    _can_preload_trace_index,
     DashboardState,
     _build_parser,
     _build_remote_agent_command,
@@ -33,13 +32,11 @@ from tools.telemetry.mac_viewer import (
     _resolve_live_save_session_dir,
     _run_curation_export,
 )
-from tools.telemetry.packs import resolve_packs, apply_pack_overrides
 from tools.telemetry.capture import CaptureConfig, SessionCaptureWriter
 from tools.telemetry.dataset_export import export_dataset_rows
 from tools.telemetry.annotations import annotation_key, append_annotation, load_annotations
 from tools.telemetry.doctor import _check_session_dir
 from tools.telemetry.integrity import build_integrity_report, verify_integrity_report, write_integrity_report
-from tools.telemetry.presets import load_viewer_presets
 from tools.telemetry.replay import SessionReplayReader
 from tools.telemetry.reasoning import format_reasoning_snippet, normalize_reasoning_message, redact_reasoning_text
 from tools.telemetry.quality import evaluate_quality_gate, load_quality_report
@@ -128,16 +125,37 @@ def test_remote_command_expands_tilde_dir():
     assert "--video-tap-meta" in cmd
 
 
-def test_remote_command_forwards_pack_and_filters():
+def test_mode_defaults_apply_live_baseline():
+    parser = _build_parser()
+    args = parser.parse_args([])
+    notes = _apply_mode_defaults(args, parser)
+    assert notes == []
+    assert args.mode == "live"
+    assert args.pack == ["reasoning_live"]
+    assert "reasoning_stream" in args.panel
+
+
+def test_mode_defaults_apply_curate_profile():
+    parser = _build_parser()
+    args = parser.parse_args(["--mode", "curate", "--replay", "logs/telemetry/session"])
+    notes = _apply_mode_defaults(args, parser)
+    assert notes == []
+    assert args.curate_on_exit is True
+    assert args.no_video is True
+    assert args.quality_gate == "strict"
+    assert args.index_mode == "sqlite"
+    assert args.pack == ["behavior_v2_debug"]
+    assert "annotations" in args.panel
+    assert "status:parse_fail" in args.query
+
+
+def test_remote_command_forwards_pack_and_trace_limits():
     args = _build_parser().parse_args([])
     args.pack = ["runtime_core", "memory_debug"]
-    args.field_filter = ["actions_log.data.confidence<0.5"]
     args.trace_max_events = 4096
     cmd = _build_remote_agent_command(args)
     assert "--pack runtime_core" in cmd
     assert "--pack memory_debug" in cmd
-    assert "--field-filter" in cmd
-    assert "confidence<0.5" in cmd
     assert "--trace-max-events" in cmd
     assert "4096" in cmd
 
@@ -247,15 +265,6 @@ def test_field_filter_parsing_and_match():
     msg_bad = {"source": "actions_log", "payload": {"data": {"confidence": 0.9}}}
     assert matches_field_filters(msg_ok, [flt]) is True
     assert matches_field_filters(msg_bad, [flt]) is False
-
-
-def test_signal_pack_resolution_and_override():
-    resolved = resolve_packs(["runtime_core", "memory_debug"])
-    assert "perception_log" in resolved.sources
-    assert "memory_log" in resolved.sources
-    updated = apply_pack_overrides(resolved, ["exclude_sources=video_frame", "include_sources=journal"])
-    assert "video_frame" not in updated.sources
-    assert "journal" in updated.sources
 
 
 def test_capture_and_replay_roundtrip(tmp_path):
@@ -669,18 +678,6 @@ def test_dashboard_reasoning_filters_and_selection():
     assert state.reasoning_selected_seq is not None
 
 
-def test_panel_preset_changes_active_panels():
-    args = _build_parser().parse_args([])
-    state = DashboardState(host="jetson")
-    state.configure_panels(["summary"], focus_panel="summary")
-    _apply_panel_preset(state, args, "1")
-    assert "reasoning_stream" in args.panel
-    assert "alignment" in args.panel
-    assert "video" in args.panel
-    assert "trace_list" in args.panel
-    assert "trace_detail" not in args.panel
-
-
 def test_dashboard_trace_selection_and_pin():
     state = DashboardState(host="jetson")
     traces = [
@@ -832,11 +829,6 @@ def test_capture_rebuilds_trace_index_from_full_session_events(tmp_path):
     assert len(req_ids) == 70
 
 
-def test_can_preload_trace_index_requires_no_field_filters():
-    assert _can_preload_trace_index(field_filters=[]) is True
-    assert _can_preload_trace_index(field_filters=[object()]) is False
-
-
 def test_query_session_db_supports_latency_ts_and_sort(tmp_path):
     session_dir = tmp_path / "session"
     writer = SessionCaptureWriter(CaptureConfig(directory=str(session_dir), frames_mode="off", max_seconds=0.0))
@@ -944,6 +936,30 @@ def test_build_in_memory_query_rows_includes_trace_event_rows():
     assert any(row.get("kind") == "event" and row.get("trace_id") == "req:42" for row in rows)
 
 
+def test_build_in_memory_query_rows_supports_keyed_tokens():
+    state = DashboardState(host="jetson")
+    state.apply(
+        {
+            "source": "timeline_log",
+            "ts_wall_s": 1.0,
+            "payload": {
+                "data": {
+                    "type": "req_end",
+                    "payload": {
+                        "request_id": 5,
+                        "status": "parse_fail",
+                        "reasoning": "planner parse_fail while decoding",
+                    },
+                }
+            },
+        }
+    )
+    state.query_text = "status:parse_fail source:timeline_log sort:severity"
+    rows = _build_in_memory_query_rows(state, limit=10)
+    assert rows
+    assert rows[0]["source"] == "timeline_log"
+
+
 def test_build_in_memory_alignment_rows_from_trace_event_refs():
     trace = TraceRecord(
         trace_id="req:9",
@@ -987,30 +1003,6 @@ def test_integrity_report_write_and_verify(tmp_path):
     verify_bad = verify_integrity_report(str(session_dir))
     assert verify_bad["ok"] is False
     assert verify_bad["mismatch"] == ["events.jsonl"]
-
-
-def test_presets_loader_supports_custom_file(tmp_path):
-    cfg = tmp_path / "presets.yaml"
-    cfg.write_text(
-        json.dumps(
-            {
-                "presets": [
-                    {
-                        "name": "custom_one",
-                        "description": "custom preset",
-                        "packs": ["behavior_v2_debug"],
-                        "panels": ["summary", "trace_list"],
-                        "query": "status:parse_fail",
-                    }
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-    presets = load_viewer_presets(str(cfg))
-    assert "baseline" in presets
-    assert "custom_one" in presets
-    assert presets["custom_one"].query == "status:parse_fail"
 
 
 def test_dataset_export_profiles_emit_manifest(tmp_path):
@@ -1107,12 +1099,6 @@ def test_dataset_export_strict_keeps_annotation_curated_rows(tmp_path):
     assert "annotation" in row["inclusion_reasons"]
     manifest = json.loads((session_dir / "dataset_manifest.json").read_text(encoding="utf-8"))
     assert manifest["annotated_row_count"] == 1
-
-
-def test_baseline_preset_is_lean():
-    presets = load_viewer_presets("")
-    baseline = presets["baseline"]
-    assert baseline.panels == ["summary", "trace_list", "reasoning_stream", "alignment", "quality", "video"]
 
 
 def test_run_curation_export_helper(tmp_path):
@@ -1213,4 +1199,6 @@ def test_viewer_help_surface_is_compact():
     parser = _build_parser()
     help_text = parser.format_help()
     options = sorted(set(re.findall(r"--[a-z0-9][a-z0-9-]*", help_text)))
-    assert len(options) <= 24
+    assert len(options) <= 18
+    assert "--mode" in options
+    assert "--preset" not in options

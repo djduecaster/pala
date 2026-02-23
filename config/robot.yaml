@@ -71,6 +71,7 @@ deepstream:
 cosmos:
   enabled: true
   base_url: "http://160.211.46.144:8000" # Prefer env override: PALA_COSMOS_BASE_URL
+  provider: "auto" # auto|openai|cosmos|gemini
   model: "nvidia/cosmos-reason2-2b"
   planner_prompt: "Prioritize calm, safe desk-companion behavior. Always choose one concrete next action."
   policy_identity: "You are PALA, a social desk companion lamp that should feel alive, expressive, and safe."
@@ -79,15 +80,15 @@ cosmos:
   policy_style: "Default style is calm; use curious for gentle tracking and focused for attentive task support."
   # Behavior cadence and parser policy.
   planner_hz: 0.5
-  summarizer_hz: 0.25
+  summarizer_hz: 1.0
   planner_event_delta_threshold: 0.65
   planner_event_cooldown_s: 0.7
-  planner_max_proposals: 1
+  planner_max_proposals: 2
   planner_use_env_context: true
   arbiter_min_dwell_s: 1.2
   arbiter_base_margin: 0.10
   arbiter_takeover_no_signal_streak: 2
-  arbiter_takeover_no_commit_s: 2.0
+  arbiter_takeover_no_commit_s: 2.8
   idle_after_s: 6.0
   idle_glance_after_s: 10.0
   planner_max_frames: 1
@@ -102,8 +103,8 @@ cosmos:
   request_timeout_ms: 20000
   behavior_error_backoff_s: 1.5
   behavior_client_error_backoff_s: 5.0
-  env_max_tokens: 600
-  planner_max_tokens: 360
+  env_max_tokens: 420
+  planner_max_tokens: 480
   response_ttl_ms: 12000
   behavior_env_log_path: "logs/behavior_env.jsonl"
   behavior_planner_log_path: "logs/behavior_planner.jsonl"

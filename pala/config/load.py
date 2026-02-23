@@ -54,6 +54,7 @@ class DeepStreamConfig:
 class CosmosConfig:
     enabled: bool = False
     base_url: Optional[str] = None
+    provider: str = "auto"
     model: str = "nvidia/cosmos-reason2-2b"
     planner_prompt: str = (
         "Prioritize calm, safe desk-companion behavior. "
@@ -74,10 +75,10 @@ class CosmosConfig:
     )
     # Remote behavior cadence.
     planner_hz: float = 0.5
-    summarizer_hz: float = 0.25
+    summarizer_hz: float = 0.10
     planner_event_delta_threshold: float = 0.65
     planner_event_cooldown_s: float = 0.7
-    planner_max_proposals: int = 1
+    planner_max_proposals: int = 3
     planner_use_env_context: bool = True
     # Deterministic arbitration.
     arbiter_min_dwell_s: float = 1.2
@@ -278,6 +279,7 @@ def load_config(path: str) -> RobotConfig:
     cosmos = CosmosConfig(
         enabled=_as_bool(cosmos_raw.get("enabled", False), "cosmos.enabled"),
         base_url=None if cosmos_raw.get("base_url") in (None, "") else str(cosmos_raw.get("base_url")),
+        provider=str(cosmos_raw.get("provider", "auto")),
         model=str(cosmos_raw.get("model", "nvidia/cosmos-reason2-2b")),
         planner_prompt=str(
             cosmos_raw.get(
@@ -316,7 +318,7 @@ def load_config(path: str) -> RobotConfig:
             )
         ),
         planner_hz=_as_float(cosmos_raw.get("planner_hz", 0.5), "cosmos.planner_hz"),
-        summarizer_hz=_as_float(cosmos_raw.get("summarizer_hz", 0.25), "cosmos.summarizer_hz"),
+        summarizer_hz=_as_float(cosmos_raw.get("summarizer_hz", 0.10), "cosmos.summarizer_hz"),
         planner_event_delta_threshold=_as_float(
             cosmos_raw.get("planner_event_delta_threshold", 0.65),
             "cosmos.planner_event_delta_threshold",
@@ -325,7 +327,7 @@ def load_config(path: str) -> RobotConfig:
             cosmos_raw.get("planner_event_cooldown_s", 0.7),
             "cosmos.planner_event_cooldown_s",
         ),
-        planner_max_proposals=_as_int(cosmos_raw.get("planner_max_proposals", 1), "cosmos.planner_max_proposals"),
+        planner_max_proposals=_as_int(cosmos_raw.get("planner_max_proposals", 3), "cosmos.planner_max_proposals"),
         planner_use_env_context=_as_bool(
             cosmos_raw.get("planner_use_env_context", True),
             "cosmos.planner_use_env_context",

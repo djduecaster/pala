@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import json
-import re
 from typing import Any, Dict, Mapping, Optional
 
 from jsonschema import ValidationError, validate
 
+from .json_parse import parse_json_flexible
 from .schemas import INTENT_PROPOSALS_SCHEMA
 from .types import IntentProposal, ProposerResponse, clamp01, clamp_float, clamp_int
 
@@ -30,6 +29,7 @@ _ALLOWED_ZONES = {"left", "center", "right"}
 class IntentProposerParseResult:
     response: ProposerResponse
     raw_text: str
+    parse_stage: str = "raw"
 
 
 class IntentProposer:
@@ -39,6 +39,7 @@ class IntentProposer:
         self._inflight = False
         self._pending_payload: Optional[Mapping[str, Any]] = None
         self._last_parse_error: Optional[str] = None
+        self._last_parse_stage: str = "raw"
 
     @property
     def in_flight(self) -> bool:
@@ -48,6 +49,10 @@ class IntentProposer:
     def last_parse_error(self) -> Optional[str]:
         return self._last_parse_error
 
+    @property
+    def last_parse_stage(self) -> str:
+        return self._last_parse_stage
+
     def submit_or_replace(self, payload: Mapping[str, Any]) -> bool:
         if not self._inflight:
             self._inflight = True
@@ -56,10 +61,14 @@ class IntentProposer:
         self._pending_payload = dict(payload)
         return False
 
+    def mark_pending(self, payload: Mapping[str, Any]) -> None:
+        self._pending_payload = dict(payload)
+
     def complete_request(self, raw_text: str) -> Optional[IntentProposerParseResult]:
         self._inflight = False
-        parsed, err = _parse_intent_proposer_response_with_error(raw_text)
+        parsed, err, stage = _parse_intent_proposer_response_with_error(raw_text)
         self._last_parse_error = err
+        self._last_parse_stage = stage
         return parsed
 
     def take_latest_pending(self) -> Optional[Mapping[str, Any]]:
@@ -71,22 +80,22 @@ class IntentProposer:
 def parse_intent_proposer_response(
     raw_text: str,
 ) -> Optional[IntentProposerParseResult]:
-    parsed, _ = _parse_intent_proposer_response_with_error(raw_text)
+    parsed, _, _ = _parse_intent_proposer_response_with_error(raw_text)
     return parsed
 
 
 def _parse_intent_proposer_response_with_error(
     raw_text: str,
-) -> tuple[Optional[IntentProposerParseResult], Optional[str]]:
+) -> tuple[Optional[IntentProposerParseResult], Optional[str], str]:
     token = str(raw_text or "").strip()
     if not token:
-        return None, "empty_response"
-    data, parse_error = _parse_json_flexible(token)
+        return None, "empty_response", "raw"
+    data, parse_error, stage = parse_json_flexible(token)
     if data is None:
-        return None, parse_error or "json_decode:unknown"
+        return None, parse_error or "json_decode:unknown", stage
     canonical = _canonicalize_payload(data)
     if canonical is None:
-        return None, "proposals_missing_or_empty"
+        return None, "proposals_missing_or_empty", stage
     schema_error: Optional[str] = None
     try:
         validate(instance=canonical, schema=INTENT_PROPOSALS_SCHEMA)
@@ -97,7 +106,7 @@ def _parse_intent_proposer_response_with_error(
     raw_proposals = canonical.get("proposals")
 
     if not isinstance(raw_proposals, list) or not raw_proposals:
-        return None, "proposals_missing_or_empty"
+        return None, "proposals_missing_or_empty", stage
 
     parsed = []
     invalid_indices = []
@@ -108,25 +117,49 @@ def _parse_intent_proposer_response_with_error(
             continue
         parsed.append(proposal)
 
+    if invalid_indices:
+        if schema_error is not None:
+            return None, schema_error, stage
+        return None, f"proposal_invalid:indices={invalid_indices}", stage
+
     if not parsed:
-        return None, schema_error or f"proposal_invalid:indices={invalid_indices}"
+        if schema_error is not None:
+            return None, schema_error, stage
+        return None, "proposals_missing_or_empty", stage
+
+    if not any(_is_non_idle_proposal(item) for item in parsed):
+        return None, "non_idle_proposal_missing", stage
 
     notes_short = _clean_text(canonical.get("notes_short"))
     response = ProposerResponse(schema_version=schema_version, proposals=parsed, notes_short=notes_short)
-    # Keep schema validation strict but non-blocking for bring-up compatibility;
-    # decision safety still flows through deterministic governor/arbiter checks.
-    return IntentProposerParseResult(response=response, raw_text=token), None
+    return IntentProposerParseResult(response=response, raw_text=token, parse_stage=stage), None, stage
 
 
 def _parse_proposal(item: Any) -> Optional[IntentProposal]:
     if not isinstance(item, dict):
         return None
 
+    required = (
+        "intent",
+        "primitive",
+        "command",
+        "style",
+        "score",
+        "confidence",
+        "urgency",
+        "risk",
+        "allow_interrupt",
+        "evidence",
+        "rationale_short",
+    )
+    if any(key not in item for key in required):
+        return None
+
     intent = str(item.get("intent", "")).strip().lower().replace(" ", "_")
     primitive = str(item.get("primitive", "")).strip().lower().replace(" ", "_")
     if primitive in {"idle_presence", "idle", "none"}:
         primitive = "breath"
-    style = str(item.get("style", item.get("_style_", "calm"))).strip().lower()
+    style = str(item.get("style", item.get("_style_", ""))).strip().lower()
     risk = _normalize_risk(item.get("risk", "low"))
 
     if intent not in _ALLOWED_INTENTS:
@@ -155,16 +188,11 @@ def _parse_proposal(item: Any) -> Optional[IntentProposal]:
             if text:
                 evidence_out.append(text[:64])
 
-    rationale_short = _clean_text(
-        item.get("rationale_short")
-        or item.get("rationale")
-        or item.get("notes_short")
-        or f"{intent}:{primitive}"
-    )
+    rationale_short = _clean_text(item.get("rationale_short"))
     if not rationale_short:
         return None
 
-    allow_interrupt = bool(item.get("allow_interrupt", True))
+    allow_interrupt = bool(item.get("allow_interrupt"))
 
     min_dwell_raw = item.get("min_dwell_ms")
     max_duration_raw = item.get("max_duration_ms")
@@ -173,9 +201,9 @@ def _parse_proposal(item: Any) -> Optional[IntentProposal]:
         clamp_int(max_duration_raw, lo=0, hi=60000, default=0) if max_duration_raw is not None else None
     )
 
-    score = clamp01(item.get("score", item.get("confidence", 0.35)), default=0.35)
-    confidence = clamp01(item.get("confidence", item.get("score", 0.55)), default=0.55)
-    urgency = clamp01(item.get("urgency", 0.2), default=0.2)
+    score = clamp01(item.get("score"), default=0.0)
+    confidence = clamp01(item.get("confidence"), default=0.0)
+    urgency = clamp01(item.get("urgency"), default=0.0)
 
     return IntentProposal(
         intent=intent,
@@ -211,9 +239,10 @@ def _normalize_command(primitive: str, command_raw: Dict[str, Any]) -> Optional[
         return cmd
 
     if primitive == "glance":
-        direction = str(command_raw.get("direction", "left")).strip().lower()
+        direction_raw = command_raw.get("direction")
+        direction = str(direction_raw).strip().lower() if direction_raw is not None else "left"
         if direction not in _ALLOWED_DIRECTIONS:
-            direction = "left"
+            return None
         cmd["direction"] = direction
         cmd["amp_rad"] = clamp_float(command_raw.get("amp_rad", 0.35), lo=0.0, hi=0.8, default=0.35)
         cmd["duration_s"] = clamp_float(command_raw.get("duration_s", 0.6), lo=0.1, hi=2.0, default=0.6)
@@ -228,9 +257,10 @@ def _normalize_command(primitive: str, command_raw: Dict[str, Any]) -> Optional[
         return cmd
 
     if primitive == "orient_to_zone":
-        zone = str(command_raw.get("zone", "center")).strip().lower()
+        zone_raw = command_raw.get("zone")
+        zone = str(zone_raw if zone_raw is not None else "").strip().lower()
         if zone not in _ALLOWED_ZONES:
-            zone = "center"
+            return None
         cmd["zone"] = zone
         cmd["amp_rad"] = clamp_float(command_raw.get("amp_rad", 0.25), lo=0.0, hi=0.8, default=0.25)
         cmd["rate_rad_s"] = clamp_float(command_raw.get("rate_rad_s", 1.4), lo=0.2, hi=5.0, default=1.4)
@@ -279,47 +309,6 @@ def _json_path(exc: ValidationError) -> str:
     return "".join(parts)
 
 
-def _parse_json_flexible(raw_text: str) -> tuple[Optional[Any], Optional[str]]:
-    first_error: Optional[str] = None
-    for candidate in _json_candidates(raw_text):
-        try:
-            return json.loads(candidate), None
-        except json.JSONDecodeError as exc:
-            if first_error is None:
-                first_error = f"json_decode:{exc.msg}@{exc.lineno}:{exc.colno}"
-    return None, first_error or "json_decode:unknown"
-
-
-def _json_candidates(raw_text: str) -> list[str]:
-    token = raw_text.strip()
-    out: list[str] = []
-    if token:
-        out.append(token)
-
-    for match in re.finditer(r"```(?:json)?\s*(.*?)```", token, flags=re.IGNORECASE | re.DOTALL):
-        inner = match.group(1).strip()
-        if inner:
-            out.append(inner)
-
-    first_obj = token.find("{")
-    last_obj = token.rfind("}")
-    if first_obj >= 0 and last_obj > first_obj:
-        out.append(token[first_obj : last_obj + 1].strip())
-
-    first_arr = token.find("[")
-    last_arr = token.rfind("]")
-    if first_arr >= 0 and last_arr > first_arr:
-        out.append(token[first_arr : last_arr + 1].strip())
-
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for item in out:
-        if item and item not in seen:
-            deduped.append(item)
-            seen.add(item)
-    return deduped
-
-
 def _looks_like_single_proposal(data: Mapping[str, Any]) -> bool:
     return "intent" in data and "primitive" in data
 
@@ -366,39 +355,67 @@ def _canonicalize_proposal_item(item: Any) -> Any:
 
     intent = str(item.get("intent", "")).strip().lower().replace(" ", "_")
     primitive = str(item.get("primitive", "")).strip().lower().replace(" ", "_")
-    if primitive in {"idle_presence", "idle", "none"}:
-        primitive = "breath"
+    primitive = _normalize_primitive_alias(primitive, intent=intent)
     intent = _normalize_intent_alias(intent=intent, primitive=primitive)
 
-    command = item.get("command")
-    if not isinstance(command, dict):
-        command = {}
+    command_raw = item.get("command")
+    if not isinstance(command_raw, dict):
+        command_raw = {}
+    command = _normalize_command(primitive, command_raw)
+    if command is None:
+        # Preserve invalid payload shape so schema validation can report the exact violation.
+        command = dict(command_raw)
+
+    style_raw = item.get("style")
+    style: Optional[str] = None
+    if style_raw is not None:
+        token = str(style_raw).strip().lower()
+        style = token if token in _ALLOWED_STYLES else "calm"
+    risk_raw = item.get("risk")
+    risk: Optional[str] = _normalize_risk(risk_raw) if risk_raw is not None else None
+
+    evidence_raw = item.get("evidence", [])
+    evidence: list[str] = []
+    if isinstance(evidence_raw, str):
+        token = " ".join(evidence_raw.split()).strip()
+        if token:
+            evidence.append(token[:64])
+    elif isinstance(evidence_raw, list):
+        for token in evidence_raw[:8]:
+            norm = " ".join(str(token).split()).strip()
+            if norm:
+                evidence.append(norm[:64])
+
+    rationale = _clean_text(item.get("rationale_short"))
 
     out: Dict[str, Any] = {
         "intent": intent,
         "primitive": primitive,
         "command": command,
     }
+    if style is not None:
+        out["style"] = style
+    if risk is not None:
+        out["risk"] = risk
+    if "allow_interrupt" in item:
+        out["allow_interrupt"] = bool(item.get("allow_interrupt"))
+    if "evidence" in item:
+        out["evidence"] = evidence
+    if rationale:
+        out["rationale_short"] = rationale
+    if "score" in item:
+        out["score"] = clamp01(item.get("score"), default=0.0)
+    if "confidence" in item:
+        out["confidence"] = clamp01(item.get("confidence"), default=0.0)
+    if "urgency" in item:
+        out["urgency"] = clamp01(item.get("urgency"), default=0.0)
 
-    for key in (
-        "style",
-        "score",
-        "confidence",
-        "urgency",
-        "risk",
-        "allow_interrupt",
-        "min_dwell_ms",
-        "max_duration_ms",
-        "evidence",
-        "rationale_short",
-    ):
-        if key in item:
-            out[key] = item.get(key)
-
-    if "rationale_short" not in out:
-        rationale = item.get("rationale") or item.get("notes_short")
-        if rationale is not None:
-            out["rationale_short"] = rationale
+    min_dwell_raw = item.get("min_dwell_ms")
+    max_duration_raw = item.get("max_duration_ms")
+    if min_dwell_raw is not None:
+        out["min_dwell_ms"] = clamp_int(min_dwell_raw, lo=0, hi=30000, default=0)
+    if max_duration_raw is not None:
+        out["max_duration_ms"] = clamp_int(max_duration_raw, lo=0, hi=60000, default=0)
 
     return out
 
@@ -415,3 +432,25 @@ def _normalize_intent_alias(*, intent: str, primitive: str) -> str:
         "orient_to_zone": "track_user",
     }
     return fallback.get(primitive, "idle_presence")
+
+
+def _normalize_primitive_alias(primitive: str, *, intent: str) -> str:
+    if primitive in _ALLOWED_PRIMITIVES:
+        return primitive
+    if primitive in {"idle_presence", "idle", "none"}:
+        return "breath"
+    if primitive in {"reset_pose"}:
+        return "home"
+    if primitive in {"track_user"}:
+        return "orient_to_zone"
+    if intent == "reset_pose":
+        return "home"
+    return primitive
+
+
+def _is_non_idle_proposal(item: IntentProposal) -> bool:
+    if item.primitive in {"hold", "breath"}:
+        return False
+    if item.intent == "idle_presence":
+        return False
+    return True

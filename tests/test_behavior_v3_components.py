@@ -20,6 +20,7 @@ from pala.behavior import (
     parse_env_summary_response,
     parse_intent_proposer_response,
 )
+from pala.behavior.json_parse import parse_json_flexible
 from pala.behavior.schemas import env_response_format, intent_response_format
 from pala.behavior.types import clamp_float, clamp_int, clamp01
 from pala.types import ActionPlan, HoldCommand, PrimitiveKind
@@ -170,6 +171,36 @@ def test_context_builder_env_and_planner_context_shapes():
     assert planner_ctx["anti_collapse"]["no_commit_s"] == 2.0
 
 
+def test_context_builder_omits_unknown_zone_from_model_context():
+    builder = ContextBuilder()
+    current = ActionPlan(
+        primitive=PrimitiveKind.HOLD,
+        command=HoldCommand(),
+        confidence=0.3,
+        style="calm",
+    )
+    world = {
+        "latest_env_snapshot": {
+            "summary": "steady scene",
+            "delta_score": 0.1,
+            "features": {"person_present": False, "zone_hint": "unknown", "activity_level": 0.1, "novelty": 0.1},
+        },
+        "control_state_latest": "active_kind=hold",
+    }
+
+    planner_ctx = builder.build_planner_context(
+        st=None,
+        world_snapshot=world,
+        current_action=current,
+        planner_health={"state": "HEALTHY"},
+        now_mono_s=10.0,
+        last_commit_mono_s=8.0,
+        no_commit_s=2.0,
+    )
+    assert "zone_hint" not in planner_ctx["signals"]
+    assert "perception:zone:unknown" not in planner_ctx["evidence_index"]["available"]
+
+
 def test_env_summarizer_valid_and_error_paths(monkeypatch):
     parsed = parse_env_summary_response(_valid_env_json())
     assert parsed is not None
@@ -236,6 +267,7 @@ def test_intent_proposer_valid_normalized_and_error_paths():
     assert parsed.response.proposals[0].primitive == "orient_to_zone"
 
     # Primitive alias + style fallback + risk numeric mapping + evidence normalization.
+    # Idle-only payloads are rejected (must contain at least one non-idle proposal).
     normalized = parse_intent_proposer_response(
         _valid_proposer_json(
             [
@@ -249,14 +281,9 @@ def test_intent_proposer_valid_normalized_and_error_paths():
             ]
         )
     )
-    assert normalized is not None
-    item = normalized.response.proposals[0]
-    assert item.primitive == "breath"
-    assert item.style == "calm"
-    assert item.risk == "high"
-    assert item.evidence == ["frame:latest"]
+    assert normalized is None
 
-    # JSON with unknown root key triggers schema error, but parser salvages valid proposal.
+    # Mixed-quality payload fails closed (no partial salvage).
     salvage_raw = json.dumps(
         {
             "schema_version": "pala.intent_proposals.v1",
@@ -266,8 +293,7 @@ def test_intent_proposer_valid_normalized_and_error_paths():
         }
     )
     salvage = parse_intent_proposer_response(salvage_raw)
-    assert salvage is not None
-    assert len(salvage.response.proposals) == 1
+    assert salvage is None
 
     assert parse_intent_proposer_response("") is None
     assert parse_intent_proposer_response("[]") is None
@@ -278,7 +304,7 @@ def test_intent_proposer_valid_normalized_and_error_paths():
     proposer.submit_or_replace({"tick": 1})
     assert proposer.complete_request(_valid_proposer_json([{"intent": "bad"}])) is None
     err = proposer.last_parse_error or ""
-    assert err.startswith("proposal_invalid") or err.startswith("schema:")
+    assert err.startswith("schema:")
 
 
 def test_intent_proposer_accepts_wrapped_payload_shape():
@@ -313,6 +339,96 @@ def test_intent_proposer_parses_fenced_and_alt_shape():
     assert parsed is not None
     assert len(parsed.response.proposals) == 1
     assert parsed.response.proposals[0].primitive == "glance"
+    assert parsed.parse_stage in {"defenced", "extracted"}
+
+
+def test_intent_proposer_rejects_invalid_zone_alias_and_keeps_reset_pose_primitive():
+    raw = json.dumps(
+        {
+            "schema_version": "pala.intent_proposals.v1",
+            "proposals": [
+                {
+                    "intent": "react_to_change",
+                    "primitive": "orient_to_zone",
+                    "command": {"direction": "forward"},
+                    "style": "calm",
+                    "score": 0.7,
+                    "confidence": 0.6,
+                    "urgency": 0.5,
+                    "risk": "low",
+                    "allow_interrupt": True,
+                    "evidence": ["frame:latest"],
+                    "rationale_short": "center user",
+                },
+                {
+                    "intent": "reset_pose",
+                    "primitive": "reset_pose",
+                    "command": {},
+                    "style": "calm",
+                    "score": 0.6,
+                    "confidence": 0.7,
+                    "urgency": 0.4,
+                    "risk": "low",
+                    "allow_interrupt": True,
+                    "evidence": ["frame:latest"],
+                    "rationale_short": "return home",
+                },
+            ],
+        }
+    )
+    parsed = parse_intent_proposer_response(raw)
+    assert parsed is None
+
+
+def test_intent_proposer_keeps_reset_pose_alias_when_payload_is_valid():
+    raw = json.dumps(
+        {
+            "schema_version": "pala.intent_proposals.v1",
+            "proposals": [
+                {
+                    "intent": "reset_pose",
+                    "primitive": "reset_pose",
+                    "command": {},
+                    "style": "calm",
+                    "score": 0.6,
+                    "confidence": 0.7,
+                    "urgency": 0.4,
+                    "risk": "low",
+                    "allow_interrupt": True,
+                    "evidence": ["frame:latest"],
+                    "rationale_short": "return home",
+                },
+                {
+                    "intent": "track_user",
+                    "primitive": "glance",
+                    "command": {"direction": "left", "amp_rad": 0.2, "duration_s": 0.4, "rate_rad_s": 1.1},
+                    "style": "curious",
+                    "score": 0.7,
+                    "confidence": 0.8,
+                    "urgency": 0.5,
+                    "risk": "low",
+                    "allow_interrupt": True,
+                    "evidence": ["frame:latest"],
+                    "rationale_short": "check user side",
+                },
+            ],
+        }
+    )
+    parsed = parse_intent_proposer_response(raw)
+    assert parsed is not None
+    assert parsed.response.proposals[0].primitive == "home"
+
+
+def test_intent_proposer_rejects_invalid_glance_direction():
+    raw = _valid_proposer_json(
+        [
+            _valid_proposal(
+                primitive="glance",
+                command={"direction": "forward", "amp_rad": 0.3, "duration_s": 0.4, "rate_rad_s": 1.6},
+            )
+        ]
+    )
+    assert parse_intent_proposer_response(raw) is None
 
 
 def test_env_summarizer_parses_fenced_relaxed_shape():
@@ -332,6 +448,15 @@ def test_env_summarizer_parses_fenced_relaxed_shape():
     assert parsed is not None
     assert parsed.summary.features["person_present"] is True
     assert parsed.summary.summary_short.startswith("person shifted posture")
+    assert parsed.parse_stage in {"defenced", "extracted"}
+
+
+def test_parse_json_flexible_accepts_answer_wrappers():
+    raw = "<answer>```json\n{\"ok\":true}\n```</answer>"
+    data, err, stage = parse_json_flexible(raw)
+    assert err is None
+    assert data == {"ok": True}
+    assert stage in {"defenced", "extracted"}
 
 
 def test_governor_and_action_compiler_and_arbiter_branches():
@@ -465,3 +590,8 @@ def test_schema_response_format_helpers():
     assert env["type"] == "json_schema"
     assert intent["json_schema"]["name"] == "pala_intent_proposals_v1"
     assert env["json_schema"]["name"] == "pala_env_summary_v1"
+
+    intent_gemini = intent_response_format(provider="gemini")
+    env_gemini = env_response_format(provider="gemini")
+    assert intent_gemini == {"type": "json_object"}
+    assert env_gemini == {"type": "json_object"}

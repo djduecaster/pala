@@ -32,9 +32,6 @@ except Exception:  # pragma: no cover - depends on Tk availability.
 from tools.telemetry.annotations import annotation_key, append_annotation, load_annotations
 from tools.telemetry.capture import CaptureConfig, SessionCaptureWriter
 from tools.telemetry.dataset_export import export_dataset_rows
-from tools.telemetry.filters import matches_field_filters, parse_field_filters
-from tools.telemetry.presets import load_viewer_presets
-from tools.telemetry.packs import apply_pack_overrides, list_packs, resolve_packs
 from tools.telemetry.protocol import decode_message
 from tools.telemetry.lamp_viz import draw_lamp_panel
 from tools.telemetry.quality import evaluate_quality_gate, load_quality_report
@@ -418,41 +415,40 @@ class _VideoWindow:
     last_frame_id: int = -1
 
 
-PANEL_PRESETS: Dict[str, List[str]] = {
-    "1": [
-        "summary",
-        "quality",
-        "alignment",
-        "trace_list",
-        "reasoning_stream",
-        "video",
-    ],
-    "2": [
-        "summary",
-        "quality",
-        "query",
-        "alignment",
-        "integrity",
-        "annotations",
-        "trace_list",
-        "trace_detail",
-        "reasoning_stream",
-        "request_detail",
-        "logs",
-        "warnings",
-        "transport",
-    ],
-    "3": ["summary", "video", "trace_list", "reasoning_stream", "quality"],
+@dataclass(frozen=True)
+class ModeConfig:
+    pack: str
+    panels: tuple[str, ...]
+    default_query: str = ""
+    quality_gate: str = "warn"
+    index_mode: str = "auto"
+    no_video: bool = False
+
+
+MODE_CONFIGS: Dict[str, ModeConfig] = {
+    "live": ModeConfig(
+        pack="reasoning_live",
+        panels=("summary", "trace_list", "reasoning_stream", "alignment", "quality", "video"),
+        quality_gate="warn",
+        index_mode="auto",
+        no_video=False,
+    ),
+    "replay": ModeConfig(
+        pack="reasoning_live",
+        panels=("summary", "trace_list", "trace_detail", "reasoning_stream", "alignment", "query", "quality", "video"),
+        quality_gate="warn",
+        index_mode="auto",
+        no_video=False,
+    ),
+    "curate": ModeConfig(
+        pack="behavior_v2_debug",
+        panels=("summary", "trace_list", "trace_detail", "alignment", "query", "quality", "annotations"),
+        default_query="kind:joined severity:error|warning status:parse_fail|timeout sort:severity",
+        quality_gate="strict",
+        index_mode="sqlite",
+        no_video=True,
+    ),
 }
-
-
-def _apply_panel_preset(state: DashboardState, args: argparse.Namespace, key: str) -> None:
-    panels = PANEL_PRESETS.get(str(key))
-    if not panels:
-        return
-    args.panel = list(panels)
-    state.configure_panels(args.panel, focus_panel=state.focus_panel)
-    state.logs.append(f"panel preset {key} applied")
 
 
 def _cycle_reasoning_filter(state: DashboardState) -> None:
@@ -574,12 +570,9 @@ def _build_remote_agent_command(args: argparse.Namespace) -> str:
         "--trace-max-events",
         str(max(128, int(args.trace_max_events))),
     ]
-    for pack in args.pack:
+    packs = list(getattr(args, "pack", []) or ["reasoning_live"])
+    for pack in packs:
         agent_args.extend(["--pack", str(pack)])
-    for override in args.pack_override:
-        agent_args.extend(["--pack-override", str(override)])
-    for expr in args.field_filter:
-        agent_args.extend(["--field-filter", str(expr)])
 
     if args.from_start:
         agent_args.append("--from-start")
@@ -1039,22 +1032,36 @@ def _focus_prefix(state: DashboardState, panel: str) -> str:
     return "  "
 
 
-def _percentile(values: List[float], pct: float) -> Optional[float]:
-    if not values:
-        return None
-    ordered = sorted(values)
-    if len(ordered) == 1:
-        return ordered[0]
-    idx = int(round((max(0.0, min(100.0, pct)) / 100.0) * (len(ordered) - 1)))
-    return ordered[idx]
-
-
 def _query_text_match(query: str, text: str) -> bool:
-    tokens = [tok for tok in str(query or "").strip().split() if tok]
-    if not tokens:
+    raw_tokens = [tok for tok in str(query or "").strip().split() if tok]
+    if not raw_tokens:
         return True
     hay = str(text or "").lower()
-    return all(token.lower() in hay for token in tokens)
+    groups: List[List[str]] = []
+    for raw in raw_tokens:
+        token = str(raw).strip()
+        low = token.lower()
+        if low.startswith("sort:") or low.startswith("order:") or low.startswith("kind:"):
+            continue
+        if (
+            low.startswith("latency_ms>")
+            or low.startswith("latency_ms<")
+            or low.startswith("duration_ms>")
+            or low.startswith("duration_ms<")
+            or low.startswith("ts:[")
+        ):
+            # Structured numeric/time filters do not map cleanly to text fallback.
+            continue
+        if ":" in token:
+            key, value = token.split(":", 1)
+            if key.strip().lower() in {"source", "severity", "status", "phase", "req", "trace", "component"}:
+                token = value.strip()
+        options = [part.strip().lower() for part in token.split("|") if part.strip()]
+        if options:
+            groups.append(options)
+    if not groups:
+        return True
+    return all(any(opt in hay for opt in group) for group in groups)
 
 
 def _build_in_memory_query_rows(state: DashboardState, *, limit: int) -> List[Dict[str, Any]]:
@@ -1203,62 +1210,6 @@ def _render_reasoning_stream(lines: List[str], state: DashboardState, args: argp
     lines.append("")
 
 
-def _render_request_detail(lines: List[str], state: DashboardState, args: argparse.Namespace) -> None:
-    lines.append(f"{_focus_prefix(state, 'request_detail')}Request Detail")
-    selected = state.selected_reasoning_event(slow_ms=float(args.reasoning_slow_ms))
-    if selected is None:
-        lines.append("  no selection")
-        lines.append("")
-        return
-    seq, event = selected
-    lines.append(
-        f"  seq={seq} source={event.source} req_id={event.req_id} phase={event.phase} status={event.status or '-'}"
-    )
-    lines.append(
-        "  "
-        f"latency_ms={event.latency_ms} primitive={event.primitive} confidence={event.confidence} "
-        f"target_zone={event.target_zone}"
-    )
-    lines.append(f"  model={event.model} provider={event.provider} severity={event.severity}")
-    snippet = format_reasoning_snippet(
-        event.snippet,
-        max_chars=int(args.reasoning_snippet_max_chars),
-        redact=str(args.reasoning_redact) == "on",
-    )
-    if snippet:
-        lines.append(f"  snippet={_shorten(snippet, 240)}")
-    lines.append("")
-
-
-def _render_reasoning_health(lines: List[str], state: DashboardState, args: argparse.Namespace, now_wall_s: float) -> None:
-    lines.append(f"{_focus_prefix(state, 'reasoning_health')}Reasoning Health")
-    window_s = max(1.0, float(args.reasoning_kpi_window_s))
-    recent: List[ReasoningEvent] = []
-    for _, event in state.filtered_reasoning_events(slow_ms=float(args.reasoning_slow_ms)):
-        if event.ts_wall_s is None:
-            continue
-        if (now_wall_s - float(event.ts_wall_s)) <= window_s:
-            recent.append(event)
-
-    if not recent:
-        lines.append(f"  no events in last {window_s:.0f}s")
-        lines.append("")
-        return
-    total = len(recent)
-    error_count = sum(1 for ev in recent if ev.severity == "error")
-    parse_fail = sum(1 for ev in recent if "parse_fail" in ev.phase)
-    no_content = sum(1 for ev in recent if (ev.status or "").lower() == "no_content")
-    stale = sum(1 for ev in recent if "stale" in ev.phase or "stale" in (ev.status or "").lower())
-    latencies = [float(ev.latency_ms) for ev in recent if ev.latency_ms is not None]
-    p50 = _percentile(latencies, 50.0)
-    p95 = _percentile(latencies, 95.0)
-    ok_rate = (100.0 * max(0, total - error_count) / total) if total > 0 else 0.0
-    lines.append(f"  window={window_s:.0f}s events={total} ok_rate={ok_rate:.1f}% errors={error_count}")
-    lines.append(f"  parse_fail={parse_fail} no_content={no_content} stale_markers={stale}")
-    lines.append(f"  latency_ms p50={p50:.0f} p95={p95:.0f}" if p50 is not None and p95 is not None else "  latency_ms n/a")
-    lines.append("")
-
-
 def _render_trace_list(lines: List[str], state: DashboardState, args: argparse.Namespace) -> None:
     lines.append(f"{_focus_prefix(state, 'trace_list')}Trace List")
     if not state.trace_records:
@@ -1399,25 +1350,6 @@ def _render_alignment_panel(lines: List[str], state: DashboardState, args: argpa
     lines.append("")
 
 
-def _render_integrity_panel(lines: List[str], state: DashboardState) -> None:
-    lines.append(f"{_focus_prefix(state, 'integrity')}Integrity")
-    report = state.integrity_report
-    if report is None:
-        lines.append("  no integrity report")
-        lines.append("")
-        return
-    ok = bool(report.get("ok"))
-    lines.append(
-        f"  ok={ok} checked={report.get('checked_file_count')} "
-        f"missing={len(report.get('missing') or [])} mismatch={len(report.get('mismatch') or [])}"
-    )
-    for rel in list(report.get("missing") or [])[:3]:
-        lines.append(f"  missing: {rel}")
-    for rel in list(report.get("mismatch") or [])[:3]:
-        lines.append(f"  mismatch: {rel}")
-    lines.append("")
-
-
 def _render_annotations_panel(lines: List[str], state: DashboardState, args: argparse.Namespace) -> None:
     lines.append(f"{_focus_prefix(state, 'annotations')}Annotations")
     if not state.annotations:
@@ -1495,10 +1427,6 @@ def _run_curation_export(
     }
 
 
-def _can_preload_trace_index(*, field_filters: List[Any]) -> bool:
-    return len(field_filters) == 0
-
-
 def _expand_local_path(path: str) -> str:
     raw = str(path or "").strip()
     if not raw:
@@ -1558,7 +1486,7 @@ def _render(state: DashboardState, *, now_wall_s: float, args: argparse.Namespac
         )
         preset_text = state.active_preset or "-"
         lines.append(
-            f"preset={preset_text} focus={state.focus_panel} "
+            f"mode={preset_text} focus={state.focus_panel} "
             f"reasoning={state.reasoning_filter_mode} hotkeys={'on' if state.key_reader_enabled else 'off'}"
         )
         selected_trace = state.selected_trace()
@@ -1589,12 +1517,6 @@ def _render(state: DashboardState, *, now_wall_s: float, args: argparse.Namespac
     if _panel_enabled(args, "reasoning_stream"):
         _render_reasoning_stream(lines, state, args)
 
-    if _panel_enabled(args, "request_detail"):
-        _render_request_detail(lines, state, args)
-
-    if _panel_enabled(args, "reasoning_health"):
-        _render_reasoning_health(lines, state, args, now_wall_s)
-
     if _panel_enabled(args, "trace_list"):
         _render_trace_list(lines, state, args)
 
@@ -1609,9 +1531,6 @@ def _render(state: DashboardState, *, now_wall_s: float, args: argparse.Namespac
 
     if _panel_enabled(args, "alignment"):
         _render_alignment_panel(lines, state, args)
-
-    if _panel_enabled(args, "integrity"):
-        _render_integrity_panel(lines, state)
 
     if _panel_enabled(args, "annotations"):
         _render_annotations_panel(lines, state, args)
@@ -1632,140 +1551,6 @@ def _render(state: DashboardState, *, now_wall_s: float, args: argparse.Namespac
             )
         lines.append("")
 
-    if _panel_enabled(args, "perception"):
-        lines.append(f"{_focus_prefix(state, 'perception')}Perception")
-        if state.perception is None:
-            lines.append("  no data yet")
-        else:
-            zone = None
-            debug = state.perception.get("debug")
-            if isinstance(debug, dict):
-                zone = debug.get("zone_hint")
-            person_conf = state.perception.get("primary_person_conf")
-            fps = state.perception.get("fps")
-            latency = state.perception.get("latency_ms")
-            lines.append(
-                f"  fps={fps} latency_ms={latency} zone={zone} person_conf={person_conf}"
-            )
-        lines.append("")
-
-    if _panel_enabled(args, "action"):
-        lines.append(f"{_focus_prefix(state, 'action')}Action")
-        if state.action is None:
-            lines.append("  no data yet")
-        else:
-            primitive = state.action.get("primitive")
-            confidence = state.action.get("confidence")
-            explanation = state.action.get("explanation")
-            lines.append(f"  primitive={primitive} confidence={confidence}")
-            lines.append(f"  explanation={_shorten(str(explanation), 120)}")
-        lines.append("")
-
-    if _panel_enabled(args, "command"):
-        lines.append(f"{_focus_prefix(state, 'command')}Command")
-        if state.command is None:
-            lines.append("  no data yet")
-        else:
-            enabled = state.command.get("enable")
-            angles = state.command.get("joint_angles_rad")
-            names = state.command.get("joint_names")
-            if isinstance(angles, list) and isinstance(names, list) and names:
-                pairs = []
-                for i in range(min(len(names), len(angles))):
-                    try:
-                        pairs.append(f"{names[i]}={float(angles[i]):+.2f}")
-                    except (TypeError, ValueError):
-                        continue
-                lines.append(f"  enable={enabled} angles=[{', '.join(pairs[:6])}]")
-            else:
-                lines.append(f"  enable={enabled} angles={angles}")
-        lines.append("")
-
-    if _panel_enabled(args, "system"):
-        lines.append(f"{_focus_prefix(state, 'system')}System (tegrastats)")
-        if state.tegrastats is None:
-            lines.append("  no data yet")
-        else:
-            gpu = state.tegrastats.get("gpu_util_pct")
-            cpu = state.tegrastats.get("cpu_util_avg_pct")
-            ram_used = state.tegrastats.get("ram_used_mb")
-            ram_total = state.tegrastats.get("ram_total_mb")
-            temp_max = state.tegrastats.get("temp_max_c")
-            lines.append(
-                f"  cpu_avg_pct={cpu} gpu_pct={gpu} ram_mb={ram_used}/{ram_total} temp_max_c={temp_max}"
-            )
-        lines.append("")
-
-    if _panel_enabled(args, "memory"):
-        lines.append(f"{_focus_prefix(state, 'memory')}Memory")
-        if state.memory is None:
-            lines.append("  no data yet")
-        else:
-            lines.append(
-                f"  type={state.memory.get('type')} ts_wall_s={state.memory.get('ts_wall_s')}"
-            )
-            payload = state.memory.get("payload")
-            if isinstance(payload, dict):
-                highlights = payload.get("highlights")
-                if isinstance(highlights, list):
-                    lines.append(f"  highlights={_shorten(', '.join(str(x) for x in highlights), 140)}")
-        lines.append("")
-
-    if _panel_enabled(args, "timeline"):
-        lines.append(f"{_focus_prefix(state, 'timeline')}Timeline")
-        if state.timeline is None:
-            lines.append("  no data yet")
-        else:
-            lines.append(
-                f"  type={state.timeline.get('type')} ts_wall_s={state.timeline.get('ts_wall_s')} "
-                f"ts_mono_s={state.timeline.get('ts_mono_s')}"
-            )
-            payload = state.timeline.get("payload")
-            if isinstance(payload, dict):
-                lines.append(f"  payload_keys={','.join(sorted(payload.keys())[:8])}")
-        lines.append("")
-
-    if _panel_enabled(args, "transport"):
-        lines.append(f"{_focus_prefix(state, 'transport')}Transport")
-        if state.transport is None:
-            lines.append("  no data yet")
-        else:
-            lines.append(
-                f"  queue_depth={state.transport.get('queue_depth')} "
-                f"queue_capacity={state.transport.get('queue_capacity')} "
-                f"dropped={state.transport.get('dropped_events')}"
-            )
-        if state.capture_status is not None:
-            lines.append(
-                f"  capture_status={state.capture_status.get('status')} "
-                f"capture_dir={state.capture_status.get('capture_dir')}"
-            )
-        lines.append("")
-
-    if _panel_enabled(args, "logs"):
-        lines.append(f"{_focus_prefix(state, 'logs')}Recent Logs")
-        if state.logs:
-            for item in list(state.logs)[-args.max_log_lines :]:
-                lines.append(f"  {_shorten(item, 160)}")
-        else:
-            lines.append("  no journal matches yet")
-        lines.append("")
-
-    if _panel_enabled(args, "warnings") and state.warnings:
-        lines.append(f"{_focus_prefix(state, 'warnings')}Warnings")
-        for item in state.warnings:
-            lines.append(f"  {_shorten(item, 160)}")
-        lines.append("")
-
-    if _panel_enabled(args, "events"):
-        lines.append(f"{_focus_prefix(state, 'events')}Event Counts")
-        if not state.event_counts:
-            lines.append("  no events yet")
-        else:
-            for source in sorted(state.event_counts):
-                lines.append(f"  {source}: {state.event_counts[source]}")
-        lines.append("")
-
     if state.reasoning_show_help:
         lines.append("Hotkeys")
         lines.append("  ?: toggle this help")
@@ -1777,11 +1562,10 @@ def _render(state: DashboardState, *, now_wall_s: float, args: argparse.Namespac
         lines.append("  o: focus trace detail panel")
         lines.append("  p: pin/unpin selected trace")
         lines.append("  b: bookmark selected trace/event")
-        lines.append("  1/2/3: apply panel preset")
         lines.append("  Ctrl-C: exit")
         lines.append("")
     lines.append(
-        "Cmd: [? help] [h/l focus] [j/k reasoning] [u/i trace] [o detail] [p pin] [b bookmark] [f filter] [r redact] [1/2/3 presets] [Ctrl-C exit]"
+        "Cmd: [? help] [h/l focus] [j/k reasoning] [u/i trace] [o detail] [p pin] [b bookmark] [f filter] [r redact] [Ctrl-C exit]"
     )
     return "\n".join(lines)
 
@@ -1791,26 +1575,20 @@ def _build_parser() -> argparse.ArgumentParser:
     hidden = argparse.SUPPRESS
 
     # Primary UX surface (keep this compact).
-    parser.add_argument("--ui-mode", choices=["reasoning", "classic"], default="reasoning")
-    parser.add_argument("--list-packs", action="store_true", help="List built-in signal packs and exit.")
-    parser.add_argument("--list-presets", action="store_true", help="List telemetry viewer presets and exit.")
-    parser.add_argument("--preset", default="baseline", help="Viewer preset (baseline/headless-debug/posttrain-curation/demo).")
-    parser.add_argument("--preset-file", default="", help="Optional presets file (YAML/JSON).")
-    parser.add_argument("--pack", action="append", default=[], help="Signal pack (repeatable).")
+    parser.add_argument(
+        "--mode",
+        choices=["live", "replay", "curate"],
+        default="live",
+        help="Run mode: live stream, replay a session, or curate/export dataset rows.",
+    )
     parser.add_argument("--jetson-host", default="jetson", help="SSH host alias for Jetson.")
     parser.add_argument("--jetson-dir", default="~/pala", help="Project directory on Jetson.")
     parser.add_argument("--replay", default="", help="Replay a local telemetry session directory.")
     parser.add_argument("--save-session", default="", help="Write local capture bundle directory.")
     parser.add_argument("--query", default="", help="Indexed telemetry query expression.")
-    parser.add_argument("--index-mode", choices=["auto", "off", "sqlite"], default="auto")
+    parser.add_argument("--index-mode", choices=["auto", "off", "sqlite"], default="auto", help=hidden)
     parser.add_argument("--quality-gate", choices=["off", "warn", "strict"], default="warn")
     parser.add_argument("--no-video", action="store_true", help="Disable video stream rendering.")
-    parser.add_argument("--from-start", action="store_true", help="Stream logs from beginning.")
-    parser.add_argument("--agent-capture-dir", default="", help="Remote capture directory on Jetson.")
-    parser.add_argument("--capture-frames", choices=["off", "keyframes", "all"], default="off")
-    parser.add_argument("--capture-max-seconds", type=float, default=0.0)
-    parser.add_argument("--stale-timeout-s", type=float, default=10.0)
-    parser.add_argument("--bookmark-tag", default="bookmark", help="Default annotation tag for hotkey bookmarks.")
     parser.add_argument("--curate-on-exit", action="store_true", help="Export dataset rows when viewer exits.")
     parser.add_argument(
         "--curate-profile",
@@ -1819,39 +1597,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Dataset profile used by --curate-on-exit.",
     )
 
-    # Advanced/compatibility flags (hidden but still supported).
-    parser.add_argument("--pack-override", action="append", default=[], help=hidden)
-    parser.add_argument("--field-filter", action="append", default=[], help=hidden)
-    parser.add_argument(
-        "--panel",
-        action="append",
-        default=[],
-        choices=[
-            "summary",
-            "quality",
-            "query",
-            "alignment",
-            "integrity",
-            "annotations",
-            "trace_list",
-            "trace_detail",
-            "reasoning_stream",
-            "request_detail",
-            "reasoning_health",
-            "video",
-            "perception",
-            "action",
-            "command",
-            "system",
-            "memory",
-            "timeline",
-            "transport",
-            "logs",
-            "warnings",
-            "events",
-        ],
-        help=hidden,
-    )
+    # Advanced/runtime controls.
+    parser.add_argument("--from-start", action="store_true", help=hidden)
+    parser.add_argument("--agent-capture-dir", default="", help=hidden)
+    parser.add_argument("--capture-frames", choices=["off", "keyframes", "all"], default="off", help=hidden)
+    parser.add_argument("--capture-max-seconds", type=float, default=0.0, help=hidden)
+    parser.add_argument("--stale-timeout-s", type=float, default=10.0, help=hidden)
+    parser.add_argument("--bookmark-tag", default="bookmark", help=hidden)
     parser.add_argument("--focus-panel", default="", help=hidden)
     parser.add_argument("--perception-log", default="logs/perception.jsonl", help=hidden)
     parser.add_argument("--actions-log", default="logs/actions.jsonl", help=hidden)
@@ -1905,68 +1657,47 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--trace-match-window-s", type=float, default=2.0, help=hidden)
     parser.add_argument("--trace-max-events", type=int, default=1000, help=hidden)
     parser.add_argument("--query-limit", type=int, default=10, help=hidden)
+    parser.set_defaults(pack=[], panel=[])
     return parser
+
+
+def _apply_mode_defaults(args: argparse.Namespace, parser: argparse.ArgumentParser) -> List[str]:
+    notes: List[str] = []
+    mode = str(getattr(args, "mode", "live") or "live").strip().lower()
+    replay = str(getattr(args, "replay", "") or "").strip()
+    save_session = str(getattr(args, "save_session", "") or "").strip()
+    cfg = MODE_CONFIGS.get(mode)
+    if cfg is None:
+        parser.error(f"unknown mode: {mode}")
+        return notes
+
+    if mode == "live":
+        if replay:
+            parser.error("--mode live does not accept --replay (use --mode replay or --mode curate)")
+    elif mode == "replay":
+        if not replay:
+            parser.error("--mode replay requires --replay <session_dir>")
+    elif mode == "curate":
+        if (not replay) and (not save_session):
+            parser.error("--mode curate requires --replay <session_dir> or --save-session <session_dir>")
+        args.curate_on_exit = True
+    args.pack = [cfg.pack]
+    args.panel = list(cfg.panels)
+    if (not str(args.query or "").strip()) and cfg.default_query:
+        args.query = cfg.default_query
+    if str(args.quality_gate or "warn") == "warn" and cfg.quality_gate != "warn":
+        args.quality_gate = cfg.quality_gate
+    if str(args.index_mode or "auto") == "auto" and cfg.index_mode != "auto":
+        args.index_mode = cfg.index_mode
+    if cfg.no_video:
+        args.no_video = True
+    return notes
 
 
 def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
-    presets = load_viewer_presets(str(args.preset_file or ""))
-    if args.list_packs:
-        for pack in list_packs():
-            print(f"{pack.name}: {pack.description}")
-        return 0
-    if args.list_presets:
-        for name in sorted(presets):
-            preset = presets[name]
-            print(f"{preset.name}: {preset.description}")
-        return 0
-
-    preset_name = str(args.preset or "").strip().lower()
-    if args.curate_on_exit and preset_name == "baseline":
-        # Curation mode defaults to the dedicated preset unless explicitly overridden.
-        preset_name = "posttrain-curation"
-        args.preset = preset_name
-    selected_preset = presets.get(preset_name) if preset_name else None
-    if preset_name and selected_preset is None:
-        parser.error(f"unknown preset: {preset_name}")
-    if selected_preset is not None:
-        if not args.pack:
-            args.pack = list(selected_preset.packs)
-        if not args.panel:
-            args.panel = list(selected_preset.panels)
-        if (not str(args.query or "").strip()) and selected_preset.query:
-            args.query = selected_preset.query
-        if str(args.index_mode or "auto") == "auto":
-            args.index_mode = selected_preset.index_mode
-        if str(args.quality_gate or "warn") == "warn":
-            args.quality_gate = selected_preset.quality_gate
-        if selected_preset.no_video:
-            args.no_video = True
-
-    if not args.pack:
-        args.pack = ["reasoning_live"] if args.ui_mode == "reasoning" else ["runtime_core"]
-    try:
-        resolved_packs = resolve_packs(args.pack)
-        resolved_packs = apply_pack_overrides(resolved_packs, args.pack_override)
-    except ValueError as exc:
-        parser.error(str(exc))
-    if not args.panel:
-        if args.ui_mode == "reasoning":
-            args.panel = [
-                "summary",
-                "quality",
-                "alignment",
-                "trace_list",
-                "reasoning_stream",
-                "video",
-            ]
-        else:
-            args.panel = sorted(set(resolved_packs.panels) | {"summary"})
-    try:
-        field_filters = parse_field_filters(args.field_filter)
-    except ValueError as exc:
-        parser.error(str(exc))
+    notes = _apply_mode_defaults(args, parser)
 
     stop = threading.Event()
     replay_dir = _expand_local_path(str(args.replay or ""))
@@ -1985,14 +1716,15 @@ def main() -> int:
     signal.signal(signal.SIGTERM, _stop_handler)
 
     state = DashboardState(host=args.jetson_host, max_frame_bytes=max(0, int(args.max_frame_bytes)))
-    state.active_preset = selected_preset.name if selected_preset is not None else ""
+    state.active_preset = str(args.mode or "live")
     state.configure_panels(args.panel, focus_panel=str(args.focus_panel or ""))
     state.query_text = str(args.query or "").strip()
-    if args.ui_mode == "reasoning":
-        if "trace_list" in args.panel:
-            state.focus_panel = "trace_list"
-        elif "reasoning_stream" in args.panel:
-            state.focus_panel = "reasoning_stream"
+    if "trace_list" in args.panel:
+        state.focus_panel = "trace_list"
+    elif "reasoning_stream" in args.panel:
+        state.focus_panel = "reasoning_stream"
+    for note in notes:
+        state.logs.append(note)
     if map_note:
         state.logs.append(map_note)
     in_q: "queue.Queue[Dict[str, Any]]" = queue.Queue(maxsize=max(256, int(args.queue_size)))
@@ -2053,8 +1785,7 @@ def main() -> int:
             metadata={
                 "mode": "replay" if replay_mode else "live",
                 "packs": list(args.pack),
-                "field_filters": list(args.field_filter),
-                "preset": state.active_preset,
+                "mode_profile": state.active_preset,
             },
         )
         try:
@@ -2108,19 +1839,16 @@ def main() -> int:
                 f"mismatch={len(state.integrity_report.get('mismatch') or [])}"
             )
         _apply_quality_gate()
-        if not _can_preload_trace_index(field_filters=field_filters):
-            state.logs.append("trace index preload disabled because field filters are active")
-        else:
-            try:
-                trace_index_path = resolve_trace_index_path(replay_dir, replay_reader.manifest)
-                if os.path.exists(trace_index_path):
-                    preloaded_traces = load_trace_index(trace_index_path)
-                    state.set_traces(preloaded_traces)
-                    if preloaded_traces:
-                        using_preloaded_trace_index = True
-                        state.logs.append(f"preloaded {len(preloaded_traces)} traces from trace index")
-            except Exception as exc:
-                state.warnings.append(f"trace_index_load_failed: {exc!r}")
+        try:
+            trace_index_path = resolve_trace_index_path(replay_dir, replay_reader.manifest)
+            if os.path.exists(trace_index_path):
+                preloaded_traces = load_trace_index(trace_index_path)
+                state.set_traces(preloaded_traces)
+                if preloaded_traces:
+                    using_preloaded_trace_index = True
+                    state.logs.append(f"preloaded {len(preloaded_traces)} traces from trace index")
+        except Exception as exc:
+            state.warnings.append(f"trace_index_load_failed: {exc!r}")
         if state.query_text:
             if args.index_mode == "off":
                 state.query_note = "query index disabled (--index-mode off)"
@@ -2185,9 +1913,6 @@ def main() -> int:
         for key in key_reader.poll():
             if key == "?":
                 state.reasoning_show_help = not state.reasoning_show_help
-                continue
-            if key in PANEL_PRESETS:
-                _apply_panel_preset(state, args, key)
                 continue
             if key == "h":
                 state.cycle_focus_panel(delta=-1)
@@ -2287,8 +2012,6 @@ def main() -> int:
                         state.logs.append(text)
                 continue
             state.last_rx_wall_s = time.time()
-            if not matches_field_filters(msg, field_filters):
-                continue
             state.apply(msg)
             if (not using_preloaded_trace_index) and trace_builder.ingest(msg):
                 state.set_traces(trace_builder.traces())

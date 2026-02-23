@@ -185,9 +185,18 @@ class Arbiter:
         no_commit_s: float,
     ) -> float:
         utility = max(0.0, float(current_utility))
+        primitive = current_action.primitive.value
+
+        # Idle primitives should not remain sticky for long windows.
+        if primitive in {"hold", "breath"}:
+            if action_age_s >= 8.0:
+                utility *= 0.55
+            if action_age_s >= 15.0:
+                utility *= 0.35
+
         if no_commit_s >= self._cfg.idle_after_s:
             utility *= 0.75
-        if _is_terminal_primitive(current_action.primitive.value) and action_age_s >= self._cfg.terminal_retrigger_s:
+        if _is_terminal_primitive(primitive) and action_age_s >= self._cfg.terminal_retrigger_s:
             utility *= 0.45
         return max(0.0, min(1.5, utility))
 
@@ -202,10 +211,16 @@ class Arbiter:
         planner_open_breaker: bool,
         planner_no_signal_streak: int,
     ) -> Optional[GovernedCandidate]:
-        takeover_due = (
-            no_commit_s >= max(0.2, self._cfg.takeover_no_commit_s)
-            and (planner_open_breaker or planner_no_signal_streak >= max(1, self._cfg.takeover_no_signal_streak))
-        )
+        required_no_commit_s = max(0.2, self._cfg.takeover_no_commit_s)
+        takeover_due = False
+        if planner_open_breaker and no_commit_s >= required_no_commit_s:
+            takeover_due = True
+        elif (
+            not planner_open_breaker
+            and planner_no_signal_streak >= max(1, self._cfg.takeover_no_signal_streak)
+            and no_commit_s >= (required_no_commit_s + 1.0)
+        ):
+            takeover_due = True
         if not takeover_due:
             return None
 

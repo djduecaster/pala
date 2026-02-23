@@ -11,12 +11,11 @@ import os
 import time
 from dataclasses import dataclass
 from typing import Any, Optional
-from urllib import error as urllib_error
-from urllib import request as urllib_request
 
 import numpy as np
 from PIL import Image
 
+from pala.behavior.remote_api import extract_message_content, normalize_chat_url, post_chat_json
 from pala.config import load_config
 from pala.control.primitives import PrimitiveKind
 from pala.hardware.camera import DummyCamera
@@ -41,63 +40,6 @@ class ProbeResult:
     jpeg_bytes: int
     frames_sent: int
     error: Optional[str]
-
-
-def _normalize_chat_url(base_url: str) -> str:
-    base = base_url.strip()
-    if base.endswith("/v1/chat/completions"):
-        return base
-    if base.endswith("/v1"):
-        return f"{base}/chat/completions"
-    if base.endswith("/v1/"):
-        return f"{base}chat/completions"
-    return f"{base.rstrip('/')}/v1/chat/completions"
-
-
-def _post_json(url: str, payload: dict[str, Any], *, timeout_s: float, api_key: Optional[str]) -> tuple[int, dict[str, Any]]:
-    body = json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
-    req = urllib_request.Request(url=url, data=body, method="POST")
-    req.add_header("Content-Type", "application/json")
-    if api_key:
-        req.add_header("Authorization", f"Bearer {api_key}")
-
-    try:
-        with urllib_request.urlopen(req, timeout=timeout_s) as resp:
-            status = int(resp.status)
-            raw = resp.read().decode("utf-8", errors="replace")
-    except urllib_error.HTTPError as exc:
-        raw = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"HTTP {exc.code}: {raw}") from exc
-    except urllib_error.URLError as exc:
-        raise RuntimeError(f"request failed: {exc.reason}") from exc
-
-    try:
-        return status, json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("invalid JSON response from cosmos endpoint") from exc
-
-
-def _extract_content(response: dict[str, Any]) -> Optional[str]:
-    choices = response.get("choices")
-    if not isinstance(choices, list) or not choices:
-        return None
-    choice0 = choices[0]
-    if not isinstance(choice0, dict):
-        return None
-    message = choice0.get("message")
-    if not isinstance(message, dict):
-        return None
-    content = message.get("content")
-    if isinstance(content, str):
-        return content
-    if isinstance(content, list):
-        parts: list[str] = []
-        for item in content:
-            if isinstance(item, dict) and isinstance(item.get("text"), str):
-                parts.append(item["text"])
-        return "\n".join(parts) if parts else None
-    return None
-
 
 def _parse_json_obj(raw: str) -> Optional[dict[str, Any]]:
     try:
@@ -317,7 +259,7 @@ def main() -> int:
     if not base_url:
         print("cosmos_image_probe: missing base URL (use --base-url or PALA_COSMOS_BASE_URL).")
         return 2
-    chat_url = _normalize_chat_url(base_url)
+    chat_url = normalize_chat_url(base_url)
     model = args.model or os.getenv("PALA_COSMOS_MODEL") or cfg.cosmos.model
     planner_prompt = args.prompt or os.getenv("PALA_COSMOS_PROMPT") or cfg.cosmos.planner_prompt
     api_key = args.api_key or os.getenv("PALA_COSMOS_API_KEY")
@@ -425,10 +367,16 @@ def main() -> int:
             status = 0
 
             t_http0 = time.monotonic()
-            try:
-                status, response = _post_json(chat_url, payload, timeout_s=timeout_s, api_key=api_key)
+            response = post_chat_json(
+                url=chat_url,
+                payload=payload,
+                timeout_s=timeout_s,
+                api_key=api_key,
+            )
+            if response.ok and isinstance(response.response_json, dict):
+                status = response.status_code
                 ok_http = True
-                content = _extract_content(response)
+                content, _reasoning = extract_message_content(response.response_json)
                 if content:
                     response_preview = content.strip().replace("\n", "\\n")
                     if args.task == "describe":
@@ -454,8 +402,8 @@ def main() -> int:
                             )
                 else:
                     response_preview = "<empty>"
-            except Exception as exc:
-                error = str(exc)
+            else:
+                error = response.error or "request failed"
                 response_preview = error
             http_ms = (time.monotonic() - t_http0) * 1000.0
             total_ms = (time.monotonic() - t0) * 1000.0

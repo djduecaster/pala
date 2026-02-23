@@ -8,6 +8,7 @@ JETSON_DIR="~/pala"
 rsync -az --delete \
   --exclude ".git/" \
   --exclude ".venv/" \
+  --exclude "logs/" \
   --exclude "__pycache__/" \
   --exclude "*.pyc" \
   --exclude ".DS_Store" \

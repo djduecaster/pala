@@ -11,6 +11,7 @@ class ComponentHealth:
     transport_fail_streak: int = 0
     parse_fail_streak: int = 0
     no_signal_streak: int = 0
+    slow_streak: int = 0
     last_latency_ms: float = 0.0
 
     def as_dict(self) -> dict:
@@ -19,6 +20,7 @@ class ComponentHealth:
             "transport_fail_streak": self.transport_fail_streak,
             "parse_fail_streak": self.parse_fail_streak,
             "no_signal_streak": self.no_signal_streak,
+            "slow_streak": self.slow_streak,
             "last_latency_ms": round(float(self.last_latency_ms), 1),
         }
 
@@ -46,15 +48,21 @@ class HealthManager:
         self.env = ComponentHealth()
         self.planner = ComponentHealth()
         self.perception = PerceptionHealth()
+        self._planner_slow_latency_ms = 2500.0
+        self._env_slow_latency_ms = 6000.0
 
     def on_env_result(self, *, status: str, latency_ms: float) -> None:
         health = self.env
         health.last_latency_ms = max(0.0, float(latency_ms))
+        if health.last_latency_ms >= self._env_slow_latency_ms:
+            health.slow_streak += 1
+        else:
+            health.slow_streak = 0
         if status == "ok":
             health.transport_fail_streak = 0
             health.parse_fail_streak = 0
             health.no_signal_streak = 0
-            health.state = "HEALTHY"
+            health.state = "DEGRADED" if health.slow_streak >= 3 else "HEALTHY"
             return
 
         if status == "transport_error":
@@ -70,6 +78,10 @@ class HealthManager:
     def on_planner_result(self, *, status: str, latency_ms: float, response: ProposerResponse | None) -> None:
         health = self.planner
         health.last_latency_ms = max(0.0, float(latency_ms))
+        if health.last_latency_ms >= self._planner_slow_latency_ms:
+            health.slow_streak += 1
+        else:
+            health.slow_streak = 0
 
         if status == "ok":
             health.transport_fail_streak = 0
@@ -85,7 +97,11 @@ class HealthManager:
 
         if health.transport_fail_streak >= 3 or health.parse_fail_streak >= 3:
             health.state = "OPEN_BREAKER"
+        elif health.slow_streak >= 8:
+            health.state = "OPEN_BREAKER"
         elif health.no_signal_streak >= 6:
+            health.state = "DEGRADED"
+        elif health.slow_streak >= 3:
             health.state = "DEGRADED"
         else:
             health.state = "HEALTHY"

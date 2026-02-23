@@ -52,6 +52,21 @@ def test_build_payloads_include_media_first(tmp_path):
     assert planner_user_content[-1]["type"] == "text"
     assert env_payload["body"]["response_format"]["type"] == "json_schema"
     assert planner_payload["body"]["response_format"]["type"] == "json_schema"
+    assert env_payload["body"]["top_p"] == 0.3
+    assert planner_payload["body"]["top_p"] == 0.3
+
+
+def test_build_payloads_use_json_object_for_gemini_provider(tmp_path):
+    policy = _make_policy(tmp_path, remote_provider="gemini")
+    frame = np.zeros((16, 16, 3), dtype=np.uint8)
+    policy._frame_window.add_frame(frame, mono_ns=time.monotonic_ns())
+
+    env_payload = policy._build_env_payload(st=None)
+    planner_payload = policy._build_planner_payload(st=None, now=0.0)
+    assert env_payload is not None
+    assert planner_payload is not None
+    assert env_payload["body"]["response_format"]["type"] == "json_object"
+    assert planner_payload["body"]["response_format"]["type"] == "json_object"
 
 
 def test_latest_only_pending_markers_when_inflight(tmp_path):
@@ -78,10 +93,11 @@ def test_cross_component_guard_does_not_mark_phantom_inflight(tmp_path):
     frame = np.zeros((16, 16, 3), dtype=np.uint8)
     policy._frame_window.add_frame(frame, mono_ns=time.monotonic_ns())
 
-    # Env scheduling should remain independent even when planner is in flight.
+    # Env scheduling should not fabricate inflight state when planner is in flight.
     policy._planner_inflight = object()
     policy._maybe_schedule_env(st=None, now=10.0)
-    assert policy._env_summarizer.in_flight is True
+    assert policy._env_summarizer.in_flight is False
+    assert policy._env_summarizer.take_latest_pending() is not None
 
     # Planner remains schedulable even if env is in flight (planner is prioritized).
     policy._planner_inflight = None

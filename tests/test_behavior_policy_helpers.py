@@ -137,7 +137,7 @@ def test_policy_zone_hint_and_recent_switch_count(tmp_path):
     policy = _make_policy(tmp_path)
     snapshot = {"latest_env_snapshot": {"features": {"zone_hint": "center"}}}
     assert policy._zone_hint(st=None, snapshot=snapshot) == "center"  # noqa: SLF001
-    assert policy._zone_hint(st=None, snapshot={}) == "unknown"  # noqa: SLF001
+    assert policy._zone_hint(st=None, snapshot={}) == "center"  # noqa: SLF001
 
     class _State:
         debug = {"zone_hint": "left"}
@@ -165,7 +165,7 @@ def test_policy_build_payload_branches(tmp_path):
     user_text = planner_payload["body"]["messages"][1]["content"][-1]["text"]
     context_json = json.loads(user_text.split("context_json=", 1)[1])
     assert context_json["latest_env"]["scene"] == ""
-    assert context_json["event_tail"] == []
+    assert "event_tail" not in context_json
 
 
 def test_policy_drain_env_and_planner_empty_and_ok_paths(tmp_path):
@@ -185,7 +185,7 @@ def test_policy_drain_env_and_planner_empty_and_ok_paths(tmp_path):
             )
         ),
     )
-    policy._drain_env_inflight(now=5.0)  # noqa: SLF001
+    policy._drain_env_inflight(st=None, now=5.0)  # noqa: SLF001
     assert policy._health.env.state in {"DEGRADED", "OPEN_BREAKER", "HEALTHY"}  # noqa: SLF001
 
     policy._planner_inflight = _InFlightCall(
@@ -202,7 +202,7 @@ def test_policy_drain_env_and_planner_empty_and_ok_paths(tmp_path):
             )
         ),
     )
-    policy._drain_planner_inflight(now=6.0)  # noqa: SLF001
+    policy._drain_planner_inflight(st=None, now=6.0)  # noqa: SLF001
     assert policy._latest_remote_proposals is not None  # noqa: SLF001
     assert len(policy._latest_remote_proposals.proposals) == 1  # noqa: SLF001
 
@@ -224,7 +224,7 @@ def test_policy_env_delta_sets_pending_planner_event(tmp_path):
         ),
     )
 
-    policy._drain_env_inflight(now=2.0)  # noqa: SLF001
+    policy._drain_env_inflight(st=None, now=2.0)  # noqa: SLF001
 
     assert policy._pending_planner_event is True  # noqa: SLF001
     latest = policy.world_state.snapshot()["latest_env_snapshot"]
@@ -253,7 +253,7 @@ def test_policy_watchdog_times_out_stuck_env_call(tmp_path):
         future=pending,
     )
 
-    policy._drain_env_inflight(now=4.0)  # noqa: SLF001
+    policy._drain_env_inflight(st=None, now=4.0)  # noqa: SLF001
 
     assert policy._env_inflight is None  # noqa: SLF001
     assert pending.cancel_called is True
@@ -270,7 +270,7 @@ def test_policy_future_exception_does_not_crash_planner_drain(tmp_path):
         future=_RaisingFuture(),
     )
 
-    policy._drain_planner_inflight(now=4.0)  # noqa: SLF001
+    policy._drain_planner_inflight(st=None, now=4.0)  # noqa: SLF001
 
     assert policy._planner_inflight is None  # noqa: SLF001
     assert policy._next_planner_allowed_s >= 4.0 + policy._cfg.error_backoff_s  # noqa: SLF001
@@ -306,9 +306,14 @@ def test_policy_repeated_no_signal_remote_triggers_bounded_idle_commit(tmp_path)
                 "notes_short": "no signal",
                 "proposals": [
                     {
-                        "intent": "idle_presence",
-                        "primitive": "hold",
-                        "command": {},
+                        "intent": "track_user",
+                        "primitive": "glance",
+                        "command": {
+                            "direction": "left",
+                            "amp_rad": 0.2,
+                            "duration_s": 0.4,
+                            "rate_rad_s": 1.0,
+                        },
                         "style": "calm",
                         "score": 0.08,
                         "confidence": 0.2,
@@ -316,7 +321,7 @@ def test_policy_repeated_no_signal_remote_triggers_bounded_idle_commit(tmp_path)
                         "risk": "low",
                         "allow_interrupt": True,
                         "evidence": ["frame:latest"],
-                        "rationale_short": "hold",
+                        "rationale_short": "weak signal glance",
                     }
                 ],
             }

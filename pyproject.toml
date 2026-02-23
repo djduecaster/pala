@@ -7,6 +7,7 @@ requires-python = ">=3.10.12,<3.13"
 dependencies = [
     "jsonschema>=4.23.0",
     "numpy>=1.26.4,<2",
+    "openai>=1.50.0",
     "pillow>=12.1.0",
     "pyyaml>=6.0.1",
     "smbus2>=0.6.0",

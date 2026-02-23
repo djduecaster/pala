@@ -1,0 +1,79 @@
+from __future__ import annotations
+
+from pala.behavior.context_builder import ContextBuilder
+from pala.types import ActionPlan, HoldCommand, PerceptionState, PrimitiveKind
+
+
+def _hold_action() -> ActionPlan:
+    return ActionPlan(
+        primitive=PrimitiveKind.HOLD,
+        command=HoldCommand(),
+        confidence=0.4,
+        style="calm",
+    )
+
+
+def test_context_builder_prefers_perception_zone_hint_over_env_feature():
+    builder = ContextBuilder()
+    st = PerceptionState(
+        timestamp_monotonic_s=1.0,
+        primary_person_conf=0.82,
+        debug={"zone_hint": " LEFT "},
+    )
+    world = {
+        "latest_env_snapshot": {
+            "scene": "desk",
+            "summary": "steady",
+            "delta_score": 0.3,
+            "features": {"zone_hint": "right", "person_present": False},
+        }
+    }
+
+    ctx = builder.build_planner_context(
+        st=st,
+        world_snapshot=world,
+        current_action=_hold_action(),
+        planner_health={"state": "HEALTHY"},
+        now_mono_s=10.0,
+        last_commit_mono_s=8.0,
+        no_commit_s=2.0,
+    )
+    assert ctx["signals"]["person_conf"] == 0.82
+    assert ctx["signals"]["zone_hint"] == "left"
+    assert "perception:zone:left" in ctx["evidence_index"]["available"]
+    assert "perception:zone:right" not in ctx["evidence_index"]["available"]
+
+
+def test_context_builder_handles_invalid_timestamps_and_format_helpers():
+    builder = ContextBuilder()
+    world = {
+        "latest_env_snapshot": {"summary": "stable"},
+        "event_tail": [
+            {"timestamp_wall_s": 1_700_000_000.0, "summary": "good"},
+            {"timestamp_wall_s": "not-a-float", "summary": "bad"},
+        ],
+    }
+
+    env_ctx = builder.build_env_context(
+        world_snapshot=world,
+        current_action=_hold_action(),
+        frame_timeline=[],
+    )
+    assert env_ctx["recent_env_events"][0]["t"] is not None
+    assert env_ctx["recent_env_events"][1]["t"] is None
+    assert builder._format_ts_seconds("still-bad") is None  # noqa: SLF001
+
+
+def test_context_builder_command_digest_fallback_and_non_mapping(monkeypatch):
+    class _BadCommand:
+        def __str__(self) -> str:
+            return "bad-command"
+
+    monkeypatch.setattr("pala.behavior.context_builder.to_json_dict", lambda _command: [1, 2, 3])
+    assert ContextBuilder._command_digest(object()) == [1, 2, 3]  # noqa: SLF001
+
+    def _raise(_command):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("pala.behavior.context_builder.to_json_dict", _raise)
+    assert ContextBuilder._command_digest(_BadCommand()) == "bad-command"  # noqa: SLF001

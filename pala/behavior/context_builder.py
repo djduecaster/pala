@@ -49,39 +49,32 @@ class ContextBuilder:
         latest_env = world_snapshot.get("latest_env_snapshot") or {}
         features = latest_env.get("features") or {}
 
-        event_tail = world_snapshot.get("event_tail", [])[-3:]
-        decision_tail = world_snapshot.get("decision_tail", [])[-3:]
-
-        compact_events = [
-            {
-                "t": self._format_ts_seconds(item.get("timestamp_wall_s")),
-                "summary": self._short_text(item.get("summary"), max_chars=260),
-            }
-            for item in event_tail
-        ]
-        compact_decisions = [
-            {
-                "t": self._format_ts_seconds(item.get("timestamp_wall_s")),
-                "primitive": item.get("primitive"),
-                "style": item.get("style"),
-                "confidence": item.get("confidence"),
-                "rationale": self._short_text(item.get("rationale_short"), max_chars=160),
-            }
-            for item in decision_tail
-        ]
-
-        zone_hint = "unknown"
+        zone_hint: Optional[str] = None
         person_conf = None
         if st is not None:
             person_conf = st.primary_person_conf
             if st.debug:
-                zone_hint = str(st.debug.get("zone_hint") or "unknown")
-        if zone_hint not in {"left", "center", "right"}:
-            zone_hint = str(features.get("zone_hint") or "unknown")
-        if zone_hint not in {"left", "center", "right"}:
-            zone_hint = "unknown"
+                zone_candidate = str(st.debug.get("zone_hint") or "").strip().lower()
+                if zone_candidate in {"left", "center", "right"}:
+                    zone_hint = zone_candidate
+        if zone_hint is None:
+            zone_candidate = str(features.get("zone_hint") or "").strip().lower()
+            if zone_candidate in {"left", "center", "right"}:
+                zone_hint = zone_candidate
 
-        evidence_ids = ["frame:latest", "env:latest", f"perception:zone:{zone_hint}"]
+        evidence_ids = ["frame:latest", "env:latest"]
+        if zone_hint is not None:
+            evidence_ids.append(f"perception:zone:{zone_hint}")
+
+        signals: Dict[str, Any] = {
+            "person_conf": person_conf,
+            "env_delta": self._as_float(latest_env.get("delta_score"), default=0.0),
+            "activity_level": self._as_float(features.get("activity_level"), default=0.0),
+            "novelty": self._as_float(features.get("novelty"), default=0.0),
+            "person_present": bool(features.get("person_present", False)),
+        }
+        if zone_hint is not None:
+            signals["zone_hint"] = zone_hint
 
         return {
             "current_action": {
@@ -91,23 +84,11 @@ class ContextBuilder:
                 "confidence": float(current_action.confidence),
                 "age_s": max(0.0, float(now_mono_s - last_commit_mono_s)),
             },
-            "signals": {
-                "person_conf": person_conf,
-                "zone_hint": zone_hint,
-                "env_delta": self._as_float(latest_env.get("delta_score"), default=0.0),
-                "activity_level": self._as_float(features.get("activity_level"), default=0.0),
-                "novelty": self._as_float(features.get("novelty"), default=0.0),
-                "person_present": bool(features.get("person_present", False)),
-            },
+            "signals": signals,
             "latest_env": {
                 "scene": self._short_text(latest_env.get("scene"), max_chars=380),
-                "events": self._short_text(latest_env.get("events"), max_chars=320),
-                "hypotheses": self._short_text(latest_env.get("hypotheses"), max_chars=320),
                 "summary": self._short_text(latest_env.get("summary"), max_chars=160),
             },
-            "event_tail": compact_events,
-            "decision_tail": compact_decisions,
-            "session_digest": self._short_text(world_snapshot.get("session_digest"), max_chars=280),
             "control_state": world_snapshot.get("control_state_latest"),
             "planner_health": dict(planner_health),
             "anti_collapse": {

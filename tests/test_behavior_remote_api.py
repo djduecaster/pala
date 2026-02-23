@@ -1,25 +1,9 @@
 from __future__ import annotations
 
-import io
-import json
-from urllib import error as urllib_error
+from dataclasses import dataclass
 
+from pala.behavior import remote_api
 from pala.behavior.remote_api import extract_message_content, normalize_chat_url, post_chat_json
-
-
-class _Resp:
-    def __init__(self, *, status: int, body: str):
-        self.status = status
-        self._body = body.encode("utf-8")
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        return False
-
-    def read(self) -> bytes:
-        return self._body
 
 
 def test_normalize_chat_url_variants():
@@ -30,6 +14,22 @@ def test_normalize_chat_url_variants():
     assert normalize_chat_url("http://x/v1") == "http://x/v1/chat/completions"
     assert normalize_chat_url("http://x/v1/") == "http://x/v1/chat/completions"
     assert normalize_chat_url("http://x/v1/chat/completions") == "http://x/v1/chat/completions"
+    assert (
+        normalize_chat_url("https://generativelanguage.googleapis.com")
+        == "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+    )
+    assert (
+        normalize_chat_url("https://generativelanguage.googleapis.com/v1beta/openai/")
+        == "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+    )
+    assert (
+        normalize_chat_url("https://proxy.example/custom/chat/completions", provider="gemini")
+        == "https://proxy.example/custom/chat/completions"
+    )
+    assert (
+        normalize_chat_url("https://proxy.example/service", provider="gemini")
+        == "https://proxy.example/service/v1beta/openai/chat/completions"
+    )
 
 
 def test_extract_message_content_handles_string_list_dict_and_fallback_reasoning():
@@ -72,17 +72,62 @@ def test_extract_message_content_missing_shapes_fail_closed():
     assert extract_message_content({"choices": [{"message": "bad"}]}) == (None, None)
 
 
+@dataclass
+class _Parsed:
+    payload: dict
+
+    def model_dump(self):
+        return dict(self.payload)
+
+
+@dataclass
+class _RawResponse:
+    status_code: int
+    parsed: object
+
+    def parse(self):
+        return self.parsed
+
+
+class _WithRawResponse:
+    def __init__(self, factory):
+        self._factory = factory
+
+    def create(self, **kwargs):
+        return self._factory(**kwargs)
+
+
+class _Completions:
+    def __init__(self, factory):
+        self.with_raw_response = _WithRawResponse(factory)
+
+
+class _Chat:
+    def __init__(self, factory):
+        self.completions = _Completions(factory)
+
+
+class _Client:
+    def __init__(self, factory):
+        self.chat = _Chat(factory)
+
+
 def test_post_chat_json_success(monkeypatch):
     captured = {}
+    client_base = {}
 
-    def _urlopen(req, timeout):
-        captured["url"] = req.full_url
-        captured["timeout"] = timeout
-        captured["body"] = req.data.decode("utf-8")
-        captured["headers"] = {k.lower(): v for k, v in req.header_items()}
-        return _Resp(status=200, body=json.dumps({"choices": [{"message": {"content": "ok"}}]}))
+    def _factory(**kwargs):
+        captured.update(kwargs)
+        return _RawResponse(
+            status_code=200,
+            parsed=_Parsed({"choices": [{"message": {"content": "ok"}}]}),
+        )
 
-    monkeypatch.setattr("pala.behavior.remote_api.urllib_request.urlopen", _urlopen)
+    monkeypatch.setattr(
+        remote_api,
+        "_get_openai_client",
+        lambda *, base_url, api_key: client_base.update({"base_url": base_url, "api_key": api_key}) or _Client(_factory),
+    )
 
     result = post_chat_json(
         url="http://unit.test/v1/chat/completions",
@@ -92,19 +137,39 @@ def test_post_chat_json_success(monkeypatch):
     )
     assert result.ok is True
     assert result.status_code == 200
-    assert result.response_json is not None
+    assert result.response_json == {"choices": [{"message": {"content": "ok"}}]}
     assert result.error is None
-    assert captured["url"] == "http://unit.test/v1/chat/completions"
     assert captured["timeout"] == 1.25
-    assert captured["headers"]["authorization"] == "Bearer abc"
-    assert captured["headers"]["content-type"] == "application/json"
-    assert json.loads(captured["body"])["model"] == "x"
+    assert captured["model"] == "x"
+    assert client_base["base_url"] == "http://unit.test/v1"
 
 
-def test_post_chat_json_invalid_json_response(monkeypatch):
+def test_post_chat_json_provider_routes_gemini_base(monkeypatch):
+    client_base = {}
+
     monkeypatch.setattr(
-        "pala.behavior.remote_api.urllib_request.urlopen",
-        lambda req, timeout: _Resp(status=200, body="not-json"),  # noqa: ARG005
+        remote_api,
+        "_get_openai_client",
+        lambda *, base_url, api_key: client_base.update({"base_url": base_url}) or _Client(
+            lambda **kwargs: _RawResponse(status_code=200, parsed={"choices": [{"message": {"content": "ok"}}]})
+        ),
+    )
+    result = post_chat_json(
+        url="https://generativelanguage.googleapis.com",
+        payload={"messages": []},
+        timeout_s=1.0,
+        api_key="k",
+        provider="gemini",
+    )
+    assert result.ok is True
+    assert client_base["base_url"] == "https://generativelanguage.googleapis.com/v1beta/openai"
+
+
+def test_post_chat_json_rejects_non_object_payload(monkeypatch):
+    monkeypatch.setattr(
+        remote_api,
+        "_get_openai_client",
+        lambda *, base_url, api_key: _Client(lambda **kwargs: _RawResponse(status_code=200, parsed=[])),
     )
     result = post_chat_json(
         url="http://unit.test",
@@ -113,35 +178,25 @@ def test_post_chat_json_invalid_json_response(monkeypatch):
         api_key=None,
     )
     assert result.ok is False
-    assert result.error == "invalid_json_response"
-
-
-def test_post_chat_json_rejects_non_object_json(monkeypatch):
-    monkeypatch.setattr(
-        "pala.behavior.remote_api.urllib_request.urlopen",
-        lambda req, timeout: _Resp(status=200, body="[]"),  # noqa: ARG005
-    )
-    result = post_chat_json(
-        url="http://unit.test",
-        payload={"messages": []},
-        timeout_s=1.0,
-        api_key=None,
-    )
-    assert result.ok is False
+    assert result.status_code == 200
     assert result.error == "invalid_response_type"
 
 
-def test_post_chat_json_http_error(monkeypatch):
-    def _raise_http(req, timeout):  # noqa: ARG001
-        raise urllib_error.HTTPError(
-            url="http://unit.test",
-            code=502,
-            msg="bad gateway",
-            hdrs=None,
-            fp=io.BytesIO(b"proxy down"),
-        )
+def test_post_chat_json_status_error(monkeypatch):
+    class _StatusErr(Exception):
+        def __init__(self):
+            self.status_code = 502
+            self.response = type("_Resp", (), {"text": "proxy down"})()
+            super().__init__("bad gateway")
 
-    monkeypatch.setattr("pala.behavior.remote_api.urllib_request.urlopen", _raise_http)
+    def _factory(**kwargs):  # noqa: ARG001
+        raise _StatusErr()
+
+    monkeypatch.setattr(
+        remote_api,
+        "_get_openai_client",
+        lambda *, base_url, api_key: _Client(_factory),
+    )
     result = post_chat_json(
         url="http://unit.test",
         payload={"messages": []},
@@ -150,32 +205,18 @@ def test_post_chat_json_http_error(monkeypatch):
     )
     assert result.ok is False
     assert result.status_code == 502
-    assert result.error is not None
-    assert result.error.startswith("http_502:proxy down")
+    assert result.error == "http_502:proxy down"
 
 
-def test_post_chat_json_url_error(monkeypatch):
-    def _raise_url(req, timeout):  # noqa: ARG001
-        raise urllib_error.URLError("unreachable")
-
-    monkeypatch.setattr("pala.behavior.remote_api.urllib_request.urlopen", _raise_url)
-    result = post_chat_json(
-        url="http://unit.test",
-        payload={"messages": []},
-        timeout_s=1.0,
-        api_key=None,
-    )
-    assert result.ok is False
-    assert result.status_code == 0
-    assert result.error is not None
-    assert result.error.startswith("transport:unreachable")
-
-
-def test_post_chat_json_generic_exception(monkeypatch):
-    def _raise(req, timeout):  # noqa: ARG001
+def test_post_chat_json_transport_error(monkeypatch):
+    def _factory(**kwargs):  # noqa: ARG001
         raise RuntimeError("boom")
 
-    monkeypatch.setattr("pala.behavior.remote_api.urllib_request.urlopen", _raise)
+    monkeypatch.setattr(
+        remote_api,
+        "_get_openai_client",
+        lambda *, base_url, api_key: _Client(_factory),
+    )
     result = post_chat_json(
         url="http://unit.test",
         payload={"messages": []},
