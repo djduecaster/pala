@@ -24,6 +24,33 @@ joint_limits_rad:
   - [-1.57, 1.57]
   - [-1.57, 1.57]
 
+# Legacy kinematic geometry reference (from pala_old).
+# Not wired into runtime control yet; stored here for upcoming FK/IK work.
+dh_params:
+  yaw_a: 0.0
+  yaw_alpha: -1.57079633
+  yaw_d: 0.0635
+  # yaw theta0 defaults to 0
+  pitch1_a: 0.38735
+  pitch1_alpha: 0.0
+  pitch1_d: 0.0
+  pitch1_theta0_deg: -90
+  pitch2_a: 0.0
+  pitch2_alpha: -1.57079633
+  pitch2_d: 0.0
+  pitch2_theta0_deg: 0
+  roll_a: 0.0
+  roll_alpha: 1.57079633
+  roll_d: 0.32385
+  # roll theta0 defaults to 0
+  pitch3_a: 0.0
+  pitch3_alpha: 0.0
+  pitch3_d: 0.0
+
+tool:
+  offset_5: [-0.0686, 0.0762, 0.0]
+  rot_5_deg_zyx: [0.0, 180.0, 0.0]
+
 # Placeholder calibration to be filled when porting PCA9685 driver
 servo_calibration:
   bus_number: 7
@@ -83,14 +110,17 @@ cosmos:
   summarizer_hz: 1.0
   planner_event_delta_threshold: 0.65
   planner_event_cooldown_s: 0.7
-  planner_max_proposals: 2
+  planner_max_proposals: 3
   planner_use_env_context: true
   arbiter_min_dwell_s: 1.2
   arbiter_base_margin: 0.10
-  arbiter_takeover_no_signal_streak: 2
-  arbiter_takeover_no_commit_s: 2.8
   idle_after_s: 6.0
   idle_glance_after_s: 10.0
+  mode_min_dwell_s: 1.0
+  mode_engage_person_conf: 0.45
+  mode_disengage_person_conf: 0.20
+  stale_penalty_per_s: 0.05
+  stale_expire_s: 14.0
   planner_max_frames: 1
   planner_include_latest_frame: true
   # Scene summarizer cadence.

@@ -4,17 +4,17 @@ from dataclasses import dataclass, is_dataclass
 from typing import Any, List, Mapping, Optional, Tuple
 
 from ..types import ActionPlan
+from .decision_types import BehaviorMode
 from .types import GovernedCandidate
 
 
 @dataclass
 class ArbiterConfig:
-    min_dwell_s: float = 1.2
-    base_margin: float = 0.10
-    idle_after_s: float = 6.0
-    terminal_retrigger_s: float = 2.0
-    takeover_no_signal_streak: int = 2
-    takeover_no_commit_s: float = 2.0
+    min_dwell_s: float = 1.0
+    base_margin: float = 0.08
+    idle_after_s: float = 5.0
+    terminal_retrigger_s: float = 1.4
+    max_same_primitive_streak: int = 3
 
 
 @dataclass
@@ -23,10 +23,13 @@ class ArbiterResult:
     reason: str
     chosen: Optional[GovernedCandidate]
     best_utility: float
+    threshold: float
+    effective_current: float
+    margin: float
 
 
 class Arbiter:
-    """Deterministic commit logic with hysteresis and anti-collapse bias."""
+    """Deterministic commit logic with hysteresis, diversity, and idle de-stick."""
 
     def __init__(self, config: Optional[ArbiterConfig] = None):
         self._cfg = config or ArbiterConfig()
@@ -39,11 +42,10 @@ class Arbiter:
         current_utility: float,
         action_age_s: float,
         no_commit_s: float,
-        last_intent: str,
         recent_switches: int,
         planner_open_breaker: bool,
-        planner_no_signal_streak: int,
-        perception_degraded: bool,
+        same_primitive_streak: int,
+        mode: BehaviorMode,
     ) -> ArbiterResult:
         valids = [item for item in candidates if item.valid]
         if not valids:
@@ -52,54 +54,40 @@ class Arbiter:
                 reason="no_valid_candidates",
                 chosen=None,
                 best_utility=0.0,
+                threshold=0.0,
+                effective_current=0.0,
+                margin=0.0,
             )
 
         current_sig = _action_signature(current_action)
-        for item in valids:
-            item.utility = self._adjusted_utility(
-                item=item,
-                current_signature=current_sig,
-                no_commit_s=no_commit_s,
-                last_intent=last_intent,
-                planner_open_breaker=planner_open_breaker,
-                perception_degraded=perception_degraded,
-            )
-
         best = max(valids, key=lambda item: item.utility)
         best_sig = _proposal_signature(best)
 
-        takeover = self._select_anti_collapse_takeover(
-            valids=valids,
-            current_signature=current_sig,
-            current_action=current_action,
-            action_age_s=action_age_s,
-            no_commit_s=no_commit_s,
-            planner_open_breaker=planner_open_breaker,
-            planner_no_signal_streak=planner_no_signal_streak,
-        )
-        if takeover is not None:
-            return ArbiterResult(
-                decision="commit",
-                reason="anti_collapse_takeover",
-                chosen=takeover,
-                best_utility=takeover.utility,
-            )
+        if same_primitive_streak >= self._cfg.max_same_primitive_streak:
+            alternate = _best_non_matching(valids, current_action.primitive.value)
+            if alternate is not None and alternate.utility >= max(0.05, best.utility - 0.12):
+                best = alternate
+                best_sig = _proposal_signature(best)
 
         if best_sig == current_sig:
-            # Terminal gestures should be re-triggerable after a short cooldown,
-            # otherwise behavior can appear frozen after a one-shot action completes.
-            if not _is_terminal_primitive(current_action.primitive.value) or action_age_s < self._cfg.terminal_retrigger_s:
+            if _is_terminal_primitive(current_action.primitive.value) and action_age_s >= self._cfg.terminal_retrigger_s:
                 return ArbiterResult(
-                    decision="keep_current",
-                    reason="same_signature",
+                    decision="commit",
+                    reason="same_signature_retrigger",
                     chosen=best,
                     best_utility=best.utility,
+                    threshold=0.0,
+                    effective_current=0.0,
+                    margin=0.0,
                 )
             return ArbiterResult(
-                decision="commit",
-                reason="same_signature_retrigger",
+                decision="keep_current",
+                reason="same_signature",
                 chosen=best,
                 best_utility=best.utility,
+                threshold=0.0,
+                effective_current=0.0,
+                margin=0.0,
             )
 
         min_dwell_s = self._cfg.min_dwell_s
@@ -111,25 +99,33 @@ class Arbiter:
                 reason="min_dwell_not_met",
                 chosen=best,
                 best_utility=best.utility,
+                threshold=0.0,
+                effective_current=0.0,
+                margin=0.0,
             )
-
-        margin = self._cfg.base_margin + (0.05 * max(0, recent_switches))
-        if no_commit_s >= self._cfg.idle_after_s:
-            margin = max(0.02, margin - 0.04)
 
         effective_current = self._decayed_current_utility(
             current_action=current_action,
             current_utility=current_utility,
             action_age_s=action_age_s,
             no_commit_s=no_commit_s,
+            mode=mode,
         )
-        threshold = max(0.0, float(effective_current) + margin)
+        margin = self._margin(recent_switches=recent_switches, no_commit_s=no_commit_s, mode=mode)
+        threshold = max(0.0, effective_current + margin)
+
+        if planner_open_breaker and best.candidate.source == "remote":
+            threshold += 0.04
+
         if best.utility >= threshold:
             return ArbiterResult(
                 decision="commit",
                 reason="utility_beats_threshold",
                 chosen=best,
                 best_utility=best.utility,
+                threshold=threshold,
+                effective_current=effective_current,
+                margin=margin,
             )
 
         return ArbiterResult(
@@ -137,44 +133,20 @@ class Arbiter:
             reason="utility_below_threshold",
             chosen=best,
             best_utility=best.utility,
+            threshold=threshold,
+            effective_current=effective_current,
+            margin=margin,
         )
 
-    def _adjusted_utility(
-        self,
-        *,
-        item: GovernedCandidate,
-        current_signature: Tuple[str, str, str],
-        no_commit_s: float,
-        last_intent: str,
-        planner_open_breaker: bool,
-        perception_degraded: bool,
-    ) -> float:
-        proposal = item.candidate.proposal
-        utility = float(item.utility)
-
-        if proposal.intent == last_intent:
-            utility -= 0.08
-        else:
-            utility += 0.04
-
-        if _proposal_signature(item) == current_signature:
-            utility -= 0.14
-
-        if planner_open_breaker and item.candidate.source == "remote":
-            utility -= 0.06
-
-        if perception_degraded and item.candidate.source == "remote":
-            utility -= 0.04
-
+    def _margin(self, *, recent_switches: int, no_commit_s: float, mode: BehaviorMode) -> float:
+        margin = self._cfg.base_margin + (0.02 * max(0, recent_switches))
         if no_commit_s >= self._cfg.idle_after_s:
-            if proposal.primitive == "hold":
-                utility -= 0.12
-            elif item.candidate.source == "idle_engine":
-                utility += 0.10
-            else:
-                utility += 0.05
-
-        return max(0.0, min(1.5, utility))
+            margin = max(0.02, margin - 0.04)
+        if mode == BehaviorMode.ACKNOWLEDGE:
+            margin = max(0.02, margin - 0.03)
+        if mode == BehaviorMode.RECOVER_RESET:
+            margin += 0.03
+        return margin
 
     def _decayed_current_utility(
         self,
@@ -183,63 +155,27 @@ class Arbiter:
         current_utility: float,
         action_age_s: float,
         no_commit_s: float,
+        mode: BehaviorMode,
     ) -> float:
         utility = max(0.0, float(current_utility))
         primitive = current_action.primitive.value
 
-        # Idle primitives should not remain sticky for long windows.
         if primitive in {"hold", "breath"}:
+            if action_age_s >= 4.0:
+                utility *= 0.70
             if action_age_s >= 8.0:
-                utility *= 0.55
-            if action_age_s >= 15.0:
-                utility *= 0.35
+                utility *= 0.45
+
+        if mode in {BehaviorMode.SCAN_EXPLORE, BehaviorMode.ENGAGE_TRACK} and primitive in {"hold", "breath"}:
+            utility *= 0.75
 
         if no_commit_s >= self._cfg.idle_after_s:
-            utility *= 0.75
+            utility *= 0.80
+
         if _is_terminal_primitive(primitive) and action_age_s >= self._cfg.terminal_retrigger_s:
-            utility *= 0.45
+            utility *= 0.55
+
         return max(0.0, min(1.5, utility))
-
-    def _select_anti_collapse_takeover(
-        self,
-        *,
-        valids: List[GovernedCandidate],
-        current_signature: Tuple[str, str, str],
-        current_action: ActionPlan,
-        action_age_s: float,
-        no_commit_s: float,
-        planner_open_breaker: bool,
-        planner_no_signal_streak: int,
-    ) -> Optional[GovernedCandidate]:
-        required_no_commit_s = max(0.2, self._cfg.takeover_no_commit_s)
-        takeover_due = False
-        if planner_open_breaker and no_commit_s >= required_no_commit_s:
-            takeover_due = True
-        elif (
-            not planner_open_breaker
-            and planner_no_signal_streak >= max(1, self._cfg.takeover_no_signal_streak)
-            and no_commit_s >= (required_no_commit_s + 1.0)
-        ):
-            takeover_due = True
-        if not takeover_due:
-            return None
-
-        # Prefer non-hold idle engine proposals to break no-op loops quickly.
-        ordered = sorted(
-            valids,
-            key=lambda item: (
-                item.candidate.source != "idle_engine",
-                item.candidate.proposal.primitive == "hold",
-                -item.utility,
-            ),
-        )
-        for item in ordered:
-            sig = _proposal_signature(item)
-            if sig != current_signature:
-                return item
-            if _is_terminal_primitive(current_action.primitive.value) and action_age_s >= self._cfg.terminal_retrigger_s:
-                return item
-        return None
 
 
 def _action_signature(action: ActionPlan) -> Tuple[str, str, str]:
@@ -266,3 +202,10 @@ def _mapping_signature(mapping: Mapping[str, Any]) -> str:
 
 def _is_terminal_primitive(primitive: str) -> bool:
     return primitive in {"glance", "nod", "orient_to_zone", "home"}
+
+
+def _best_non_matching(valids: List[GovernedCandidate], primitive: str) -> Optional[GovernedCandidate]:
+    non_matching = [item for item in valids if item.candidate.proposal.primitive != primitive]
+    if not non_matching:
+        return None
+    return max(non_matching, key=lambda item: item.utility)

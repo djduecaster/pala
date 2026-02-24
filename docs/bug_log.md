@@ -10,7 +10,7 @@ Conventions:
 | ID | Severity | Area | Summary | Evidence |
 |---|---|---|---|---|
 | BUG-2026-02-22-001 | P1 | control | Executor preempts active action without honoring `cancel_current`, causing unintended primitive interruption. | `pala/control/executor.py:149` |
-| BUG-2026-02-22-002 | P1 | behavior/remote parsing | `_coerce_text()` inserts newlines when joining content chunks; this can corrupt JSON and cause parser failures. | `pala/behavior/remote_api.py:125` |
+| BUG-2026-02-22-002 | P1 | behavior/remote parsing | `_coerce_text()` inserts newlines when joining content chunks; this can corrupt JSON and cause parser failures. | `pala/behavior/model_clients/response_utils.py:75` |
 | BUG-2026-02-22-003 | P2 | hardware/camera | GStreamer camera does not validate `appsink` before use; missing sink can crash on `.emit()`. | `pala/hardware/camera_gst.py:44`, `pala/hardware/camera_gst.py:47` |
 | BUG-2026-02-22-004 | P2 | perception | Real-camera transient detector misses provide no fallback person/zone signal, causing behavior instability. | `pala/perception/node.py:76` |
 | BUG-2026-02-22-005 | P2 | telemetry/capture | Capture `close()` sets `_closed` before all artifact writes; failures can leave partial output and block retry close. | `tools/telemetry/capture.py:224`, `tools/telemetry/capture.py:249` |

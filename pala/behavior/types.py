@@ -47,6 +47,7 @@ class ProposerResponse:
 class ProposalCandidate:
     proposal: IntentProposal
     source: ProposalSource
+    age_s: float = 0.0
 
 
 @dataclass

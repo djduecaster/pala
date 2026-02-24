@@ -9,7 +9,11 @@ import sys
 from typing import List, Sequence
 
 from .integrity import verify_integrity_report
+from .run_report import build_run_report
 from .schema_v3 import INTEGRITY_REPORT_PATH, QUALITY_REPORT_PATH, REASONING_TRACE_INDEX_PATH, SESSION_DB_PATH, WEAK_LABELS_PATH
+
+VIEWER_SUMMARY_PATH = "viewer_summary.json"
+VIEWER_RUNS_PATH = "viewer_runs.jsonl"
 
 
 @dataclass
@@ -156,6 +160,90 @@ def _check_session_dir(session_dir: str) -> List[Check]:
             missing_v3.append(rel)
     if schema_version >= 3 and missing_v3:
         out.append(Check(name="session:v3_artifacts", status="fail", detail=f"missing={','.join(missing_v3)}"))
+
+    viewer_summary_obj = None
+    summary_path = os.path.join(root, VIEWER_SUMMARY_PATH)
+    if os.path.exists(summary_path):
+        try:
+            with open(summary_path, "r", encoding="utf-8") as fh:
+                decoded = json.load(fh)
+            if not isinstance(decoded, dict):
+                raise ValueError("not an object")
+            viewer_summary_obj = decoded
+            out.append(Check(name="session:viewer_summary.parse", status="pass", detail="ok"))
+        except Exception as exc:
+            out.append(Check(name="session:viewer_summary.parse", status="fail", detail=repr(exc)))
+
+    viewer_runs_last_obj = None
+    runs_path = os.path.join(root, VIEWER_RUNS_PATH)
+    if os.path.exists(runs_path):
+        line_count = 0
+        parse_errors = 0
+        try:
+            with open(runs_path, "r", encoding="utf-8") as fh:
+                for raw in fh:
+                    text = str(raw or "").strip()
+                    if not text:
+                        continue
+                    line_count += 1
+                    try:
+                        obj = json.loads(text)
+                    except Exception:
+                        parse_errors += 1
+                        continue
+                    if isinstance(obj, dict):
+                        viewer_runs_last_obj = obj
+                    else:
+                        parse_errors += 1
+            if parse_errors > 0:
+                out.append(
+                    Check(
+                        name="session:viewer_runs.parse",
+                        status="fail",
+                        detail=f"errors={parse_errors} lines={line_count}",
+                    )
+                )
+            elif line_count == 0:
+                out.append(Check(name="session:viewer_runs.parse", status="warn", detail="empty file"))
+            else:
+                out.append(Check(name="session:viewer_runs.parse", status="pass", detail=f"lines={line_count}"))
+        except Exception as exc:
+            out.append(Check(name="session:viewer_runs.parse", status="fail", detail=repr(exc)))
+
+    if isinstance(viewer_summary_obj, dict) and isinstance(viewer_runs_last_obj, dict):
+        summary_run_id = viewer_summary_obj.get("run_id")
+        runs_run_id = viewer_runs_last_obj.get("run_id")
+        if summary_run_id and runs_run_id and summary_run_id != runs_run_id:
+            out.append(
+                Check(
+                    name="session:viewer_runs.latest_match",
+                    status="warn",
+                    detail=f"summary={summary_run_id} runs={runs_run_id}",
+                )
+            )
+        else:
+            out.append(Check(name="session:viewer_runs.latest_match", status="pass", detail="ok"))
+    if os.path.exists(summary_path) or os.path.exists(runs_path):
+        try:
+            run_health = build_run_report(session_dirs=[root], limit=25)
+            runs_total = int(run_health.get("runs_total", 0) or 0)
+            alerts = run_health.get("alerts") if isinstance(run_health.get("alerts"), list) else []
+            health = str(run_health.get("health") or "ok")
+            status = "warn" if alerts else "pass"
+            out.append(
+                Check(
+                    name="session:viewer_runs.health",
+                    status=status,
+                    detail=f"health={health} runs={runs_total} alerts={len(alerts)}",
+                )
+            )
+            if alerts:
+                preview = ",".join(str(item) for item in alerts[:3])
+                if len(alerts) > 3:
+                    preview = f"{preview},..."
+                out.append(Check(name="session:viewer_runs.alerts", status="warn", detail=preview))
+        except Exception as exc:
+            out.append(Check(name="session:viewer_runs.health", status="warn", detail=repr(exc)))
 
     integrity_path = os.path.join(root, INTEGRITY_REPORT_PATH)
     if os.path.exists(integrity_path):

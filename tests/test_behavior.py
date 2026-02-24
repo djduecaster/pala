@@ -85,7 +85,7 @@ def test_parse_env_summary_response_strict_json():
 
 def test_parse_intent_proposer_response_strict_json():
     raw = (
-        '{"schema_version":"pala.intent_proposals.v1","notes_short":"User moved left",'
+        '{"schema_version":"pala.intent_proposals.v2","notes_short":"User moved left",'
         '"proposals":[{"intent":"track_user","primitive":"orient_to_zone",'
         '"command":{"zone":"left","amp_rad":0.22,"rate_rad_s":1.3},'
         '"style":"focused","score":0.74,"confidence":0.69,"urgency":0.5,'
@@ -93,18 +93,21 @@ def test_parse_intent_proposer_response_strict_json():
         '"rationale_short":"user moved left, reorient gently"},'
         '{"intent":"idle_presence","primitive":"breath","command":{"amp_rad":0.06,"period_s":6.5,"rate_rad_s":1.0},'
         '"style":"calm","score":0.4,"confidence":0.6,"urgency":0.15,'
-        '"risk":"low","allow_interrupt":true,"evidence":[],"rationale_short":"maintain subtle presence"}]}'
+        '"risk":"low","allow_interrupt":true,"evidence":[],"rationale_short":"maintain subtle presence"},'
+        '{"intent":"scan_environment","primitive":"glance","command":{"direction":"right","amp_rad":0.2,"duration_s":0.4,"rate_rad_s":1.3},'
+        '"style":"curious","score":0.38,"confidence":0.55,"urgency":0.3,'
+        '"risk":"low","allow_interrupt":true,"evidence":[],"rationale_short":"check opposite side"}]}'
     )
     parsed = parse_intent_proposer_response(raw)
     assert parsed is not None
-    assert parsed.response.schema_version == "pala.intent_proposals.v1"
-    assert len(parsed.response.proposals) == 2
+    assert parsed.response.schema_version == "pala.intent_proposals.v2"
+    assert len(parsed.response.proposals) == 3
     assert parsed.response.proposals[0].primitive == "orient_to_zone"
 
 
 def test_parse_intent_proposer_response_rejects_non_schema_json():
     raw = (
-        '{"schema_version":"pala.intent_proposals.v1","proposals":['
+        '{"schema_version":"pala.intent_proposals.v2","proposals":['
         '{"intent":"social desk companion","likelihood":0.9,"description":"Gently glance left toward the user to acknowledge presence."},'
         '{"intent":"idle presence","description":"Maintain calm breathing presence."}'
         ']}'

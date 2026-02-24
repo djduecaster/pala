@@ -21,6 +21,8 @@ from tools.telemetry.jetson_agent import _TapVideoSource, _encode_jpeg_frame, _p
 from tools.telemetry.filters import parse_field_filter, matches_field_filters
 from tools.telemetry.mac_viewer import (
     _apply_mode_defaults,
+    _append_viewer_run,
+    _build_viewer_summary,
     _build_in_memory_alignment_rows,
     _build_in_memory_query_rows,
     DashboardState,
@@ -31,6 +33,7 @@ from tools.telemetry.mac_viewer import (
     _paths_equivalent,
     _resolve_live_save_session_dir,
     _run_curation_export,
+    _write_viewer_summary,
 )
 from tools.telemetry.capture import CaptureConfig, SessionCaptureWriter
 from tools.telemetry.dataset_export import export_dataset_rows
@@ -40,6 +43,7 @@ from tools.telemetry.integrity import build_integrity_report, verify_integrity_r
 from tools.telemetry.replay import SessionReplayReader
 from tools.telemetry.reasoning import format_reasoning_snippet, normalize_reasoning_message, redact_reasoning_text
 from tools.telemetry.quality import evaluate_quality_gate, load_quality_report
+from tools.telemetry.run_report import build_run_report
 from tools.telemetry.labels import load_labels_jsonl
 from tools.telemetry.schema_v3 import REASONING_TRACE_INDEX_PATH, TELEMETRY_SCHEMA_VERSION_V3
 from tools.telemetry.storage_sqlite import build_session_db, query_session_db, resolve_session_db_path
@@ -1133,6 +1137,56 @@ def test_run_curation_export_helper_zero_rows_fails(tmp_path):
     assert "zero rows" in str(out["error"])
 
 
+def test_build_and_write_viewer_summary(tmp_path):
+    state = DashboardState(host="jetson")
+    state.started_wall_s = max(0.0, time.time() - 2.0)
+    state.event_counts["timeline_log"] = 3
+    state.dropped_events_reported = 2
+    state.local_dropped_events = 1
+    state.quality_report = {"grade": "pass", "score": 91.5}
+    state.quality_gate_passed = True
+    state.quality_gate_note = "strict pass"
+    summary = _build_viewer_summary(
+        mode="curate",
+        state=state,
+        query_text="status:parse_fail",
+        quality_gate="strict",
+        curation_result={"ok": True, "row_count": 4},
+        exit_code=0,
+    )
+    path = _write_viewer_summary(session_dir=str(tmp_path / "session"), summary=summary)
+    assert path.endswith("viewer_summary.json")
+    loaded = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+    assert loaded["mode"] == "curate"
+    assert loaded["version"] == 2
+    assert loaded["schema_version"] == 3
+    assert loaded["run_id"]
+    assert loaded["event_counts"]["timeline_log"] == 3
+    assert loaded["session_duration_s"] >= 1.0
+    assert loaded["dropped_events_agent"] == 2
+    assert loaded["dropped_events_local"] == 1
+    assert loaded["quality_grade"] == "pass"
+    assert loaded["quality_score"] == 91.5
+    assert loaded["exit_code"] == 0
+
+
+def test_append_viewer_run_history(tmp_path):
+    session_dir = tmp_path / "session"
+    first = {"run_id": "run-1", "mode": "live", "exit_code": 0}
+    second = {"run_id": "run-2", "mode": "curate", "exit_code": 2}
+    path = _append_viewer_run(session_dir=str(session_dir), summary=first)
+    assert path.endswith("viewer_runs.jsonl")
+    _append_viewer_run(session_dir=str(session_dir), summary=second)
+    rows = [
+        json.loads(line)
+        for line in pathlib.Path(path).read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(rows) == 2
+    assert rows[0]["run_id"] == "run-1"
+    assert rows[1]["run_id"] == "run-2"
+
+
 def test_resolve_live_save_session_dir_auto_on_curate():
     path, note = _resolve_live_save_session_dir(
         replay_mode=False,
@@ -1193,6 +1247,223 @@ def test_doctor_session_dir_invalid_schema_value_warns(tmp_path):
     checks = _check_session_dir(str(session_dir))
     summary = {check.name: check for check in checks}
     assert summary["session:schema_version"].status == "warn"
+
+
+def test_doctor_session_dir_invalid_viewer_runs_fails(tmp_path):
+    session_dir = tmp_path / "session"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / "events.jsonl").write_text("{}", encoding="utf-8")
+    (session_dir / "manifest.json").write_text(json.dumps({"schema_version": 2}), encoding="utf-8")
+    (session_dir / "viewer_runs.jsonl").write_text("{\"run_id\":\"ok\"}\nnot-json\n", encoding="utf-8")
+    checks = _check_session_dir(str(session_dir))
+    summary = {check.name: check for check in checks}
+    assert summary["session:viewer_runs.parse"].status == "fail"
+    assert summary["session:viewer_runs.health"].status == "pass"
+
+
+def test_doctor_session_dir_viewer_latest_mismatch_warns(tmp_path):
+    session_dir = tmp_path / "session"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / "events.jsonl").write_text("{}", encoding="utf-8")
+    (session_dir / "manifest.json").write_text(json.dumps({"schema_version": 2}), encoding="utf-8")
+    (session_dir / "viewer_summary.json").write_text(json.dumps({"run_id": "summary-run"}), encoding="utf-8")
+    (session_dir / "viewer_runs.jsonl").write_text("{\"run_id\":\"other-run\"}\n", encoding="utf-8")
+    checks = _check_session_dir(str(session_dir))
+    summary = {check.name: check for check in checks}
+    assert summary["session:viewer_summary.parse"].status == "pass"
+    assert summary["session:viewer_runs.parse"].status == "pass"
+    assert summary["session:viewer_runs.latest_match"].status == "warn"
+    assert summary["session:viewer_runs.health"].status == "pass"
+
+
+def test_build_run_report_aggregates_runs_and_summary_fallback(tmp_path):
+    session_a = tmp_path / "session_a"
+    session_b = tmp_path / "session_b"
+    session_a.mkdir(parents=True, exist_ok=True)
+    session_b.mkdir(parents=True, exist_ok=True)
+    (session_a / "viewer_runs.jsonl").write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "run_id": "a1",
+                        "mode": "live",
+                        "exit_code": 0,
+                        "session_duration_s": 5.0,
+                        "quality_score": 92.0,
+                        "quality_gate_passed": True,
+                        "dropped_events_agent": 2,
+                        "dropped_events_local": 1,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "run_id": "a2",
+                        "mode": "curate",
+                        "exit_code": 2,
+                        "session_duration_s": 9.0,
+                        "quality_score": 76.0,
+                        "quality_gate_passed": False,
+                        "dropped_events_agent": 5,
+                        "dropped_events_local": 3,
+                        "curation_result": {"ok": True},
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (session_b / "viewer_summary.json").write_text(
+        json.dumps(
+            {
+                "run_id": "b1",
+                "mode": "replay",
+                "exit_code": 0,
+                "session_duration_s": 7.0,
+                "quality_score": 88.0,
+                "quality_gate_passed": True,
+                "dropped_events_agent": 4,
+                "dropped_events_local": 2,
+                "ended_at_wall_s": 100.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = build_run_report(session_dirs=[str(session_a), str(session_b)])
+    assert report["sessions_scanned"] == 2
+    assert report["sessions_with_runs"] == 2
+    assert report["runs_total"] == 3
+    assert report["mode_counts"]["live"] == 1
+    assert report["mode_counts"]["curate"] == 1
+    assert report["mode_counts"]["replay"] == 1
+    assert report["exit_code_counts"]["0"] == 2
+    assert report["exit_code_counts"]["2"] == 1
+    assert report["exit_code_sample_count"] == 3
+    assert report["exit_nonzero_rate"] == (1.0 / 3.0)
+    assert report["quality_gate_sample_count"] == 3
+    assert report["quality_gate_pass_rate"] == (2.0 / 3.0)
+    assert report["quality_gate_fail_rate"] == (1.0 / 3.0)
+    assert report["curation_sample_count"] == 1
+    assert report["curation_success_rate"] == 1.0
+    assert report["curation_fail_rate"] == 0.0
+    assert report["duration_s"]["p50"] == 7.0
+    assert report["quality_score"]["p50"] == 88.0
+    assert report["drops"]["agent_total"] == 11.0
+    assert report["drops"]["local_total"] == 6.0
+    assert report["alerts"] == []
+    assert report["alerts_count"] == 0
+    assert report["health"] == "ok"
+    assert report["latest_run"]["run_id"] == "b1"
+    limited = build_run_report(session_dirs=[str(session_a), str(session_b)], limit=1)
+    assert limited["runs_total"] == 1
+    assert limited["latest_run"]["run_id"] == "b1"
+    assert limited["mode_counts"] == {"replay": 1}
+    assert limited["exit_nonzero_rate"] == 0.0
+    curate_only = build_run_report(session_dirs=[str(session_a), str(session_b)], mode_filter="curate")
+    assert curate_only["runs_total"] == 1
+    assert curate_only["mode_counts"] == {"curate": 1}
+    assert curate_only["quality_gate_fail_rate"] == 1.0
+
+
+def test_build_run_report_detects_latest_regressions(tmp_path):
+    session_dir = tmp_path / "session"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    rows = []
+    for idx in range(4):
+        rows.append(
+            {
+                "run_id": f"run-{idx}",
+                "mode": "live",
+                "exit_code": 0,
+                "ended_at_wall_s": float(idx + 1),
+                "quality_score": 92.0,
+                "quality_gate_passed": True,
+                "dropped_events_agent": 2,
+                "dropped_events_local": 2,
+            }
+        )
+    rows.append(
+        {
+            "run_id": "run-bad",
+            "mode": "live",
+            "exit_code": 2,
+            "ended_at_wall_s": 10.0,
+            "quality_score": 65.0,
+            "quality_gate_passed": False,
+            "dropped_events_agent": 44,
+            "dropped_events_local": 42,
+        }
+    )
+    (session_dir / "viewer_runs.jsonl").write_text(
+        "\n".join(json.dumps(row) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+    report = build_run_report(session_dirs=[str(session_dir)])
+    assert report["health"] == "warn"
+    alerts = report["alerts"]
+    assert "latest_exit_code_nonzero:2" in alerts
+    assert "latest_quality_gate_failed" in alerts
+    assert any(text.startswith("quality_score_regression:") for text in alerts)
+    assert any(text.startswith("agent_drop_spike:") for text in alerts)
+    assert any(text.startswith("local_drop_spike:") for text in alerts)
+    assert report["alerts_count"] >= 4
+    assert report["exit_nonzero_rate"] == (1.0 / 5.0)
+    assert report["quality_gate_fail_rate"] == (1.0 / 5.0)
+
+
+def test_build_run_report_tracks_sessions_without_runs(tmp_path):
+    session_ok = tmp_path / "session_ok"
+    session_empty = tmp_path / "session_empty"
+    session_ok.mkdir(parents=True, exist_ok=True)
+    session_empty.mkdir(parents=True, exist_ok=True)
+    (session_ok / "viewer_summary.json").write_text(
+        json.dumps({"run_id": "ok-1", "mode": "live", "exit_code": 0}),
+        encoding="utf-8",
+    )
+    report = build_run_report(session_dirs=[str(session_ok), str(session_empty)])
+    assert report["sessions_scanned"] == 2
+    assert report["sessions_with_runs"] == 1
+    assert report["sessions_without_runs_count"] == 1
+    assert len(report["sessions_without_runs"]) == 1
+    assert report["sessions_without_runs"][0] == str(session_empty)
+
+
+def test_doctor_session_dir_run_report_alerts_warn(tmp_path):
+    session_dir = tmp_path / "session"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / "events.jsonl").write_text("{}", encoding="utf-8")
+    (session_dir / "manifest.json").write_text(json.dumps({"schema_version": 2}), encoding="utf-8")
+    rows = [
+        {
+            "run_id": "good",
+            "mode": "live",
+            "exit_code": 0,
+            "ended_at_wall_s": 1.0,
+            "quality_score": 93.0,
+            "quality_gate_passed": True,
+            "dropped_events_agent": 1,
+            "dropped_events_local": 1,
+        },
+        {
+            "run_id": "bad",
+            "mode": "live",
+            "exit_code": 2,
+            "ended_at_wall_s": 2.0,
+            "quality_score": 60.0,
+            "quality_gate_passed": False,
+            "dropped_events_agent": 40,
+            "dropped_events_local": 40,
+        },
+    ]
+    (session_dir / "viewer_runs.jsonl").write_text(
+        "\n".join(json.dumps(row) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+    checks = _check_session_dir(str(session_dir))
+    summary = {check.name: check for check in checks}
+    assert summary["session:viewer_runs.health"].status == "warn"
+    assert summary["session:viewer_runs.alerts"].status == "warn"
 
 
 def test_viewer_help_surface_is_compact():

@@ -20,6 +20,7 @@ from pala.behavior import (
     parse_env_summary_response,
     parse_intent_proposer_response,
 )
+from pala.behavior.decision_types import BehaviorMode
 from pala.behavior.json_parse import parse_json_flexible
 from pala.behavior.schemas import env_response_format, intent_response_format
 from pala.behavior.types import clamp_float, clamp_int, clamp01
@@ -66,7 +67,7 @@ def _valid_proposal(**overrides):
 def _valid_proposer_json(proposals):
     return json.dumps(
         {
-            "schema_version": "pala.intent_proposals.v1",
+            "schema_version": "pala.intent_proposals.v2",
             "notes_short": "ok",
             "proposals": proposals,
         }
@@ -262,22 +263,57 @@ def test_env_summarizer_accepts_wrapped_payload_shape():
 
 
 def test_intent_proposer_valid_normalized_and_error_paths():
-    parsed = parse_intent_proposer_response(_valid_proposer_json([_valid_proposal()]))
+    parsed = parse_intent_proposer_response(
+        _valid_proposer_json(
+            [
+                _valid_proposal(),
+                _valid_proposal(
+                    primitive="glance",
+                    command={"direction": "left", "amp_rad": 0.2, "duration_s": 0.4, "rate_rad_s": 1.3},
+                    intent="scan_environment",
+                    style="curious",
+                    rationale_short="scan left quickly",
+                ),
+                _valid_proposal(
+                    primitive="breath",
+                    command={"amp_rad": 0.08, "period_s": 7.0, "rate_rad_s": 1.0},
+                    intent="idle_presence",
+                    style="calm",
+                    rationale_short="fallback breathe",
+                ),
+            ]
+        )
+    )
     assert parsed is not None
     assert parsed.response.proposals[0].primitive == "orient_to_zone"
 
-    # Primitive alias + style fallback + risk numeric mapping + evidence normalization.
-    # Idle-only payloads are rejected (must contain at least one non-idle proposal).
+    # Invalid style fails strict schema.
     normalized = parse_intent_proposer_response(
         _valid_proposer_json(
             [
                 _valid_proposal(
-                    primitive="idle_presence",
                     style="unknown_style",
-                    risk=0.9,
-                    evidence=" frame:latest ",
-                    command={"amp_rad": 0.09, "period_s": 9.0, "rate_rad_s": 1.2},
+                    primitive="glance",
+                    command={"direction": "right", "amp_rad": 0.2, "duration_s": 0.4, "rate_rad_s": 1.0},
+                    intent="scan_environment",
+                    rationale_short="bad style test",
                 )
+            ]
+            + [
+                _valid_proposal(
+                    primitive="breath",
+                    command={"amp_rad": 0.09, "period_s": 9.0, "rate_rad_s": 1.2},
+                    intent="idle_presence",
+                    style="calm",
+                    rationale_short="fallback 1",
+                ),
+                _valid_proposal(
+                    primitive="hold",
+                    command={},
+                    intent="idle_presence",
+                    style="calm",
+                    rationale_short="fallback 2",
+                ),
             ]
         )
     )
@@ -286,10 +322,10 @@ def test_intent_proposer_valid_normalized_and_error_paths():
     # Mixed-quality payload fails closed (no partial salvage).
     salvage_raw = json.dumps(
         {
-            "schema_version": "pala.intent_proposals.v1",
+            "schema_version": "pala.intent_proposals.v2",
             "notes_short": "ok",
             "extra": 1,
-            "proposals": [_valid_proposal(), {"intent": "bad"}],
+            "proposals": [_valid_proposal(), _valid_proposal(), {"intent": "bad"}],
         }
     )
     salvage = parse_intent_proposer_response(salvage_raw)
@@ -310,9 +346,25 @@ def test_intent_proposer_valid_normalized_and_error_paths():
 def test_intent_proposer_accepts_wrapped_payload_shape():
     wrapped = json.dumps(
         {
-            "pala.intent_proposals.v1": {
+            "pala.intent_proposals.v2": {
                 "notes_short": "ok",
-                "proposals": [_valid_proposal()],
+                "proposals": [
+                    _valid_proposal(),
+                    _valid_proposal(
+                        primitive="glance",
+                        command={"direction": "left", "amp_rad": 0.2, "duration_s": 0.4, "rate_rad_s": 1.1},
+                        intent="scan_environment",
+                        style="curious",
+                        rationale_short="scan left",
+                    ),
+                    _valid_proposal(
+                        primitive="breath",
+                        command={"amp_rad": 0.08, "period_s": 7.0, "rate_rad_s": 1.0},
+                        intent="idle_presence",
+                        style="calm",
+                        rationale_short="fallback breathe",
+                    ),
+                ],
             }
         }
     )
@@ -320,7 +372,7 @@ def test_intent_proposer_accepts_wrapped_payload_shape():
     proposer.submit_or_replace({"tick": 1})
     parsed = proposer.complete_request(wrapped)
     assert parsed is not None
-    assert len(parsed.response.proposals) == 1
+    assert len(parsed.response.proposals) == 3
 
 
 def test_intent_proposer_parses_fenced_and_alt_shape():
@@ -329,7 +381,26 @@ def test_intent_proposer_parses_fenced_and_alt_shape():
         + json.dumps(
             {
                 "intent_proposals": [
-                    _valid_proposal(primitive="glance", command={}, rationale_short="brief acknowledge")
+                    _valid_proposal(
+                        primitive="glance",
+                        command={"direction": "right", "amp_rad": 0.3, "duration_s": 0.5, "rate_rad_s": 1.4},
+                        intent="scan_environment",
+                        style="curious",
+                        rationale_short="brief acknowledge",
+                    ),
+                    _valid_proposal(
+                        primitive="orient_to_zone",
+                        command={"zone": "left", "amp_rad": 0.2, "rate_rad_s": 1.2},
+                        intent="track_user",
+                        rationale_short="track left",
+                    ),
+                    _valid_proposal(
+                        primitive="breath",
+                        command={"amp_rad": 0.08, "period_s": 6.8, "rate_rad_s": 1.0},
+                        intent="idle_presence",
+                        style="calm",
+                        rationale_short="fallback breathe",
+                    ),
                 ]
             }
         )
@@ -337,7 +408,7 @@ def test_intent_proposer_parses_fenced_and_alt_shape():
     )
     parsed = parse_intent_proposer_response(raw)
     assert parsed is not None
-    assert len(parsed.response.proposals) == 1
+    assert len(parsed.response.proposals) == 3
     assert parsed.response.proposals[0].primitive == "glance"
     assert parsed.parse_stage in {"defenced", "extracted"}
 
@@ -345,7 +416,7 @@ def test_intent_proposer_parses_fenced_and_alt_shape():
 def test_intent_proposer_rejects_invalid_zone_alias_and_keeps_reset_pose_primitive():
     raw = json.dumps(
         {
-            "schema_version": "pala.intent_proposals.v1",
+            "schema_version": "pala.intent_proposals.v2",
             "proposals": [
                 {
                     "intent": "react_to_change",
@@ -362,8 +433,8 @@ def test_intent_proposer_rejects_invalid_zone_alias_and_keeps_reset_pose_primiti
                 },
                 {
                     "intent": "reset_pose",
-                    "primitive": "reset_pose",
-                    "command": {},
+                    "primitive": "home",
+                    "command": {"rate_rad_s": 1.2},
                     "style": "calm",
                     "score": 0.6,
                     "confidence": 0.7,
@@ -373,22 +444,37 @@ def test_intent_proposer_rejects_invalid_zone_alias_and_keeps_reset_pose_primiti
                     "evidence": ["frame:latest"],
                     "rationale_short": "return home",
                 },
+                {
+                    "intent": "idle_presence",
+                    "primitive": "hold",
+                    "command": {},
+                    "style": "calm",
+                    "score": 0.2,
+                    "confidence": 0.5,
+                    "urgency": 0.1,
+                    "risk": "low",
+                    "allow_interrupt": True,
+                    "evidence": ["frame:latest"],
+                    "rationale_short": "fallback hold",
+                },
             ],
         }
     )
     parsed = parse_intent_proposer_response(raw)
-    assert parsed is None
+    assert parsed is not None
+    assert len(parsed.response.proposals) == 2
+    assert all(item.primitive != "orient_to_zone" for item in parsed.response.proposals)
 
 
 def test_intent_proposer_keeps_reset_pose_alias_when_payload_is_valid():
     raw = json.dumps(
         {
-            "schema_version": "pala.intent_proposals.v1",
+            "schema_version": "pala.intent_proposals.v2",
             "proposals": [
                 {
                     "intent": "reset_pose",
-                    "primitive": "reset_pose",
-                    "command": {},
+                    "primitive": "home",
+                    "command": {"rate_rad_s": 1.3},
                     "style": "calm",
                     "score": 0.6,
                     "confidence": 0.7,
@@ -410,6 +496,19 @@ def test_intent_proposer_keeps_reset_pose_alias_when_payload_is_valid():
                     "allow_interrupt": True,
                     "evidence": ["frame:latest"],
                     "rationale_short": "check user side",
+                },
+                {
+                    "intent": "idle_presence",
+                    "primitive": "hold",
+                    "command": {},
+                    "style": "calm",
+                    "score": 0.2,
+                    "confidence": 0.6,
+                    "urgency": 0.1,
+                    "risk": "low",
+                    "allow_interrupt": True,
+                    "evidence": ["frame:latest"],
+                    "rationale_short": "fallback hold",
                 },
             ],
         }
@@ -476,7 +575,7 @@ def test_governor_and_action_compiler_and_arbiter_branches():
             source="idle_engine",
         ),
     ]
-    out = gov.evaluate(candidates)
+    out = gov.evaluate(candidates, mode=BehaviorMode.ENGAGE_TRACK, signals={"person_present": True})
     assert out[0].valid is False and out[0].reject_reason == "home_blocked"
     assert out[1].valid is False and out[1].reject_reason == "invalid_zone"
     assert out[2].valid is True and out[2].utility > 0.0
@@ -517,7 +616,11 @@ def test_governor_and_action_compiler_and_arbiter_branches():
         ),
         source="remote",
     )
-    governed = Governor(GovernorConfig(block_high_risk=False)).evaluate([valid_candidate])
+    governed = Governor(GovernorConfig(block_high_risk=False)).evaluate(
+        [valid_candidate],
+        mode=BehaviorMode.ACKNOWLEDGE,
+        signals={"person_present": True},
+    )
     arb = Arbiter(ArbiterConfig(min_dwell_s=0.0, base_margin=0.01, idle_after_s=1.0, terminal_retrigger_s=0.5))
     result = arb.select(
         candidates=governed,
@@ -525,11 +628,10 @@ def test_governor_and_action_compiler_and_arbiter_branches():
         current_utility=0.1,
         action_age_s=1.0,
         no_commit_s=2.0,
-        last_intent="other",
         recent_switches=0,
         planner_open_breaker=False,
-        planner_no_signal_streak=0,
-        perception_degraded=False,
+        same_primitive_streak=1,
+        mode=BehaviorMode.ACKNOWLEDGE,
     )
     assert result.decision in {"commit", "keep_current"}
     assert result.chosen is not None
@@ -546,7 +648,7 @@ def test_health_manager_state_transitions_and_effective_hz():
     assert hm.env.state == "OPEN_BREAKER"
 
     no_signal = ProposerResponse(
-        schema_version="pala.intent_proposals.v1",
+        schema_version="pala.intent_proposals.v2",
         proposals=[
             IntentProposal(
                 intent="idle_presence",
@@ -588,10 +690,5 @@ def test_schema_response_format_helpers():
     env = env_response_format()
     assert intent["type"] == "json_schema"
     assert env["type"] == "json_schema"
-    assert intent["json_schema"]["name"] == "pala_intent_proposals_v1"
+    assert intent["json_schema"]["name"] == "pala_intent_proposals_v2"
     assert env["json_schema"]["name"] == "pala_env_summary_v1"
-
-    intent_gemini = intent_response_format(provider="gemini")
-    env_gemini = env_response_format(provider="gemini")
-    assert intent_gemini == {"type": "json_object"}
-    assert env_gemini == {"type": "json_object"}

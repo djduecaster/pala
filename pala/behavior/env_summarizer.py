@@ -108,38 +108,36 @@ def _canonicalize_env_payload(data: Any) -> Optional[Dict[str, Any]]:
     if isinstance(wrapped, dict):
         root = wrapped
 
-    scene_raw = _pick_value(root, "scene", "description")
-    events_raw = _pick_value(root, "events", "changes", "event_context")
-    hypotheses_raw = _pick_value(root, "hypotheses", "inferences", "hypothesis")
-    summary_raw = _pick_value(root, "summary_short", "summary", "caption")
+    scene_value = root.get("scene")
+    features_raw = root.get("features")
+    if not isinstance(features_raw, dict):
+        features_raw = {}
+        for key in ("person_present", "zone_hint", "activity_level", "novelty"):
+            if key in root:
+                features_raw[key] = root.get(key)
+    if not isinstance(features_raw, dict) and isinstance(scene_value, dict):
+        features_raw = dict(scene_value)
+    if isinstance(scene_value, dict):
+        for key in ("person_present", "zone_hint", "activity_level", "novelty"):
+            if key in scene_value and key not in features_raw:
+                features_raw[key] = scene_value.get(key)
 
-    scene = _clean_text(_coerce_text(scene_raw, prefer=("scene", "description", "summary", "caption")), max_len=360)
-    events = _clean_text(_coerce_text(events_raw, prefer=("events", "description", "summary", "caption")), max_len=220)
-    hypotheses = _clean_text(
-        _coerce_text(hypotheses_raw, prefer=("hypotheses", "inference", "reasoning", "summary")),
-        max_len=220,
-    )
-    summary_short = _clean_text(_coerce_text(summary_raw, prefer=("summary", "caption", "text")), max_len=120)
+    scene = _clean_text(_pick_text(root, "scene", "description", "summary"), max_len=360)
+    events = _clean_text(_pick_text(root, "events", "changes", "event_context"), max_len=220)
+    hypotheses = _clean_text(_pick_text(root, "hypotheses", "inferences", "hypothesis"), max_len=220)
+    summary_short = _clean_text(_pick_text(root, "summary_short", "summary", "caption"), max_len=120)
 
     if not scene:
         scene = _clean_text(summary_short or events, max_len=360)
     if not events:
         events = _clean_text(summary_short or scene, max_len=220)
     if not hypotheses:
-        hypotheses = "user intent uncertain from available evidence"
+        hypotheses = "I infer limited certainty from available evidence"
     if not summary_short:
         summary_short = _clean_text(events or scene, max_len=120)
 
-    features_raw = root.get("features")
-    if not isinstance(features_raw, dict) and isinstance(scene_raw, dict):
-        features_raw = scene_raw
-    if not isinstance(features_raw, dict):
-        features_raw = {}
-
     zone_hint = str(features_raw.get("zone_hint", "unknown")).strip().lower()
     if zone_hint not in {"left", "center", "right", "unknown"}:
-        zone_hint = "unknown"
-    if zone_hint == "unknown":
         zone_hint = _infer_zone_hint_from_text(scene, events, summary_short, hypotheses)
 
     features = {
@@ -160,6 +158,13 @@ def _canonicalize_env_payload(data: Any) -> Optional[Dict[str, Any]]:
         "delta_score": delta_score,
         "features": features,
     }
+
+
+def _pick_text(data: Mapping[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in data:
+            return data.get(key)
+    return ""
 
 
 def _clean_text(value: Any, *, max_len: int) -> str:
@@ -186,57 +191,15 @@ def _json_path(exc: ValidationError) -> str:
     return "".join(parts)
 
 
-def _pick_value(data: Mapping[str, Any], *keys: str) -> Any:
-    for key in keys:
-        if key in data:
-            return data.get(key)
-    return ""
-
-
-def _coerce_text(value: Any, *, prefer: tuple[str, ...]) -> str:
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return value
-    if isinstance(value, Mapping):
-        for key in prefer:
-            if key in value:
-                token = _coerce_text(value.get(key), prefer=prefer)
-                if token:
-                    return token
-        parts = [_coerce_text(item, prefer=prefer) for item in value.values()]
-        joined = " ".join(part for part in parts if part)
-        return joined
-    if isinstance(value, list):
-        parts = [_coerce_text(item, prefer=prefer) for item in value]
-        return " ".join(part for part in parts if part)
-    return str(value)
-
-
 def _infer_zone_hint_from_text(*texts: str) -> str:
     token = " ".join(_clean_text(item, max_len=240) for item in texts if item).lower()
     if not token:
         return "unknown"
 
     zone_patterns = {
-        "left": (
-            r"\bto my left\b",
-            r"\bon my left\b",
-            r"\bleft side\b",
-            r"\bleft\b",
-        ),
-        "right": (
-            r"\bto my right\b",
-            r"\bon my right\b",
-            r"\bright side\b",
-            r"\bright\b",
-        ),
-        "center": (
-            r"\bin front of me\b",
-            r"\bahead of me\b",
-            r"\bcenter\b",
-            r"\bmiddle\b",
-        ),
+        "left": (r"\bto my left\b", r"\bon my left\b", r"\bleft side\b", r"\bleft\b"),
+        "right": (r"\bto my right\b", r"\bon my right\b", r"\bright side\b", r"\bright\b"),
+        "center": (r"\bin front of me\b", r"\bahead of me\b", r"\bcenter\b", r"\bmiddle\b"),
     }
 
     earliest: Dict[str, int] = {}

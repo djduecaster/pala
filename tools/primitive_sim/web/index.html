@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>PALA Primitive Simulator</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <main class="layout">
+      <section class="stage-card">
+        <canvas id="simCanvas" width="1080" height="680"></canvas>
+      </section>
+
+      <aside class="control-card">
+        <header>
+          <h1>PALA Primitive Sim</h1>
+          <p id="traceSource">Trace: loading...</p>
+        </header>
+
+        <section class="group">
+          <div class="row">
+            <button id="playPauseBtn" type="button">Play</button>
+            <button id="resetBtn" type="button">Reset</button>
+            <label class="inline">
+              Speed
+              <select id="speedSelect">
+                <option value="0.25">0.25x</option>
+                <option value="0.5">0.5x</option>
+                <option value="1" selected>1x</option>
+                <option value="1.5">1.5x</option>
+                <option value="2">2x</option>
+                <option value="3">3x</option>
+              </select>
+            </label>
+          </div>
+
+          <label class="slider-label" for="timeline">Timeline</label>
+          <input id="timeline" type="range" min="0" max="0" value="0" step="1">
+          <p id="timeLabel">t=0.00s</p>
+        </section>
+
+        <section class="group">
+          <label for="fileInput">Load trace JSON from disk</label>
+          <input id="fileInput" type="file" accept="application/json,.json">
+        </section>
+
+        <section class="group">
+          <pre id="statusBox">No trace loaded.</pre>
+        </section>
+
+        <section class="group">
+          <table id="jointTable">
+            <thead>
+              <tr>
+                <th>Joint</th>
+                <th>Angle (rad)</th>
+                <th>Angle (deg)</th>
+                <th>Norm</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </section>
+      </aside>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>

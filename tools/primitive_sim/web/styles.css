@@ -1,0 +1,191 @@
+:root {
+  --bg-top: #08191a;
+  --bg-bottom: #0a1117;
+  --panel: #111c21;
+  --panel-border: #2a4d5a;
+  --text: #d9f1ed;
+  --muted: #9bc1bd;
+  --accent: #ff9a3d;
+  --accent-2: #5fd5c8;
+  --danger: #ff6b5d;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: radial-gradient(1200px 700px at 10% -20%, #13343a 0%, transparent 60%),
+    linear-gradient(160deg, var(--bg-top) 0%, var(--bg-bottom) 100%);
+  color: var(--text);
+  font-family: "Space Grotesk", "Avenir Next", "Segoe UI", sans-serif;
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: minmax(420px, 1fr) 380px;
+  gap: 16px;
+  padding: 16px;
+  min-height: 100vh;
+}
+
+.stage-card,
+.control-card {
+  background: linear-gradient(170deg, rgba(20, 34, 41, 0.96), rgba(11, 20, 28, 0.97));
+  border: 1px solid var(--panel-border);
+  border-radius: 14px;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.35);
+}
+
+.stage-card {
+  padding: 8px;
+  display: flex;
+}
+
+#simCanvas {
+  width: 100%;
+  height: auto;
+  border-radius: 10px;
+  background: linear-gradient(180deg, #0e2530 0%, #08161f 65%, #060f15 100%);
+  border: 1px solid #24424d;
+  touch-action: none;
+}
+
+.control-card {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+header h1 {
+  margin: 0 0 6px 0;
+  font-size: 1.28rem;
+  letter-spacing: 0.02em;
+}
+
+header p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.group {
+  border: 1px solid #21404a;
+  background: rgba(9, 20, 26, 0.6);
+  border-radius: 10px;
+  padding: 10px;
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+button,
+select,
+input[type="file"] {
+  border-radius: 8px;
+  border: 1px solid #2a5965;
+  background: #112832;
+  color: var(--text);
+  padding: 7px 10px;
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+  transition: transform 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
+}
+
+button:hover {
+  transform: translateY(-1px);
+  border-color: var(--accent);
+  box-shadow: 0 4px 14px rgba(255, 154, 61, 0.2);
+}
+
+.inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+}
+
+.slider-label {
+  display: block;
+  color: var(--muted);
+  margin-top: 8px;
+  font-size: 0.88rem;
+}
+
+#timeline {
+  width: 100%;
+}
+
+#timeLabel {
+  margin: 6px 0 0 0;
+  color: #d8eee8;
+  font-size: 0.9rem;
+}
+
+#statusBox {
+  margin: 0;
+  background: #0a141a;
+  border: 1px solid #223841;
+  border-radius: 8px;
+  padding: 10px;
+  min-height: 120px;
+  color: #e5f7f2;
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+}
+
+#jointTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.83rem;
+}
+
+#jointTable th,
+#jointTable td {
+  text-align: left;
+  padding: 6px;
+  border-bottom: 1px solid #1e3842;
+}
+
+#jointTable th {
+  color: #a2cbc4;
+  font-weight: 600;
+}
+
+.norm {
+  display: inline-block;
+  min-width: 72px;
+  text-align: right;
+}
+
+.norm.bad {
+  color: var(--danger);
+}
+
+.norm.ok {
+  color: var(--accent-2);
+}
+
+@media (max-width: 1150px) {
+  .layout {
+    grid-template-columns: 1fr;
+  }
+
+  .stage-card {
+    min-height: 48vh;
+  }
+
+  #simCanvas {
+    height: 56vh;
+  }
+}

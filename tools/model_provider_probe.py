@@ -17,8 +17,8 @@ if str(REPO_ROOT) not in sys.path:
 
 from pala.behavior.intent_proposer import parse_intent_proposer_response
 from pala.behavior.json_parse import parse_json_flexible
+from pala.behavior.model_clients import extract_message_content, normalize_chat_url, post_chat_json
 from pala.behavior.prompts import build_messages, build_planner_user_text
-from pala.behavior.remote_api import extract_message_content, normalize_chat_url, post_chat_json
 from pala.behavior.schemas import intent_response_format
 from pala.config import load_config
 

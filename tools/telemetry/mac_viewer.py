@@ -15,7 +15,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Deque, Dict, List, Optional
+from typing import Any, Deque, Dict, List, Mapping, Optional
 
 from PIL import Image, ImageDraw
 
@@ -1427,6 +1427,89 @@ def _run_curation_export(
     }
 
 
+def _build_viewer_summary(
+    *,
+    mode: str,
+    state: DashboardState,
+    query_text: str,
+    quality_gate: str,
+    curation_result: Optional[Dict[str, Any]],
+    exit_code: int,
+) -> Dict[str, Any]:
+    ended_wall_s = time.time()
+    duration_s = max(0.0, ended_wall_s - float(state.started_wall_s))
+    quality_grade = None
+    quality_score = None
+    if isinstance(state.quality_report, dict):
+        quality_grade = state.quality_report.get("grade")
+        quality_score = state.quality_report.get("score")
+    return {
+        "version": 2,
+        "schema_version": int(TELEMETRY_SCHEMA_VERSION_V3),
+        "run_id": f"{int(ended_wall_s * 1000)}-{os.getpid()}",
+        "mode": str(mode or "live"),
+        "started_at_wall_s": float(state.started_wall_s),
+        "ended_at_wall_s": ended_wall_s,
+        "session_duration_s": round(duration_s, 3),
+        "query": str(query_text or ""),
+        "quality_gate": str(quality_gate or "warn"),
+        "quality_gate_passed": bool(state.quality_gate_passed) if state.quality_gate_passed is not None else None,
+        "quality_gate_note": str(state.quality_gate_note or ""),
+        "quality_grade": quality_grade,
+        "quality_score": quality_score,
+        "event_counts": dict(state.event_counts),
+        "trace_count": len(state.trace_records),
+        "reasoning_count": len(state.reasoning_events),
+        "dropped_events_agent": int(state.dropped_events_reported),
+        "dropped_events_local": int(state.local_dropped_events),
+        "warning_count": len(state.warnings),
+        "curation_result": dict(curation_result) if isinstance(curation_result, dict) else None,
+        "exit_code": int(exit_code),
+    }
+
+
+def _write_json_atomic(path: str, obj: Mapping[str, Any]) -> None:
+    target = str(path)
+    parent = os.path.dirname(target) or "."
+    os.makedirs(parent, exist_ok=True)
+    temp_path = f"{target}.tmp.{os.getpid()}"
+    with open(temp_path, "w", encoding="utf-8") as fh:
+        json.dump(obj, fh, separators=(",", ":"), ensure_ascii=True)
+    os.replace(temp_path, target)
+
+
+def _write_viewer_summary(
+    *,
+    session_dir: str,
+    summary: Dict[str, Any],
+    filename: str = "viewer_summary.json",
+) -> str:
+    root = str(session_dir).strip()
+    if not root:
+        raise ValueError("session directory unavailable for viewer summary")
+    os.makedirs(root, exist_ok=True)
+    target = os.path.join(root, str(filename))
+    _write_json_atomic(target, summary)
+    return target
+
+
+def _append_viewer_run(
+    *,
+    session_dir: str,
+    summary: Mapping[str, Any],
+    filename: str = "viewer_runs.jsonl",
+) -> str:
+    root = str(session_dir).strip()
+    if not root:
+        raise ValueError("session directory unavailable for viewer run history")
+    os.makedirs(root, exist_ok=True)
+    target = os.path.join(root, str(filename))
+    with open(target, "a", encoding="utf-8") as fh:
+        fh.write(json.dumps(dict(summary), separators=(",", ":"), ensure_ascii=True))
+        fh.write("\n")
+    return target
+
+
 def _expand_local_path(path: str) -> str:
     raw = str(path or "").strip()
     if not raw:
@@ -1810,8 +1893,8 @@ def main() -> int:
     def _resolve_lookup_root() -> str:
         if session_db_path and os.path.exists(session_db_path):
             return session_db_path
-        if replay_mode and os.path.isdir(str(args.replay).strip()):
-            return str(args.replay).strip()
+        if replay_mode and os.path.isdir(replay_dir):
+            return replay_dir
         if save_session_dir and os.path.isdir(save_session_dir):
             return save_session_dir
         return ""
@@ -2174,7 +2257,7 @@ def main() -> int:
             _apply_quality_gate()
         state.integrity_report = verify_integrity_report(save_session_dir)
     if args.curate_on_exit:
-        curation_root = str(args.replay).strip() if replay_mode else save_session_dir
+        curation_root = replay_dir if replay_mode else save_session_dir
         curation_result = _run_curation_export(session_dir=curation_root, profile=str(args.curate_profile))
         if bool(curation_result.get("ok")):
             state.logs.append(
@@ -2206,11 +2289,42 @@ def main() -> int:
             )
         else:
             print(f"curation_export_error: {curation_result.get('error')}")
+    final_exit = 0
     if args.curate_on_exit and (curation_result is None or (not bool(curation_result.get("ok")))):
-        return 3
-    if str(args.quality_gate) == "strict" and state.quality_gate_passed is not True:
-        return 2
-    return 0
+        final_exit = 3
+    elif str(args.quality_gate) == "strict" and state.quality_gate_passed is not True:
+        final_exit = 2
+
+    summary_root = ""
+    if save_session_dir:
+        summary_root = save_session_dir
+    elif replay_mode and args.curate_on_exit:
+        summary_root = replay_dir
+    if summary_root:
+        try:
+            summary = _build_viewer_summary(
+                mode=str(args.mode or "live"),
+                state=state,
+                query_text=str(args.query or ""),
+                quality_gate=str(args.quality_gate or "warn"),
+                curation_result=curation_result,
+                exit_code=final_exit,
+            )
+        except Exception as exc:
+            print(f"viewer_summary_error: {exc!r}")
+        else:
+            try:
+                summary_path = _write_viewer_summary(session_dir=summary_root, summary=summary)
+                print(f"viewer_summary: {summary_path}")
+            except Exception as exc:
+                print(f"viewer_summary_error: {exc!r}")
+            try:
+                runs_path = _append_viewer_run(session_dir=summary_root, summary=summary)
+                print(f"viewer_runs: {runs_path}")
+            except Exception as exc:
+                print(f"viewer_runs_error: {exc!r}")
+
+    return final_exit
 
 
 if __name__ == "__main__":

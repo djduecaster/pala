@@ -13,6 +13,7 @@ class ContextBuilder:
         world_snapshot: Mapping[str, Any],
         current_action: ActionPlan,
         frame_timeline: List[Dict[str, float]],
+        mode: str = "idle_presence",
     ) -> Dict[str, Any]:
         latest_env = world_snapshot.get("latest_env_snapshot") or {}
         event_tail = world_snapshot.get("event_tail", [])[-2:]
@@ -24,6 +25,7 @@ class ContextBuilder:
             for item in event_tail
         ]
         return {
+            "mode": mode,
             "current_action": {
                 "primitive": current_action.primitive.value,
                 "style": current_action.style,
@@ -42,6 +44,7 @@ class ContextBuilder:
         world_snapshot: Mapping[str, Any],
         current_action: ActionPlan,
         planner_health: Mapping[str, Any],
+        mode: str = "idle_presence",
         now_mono_s: float,
         last_commit_mono_s: float,
         no_commit_s: float,
@@ -77,6 +80,7 @@ class ContextBuilder:
             signals["zone_hint"] = zone_hint
 
         return {
+            "mode": mode,
             "current_action": {
                 "primitive": current_action.primitive.value,
                 "command": self._command_digest(current_action.command),

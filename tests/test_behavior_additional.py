@@ -10,6 +10,7 @@ from pala.behavior import (
     IntentProposer,
     ProposalCandidate,
 )
+from pala.behavior.decision_types import BehaviorMode
 from pala.types import ActionPlan, HoldCommand, PrimitiveKind
 
 
@@ -47,7 +48,7 @@ def test_governor_blocks_high_risk_proposals():
         )
     ]
 
-    out = gov.evaluate(candidates)
+    out = gov.evaluate(candidates, mode=BehaviorMode.SCAN_EXPLORE, signals={"person_present": True})
     assert len(out) == 1
     assert out[0].valid is False
     assert out[0].reject_reason == "risk_high_blocked"
@@ -76,7 +77,11 @@ def test_action_compiler_and_arbiter_keep_current_on_same_signature():
         evidence=[],
         rationale_short="same action",
     )
-    governed = Governor().evaluate([ProposalCandidate(proposal=proposal, source="remote")])
+    governed = Governor().evaluate(
+        [ProposalCandidate(proposal=proposal, source="remote")],
+        mode=BehaviorMode.IDLE_PRESENCE,
+        signals={"person_present": False},
+    )
 
     result = arbiter.select(
         candidates=governed,
@@ -84,11 +89,10 @@ def test_action_compiler_and_arbiter_keep_current_on_same_signature():
         current_utility=0.4,
         action_age_s=1.0,
         no_commit_s=1.0,
-        last_intent="idle_presence",
         recent_switches=0,
         planner_open_breaker=False,
-        planner_no_signal_streak=0,
-        perception_degraded=False,
+        same_primitive_streak=1,
+        mode=BehaviorMode.IDLE_PRESENCE,
     )
     assert result.decision == "keep_current"
     assert result.reason == "same_signature"

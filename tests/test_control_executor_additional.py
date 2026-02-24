@@ -3,7 +3,15 @@ from __future__ import annotations
 import pytest
 
 from pala.control.executor import ExecutionStatus, TrajectoryExecutor, _normalize_style_profiles
-from pala.control.primitives import GazeToCommand, HoldCommand, MoveToCommand, PrimitiveKind
+from pala.control.primitives import (
+    GazeToCommand,
+    GlanceCommand,
+    HoldCommand,
+    HomeCommand,
+    MoveToCommand,
+    NodCommand,
+    PrimitiveKind,
+)
 from pala.types import ActionPlan
 
 
@@ -107,3 +115,81 @@ def test_apply_rate_limit_with_negative_dt_clamps_to_zero():
     )
     cmd = executor.step(action, dt=-1.0)
     assert cmd.joint_angles_rad == [0.0, 0.0]
+
+
+def test_home_action_executes_home_branch_and_finishes_when_already_at_origin():
+    executor = TrajectoryExecutor(_limits(5))
+    action = ActionPlan(
+        primitive=PrimitiveKind.HOME,
+        command=HomeCommand(rate_rad_s=2.0),
+        confidence=1.0,
+    )
+    executor.step(action, dt=0.05)
+    assert executor.control_state.status == ExecutionStatus.DONE
+
+
+def test_relative_move_to_targets_current_offset():
+    executor = TrajectoryExecutor(_limits(5))
+    executor._current = [0.2, 0.0, 0.0, 0.0, 0.0]  # noqa: SLF001 - targeted branch setup
+    action = ActionPlan(
+        primitive=PrimitiveKind.MOVE_TO,
+        command=MoveToCommand(target_rad=[0.1, 0.0, 0.0, 0.0, 0.0], relative=True, rate_rad_s=10.0, timeout_s=2.0),
+        confidence=1.0,
+    )
+    cmd = executor.step(action, dt=0.05)
+    assert cmd.joint_angles_rad[0] == pytest.approx(0.3, abs=1e-6)
+
+
+def test_nod_primitive_path_runs_and_finishes_by_elapsed_duration(monkeypatch):
+    now = {"t": 400.0}
+    monkeypatch.setattr("pala.control.executor.time.monotonic", lambda: now["t"])
+    executor = TrajectoryExecutor(_limits(5))
+    action = ActionPlan(
+        primitive=PrimitiveKind.NOD,
+        command=NodCommand(amp_rad=0.2, duration_s=0.1, cycles=2, rate_rad_s=10.0),
+        confidence=1.0,
+    )
+
+    executor.step(action, dt=0.01)
+    assert executor.control_state.status == ExecutionStatus.RUNNING
+    now["t"] = 400.12
+    executor.step(action, dt=0.02)
+    assert executor.control_state.status == ExecutionStatus.DONE
+
+
+def test_command_kind_mismatch_marks_active_action_rejected():
+    executor = TrajectoryExecutor(_limits(5))
+    bad = ActionPlan(
+        primitive=PrimitiveKind.HOLD,
+        command=HoldCommand(),
+        confidence=1.0,
+    )
+    bad.command = MoveToCommand(target_rad=[0.1, 0.0, 0.0, 0.0, 0.0], relative=False, rate_rad_s=1.0, timeout_s=1.0)
+    executor.step(bad, dt=0.01)
+    assert executor.control_state.status == ExecutionStatus.REJECTED
+    assert executor.control_state.reason == "command-kind mismatch"
+
+
+def test_gaze_done_resets_reached_time_when_target_is_lost():
+    executor = TrajectoryExecutor(_limits(5))
+    command = GazeToCommand(yaw_rad=0.0, pitch_rad=0.0, rate_rad_s=1.0, dwell_s=0.2, timeout_s=1.0)
+    target = [0.8, 0.0, 0.0, 0.0, 0.0]
+
+    executor._active_reached_s = 10.0  # noqa: SLF001 - branch setup
+    executor._current = [0.0, 0.0, 0.0, 0.0, 0.0]  # noqa: SLF001 - branch setup
+    assert executor._gaze_done(command, now=11.0, target=target) is False  # noqa: SLF001 - explicit helper test
+    assert executor._active_reached_s is None  # noqa: SLF001 - explicit helper test
+
+
+def test_glance_target_up_and_down_update_pitch_axis():
+    executor = TrajectoryExecutor(_limits(5))
+    executor._active_base = [0.0, 0.0, 0.0, 0.0, 0.0]  # noqa: SLF001 - direct helper coverage
+    style = {"amp_scale": 1.0, "rate_scale": 1.0, "duration_scale": 1.0, "settle_scale": 1.0}
+    up = executor._glance_target(GlanceCommand(direction="up", amp_rad=0.3, duration_s=1.0, rate_rad_s=1.0), 0.5, style)  # noqa: SLF001
+    down = executor._glance_target(  # noqa: SLF001
+        GlanceCommand(direction="down", amp_rad=0.3, duration_s=1.0, rate_rad_s=1.0),
+        0.5,
+        style,
+    )
+    assert up[4] < 0.0
+    assert down[4] > 0.0

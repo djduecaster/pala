@@ -497,11 +497,7 @@ def _build_behavior_config(cfg, *, run_log_dir: Optional[str] = None) -> Behavio
 
     base_url = os.getenv("PALA_COSMOS_BASE_URL") or cosmos.base_url
     api_key = os.getenv("PALA_COSMOS_API_KEY")
-    remote_provider = (
-        os.getenv("PALA_MODEL_PROVIDER")
-        or os.getenv("PALA_COSMOS_PROVIDER")
-        or getattr(cosmos, "provider", "auto")
-    )
+    remote_provider = os.getenv("PALA_MODEL_PROVIDER") or getattr(cosmos, "provider", "auto")
     provider_token = str(remote_provider or "auto").strip().lower()
     base_token = str(base_url or "").strip().lower()
     if provider_token == "auto" and (
@@ -564,14 +560,17 @@ def _build_behavior_config(cfg, *, run_log_dir: Optional[str] = None) -> Behavio
         env_max_tokens=int(getattr(cosmos, "env_max_tokens", 600)),
         planner_max_tokens=int(getattr(cosmos, "planner_max_tokens", 480)),
         proposer_max_age_s=max(base_ttl_s, min_ttl_s),
-        planner_max_proposals=int(getattr(cosmos, "planner_max_proposals", 2)),
+        planner_max_proposals=int(getattr(cosmos, "planner_max_proposals", 3)),
         planner_use_env_context=bool(getattr(cosmos, "planner_use_env_context", True)),
         arbiter_min_dwell_s=float(getattr(cosmos, "arbiter_min_dwell_s", 1.2)),
         arbiter_base_margin=arbiter_margin_cfg,
-        arbiter_takeover_no_signal_streak=int(getattr(cosmos, "arbiter_takeover_no_signal_streak", 2)),
-        arbiter_takeover_no_commit_s=float(getattr(cosmos, "arbiter_takeover_no_commit_s", 2.8)),
         idle_after_s=idle_after_cfg,
         idle_glance_after_s=idle_glance_after_cfg,
+        mode_min_dwell_s=float(getattr(cosmos, "mode_min_dwell_s", 1.0)),
+        mode_engage_person_conf=float(getattr(cosmos, "mode_engage_person_conf", 0.45)),
+        mode_disengage_person_conf=float(getattr(cosmos, "mode_disengage_person_conf", 0.20)),
+        stale_penalty_per_s=float(getattr(cosmos, "stale_penalty_per_s", 0.05)),
+        stale_expire_s=float(getattr(cosmos, "stale_expire_s", 14.0)),
         policy_identity=str(getattr(cosmos, "policy_identity", "You are PALA.")),
         policy_capabilities=str(getattr(cosmos, "policy_capabilities", "")),
         policy_safety=str(getattr(cosmos, "policy_safety", "")),

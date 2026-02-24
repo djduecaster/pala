@@ -15,7 +15,7 @@ from typing import Any, Optional
 import numpy as np
 from PIL import Image
 
-from pala.behavior.remote_api import extract_message_content, normalize_chat_url, post_chat_json
+from pala.behavior.model_clients import extract_message_content, normalize_chat_url, post_chat_json
 from pala.config import load_config
 from pala.control.primitives import PrimitiveKind
 from pala.hardware.camera import DummyCamera

@@ -9,10 +9,10 @@ def test_build_env_user_text_requires_json_contract():
     context = {"recent_events": [{"summary": "user moved"}], "person_conf": 0.8}
     text = build_env_user_text(context=context, policy_identity="PALA observer")
 
-    assert "The camera view is my view. I am the lamp observing this scene." in text
+    assert "The camera view is my view as the lamp." in text
     assert "Return JSON only matching schema `pala.env_summary.v1`" in text
-    assert "Do not propose actions." in text
-    assert "scene should start with 'I see the scene as ...'" in text
+    assert "Do not include recommendations or action proposals." in text
+    assert "scene must start with 'I see the scene as'." in text
     assert "identity_scope=PALA observer" in text
 
     context_json = text.split("context_json=", 1)[1]
@@ -31,11 +31,10 @@ def test_build_planner_user_text_requires_ranked_proposals():
         max_proposals=3,
     )
 
-    assert "Return JSON only matching schema `pala.intent_proposals.v1`" in text
-    assert "Return exactly 3 ranked proposal(s)" in text
-    assert "The camera view is my view. I am the lamp and must choose my next body action." in text
-    assert "Return concrete action proposals for what I should do next now." in text
-    assert "Use egocentric language internally" in text
+    assert "Return JSON only matching schema `pala.intent_proposals.v2`" in text
+    assert "Return exactly 3 proposals ranked best to worst." in text
+    assert "The camera view is my view as the lamp." in text
+    assert "Use the current mode in context_json to shape your proposal choices." in text
 
     tail = text.split("policy_json=", 1)[1]
     policy_json, context_json = tail.split("\ncontext_json=", 1)

@@ -83,10 +83,13 @@ class CosmosConfig:
     # Deterministic arbitration.
     arbiter_min_dwell_s: float = 1.2
     arbiter_base_margin: float = 0.10
-    arbiter_takeover_no_signal_streak: int = 2
-    arbiter_takeover_no_commit_s: float = 2.0
     idle_after_s: float = 6.0
     idle_glance_after_s: float = 10.0
+    mode_min_dwell_s: float = 1.0
+    mode_engage_person_conf: float = 0.45
+    mode_disengage_person_conf: float = 0.20
+    stale_penalty_per_s: float = 0.05
+    stale_expire_s: float = 14.0
     # Frame sampling and media packaging.
     planner_max_frames: int = 1
     planner_include_latest_frame: bool = True
@@ -340,19 +343,22 @@ def load_config(path: str) -> RobotConfig:
             cosmos_raw.get("arbiter_base_margin", 0.10),
             "cosmos.arbiter_base_margin",
         ),
-        arbiter_takeover_no_signal_streak=_as_int(
-            cosmos_raw.get("arbiter_takeover_no_signal_streak", 2),
-            "cosmos.arbiter_takeover_no_signal_streak",
-        ),
-        arbiter_takeover_no_commit_s=_as_float(
-            cosmos_raw.get("arbiter_takeover_no_commit_s", 2.0),
-            "cosmos.arbiter_takeover_no_commit_s",
-        ),
         idle_after_s=_as_float(cosmos_raw.get("idle_after_s", 6.0), "cosmos.idle_after_s"),
         idle_glance_after_s=_as_float(
             cosmos_raw.get("idle_glance_after_s", 10.0),
             "cosmos.idle_glance_after_s",
         ),
+        mode_min_dwell_s=_as_float(cosmos_raw.get("mode_min_dwell_s", 1.0), "cosmos.mode_min_dwell_s"),
+        mode_engage_person_conf=_as_float(
+            cosmos_raw.get("mode_engage_person_conf", 0.45),
+            "cosmos.mode_engage_person_conf",
+        ),
+        mode_disengage_person_conf=_as_float(
+            cosmos_raw.get("mode_disengage_person_conf", 0.20),
+            "cosmos.mode_disengage_person_conf",
+        ),
+        stale_penalty_per_s=_as_float(cosmos_raw.get("stale_penalty_per_s", 0.05), "cosmos.stale_penalty_per_s"),
+        stale_expire_s=_as_float(cosmos_raw.get("stale_expire_s", 14.0), "cosmos.stale_expire_s"),
         planner_max_frames=_as_int(cosmos_raw.get("planner_max_frames", 1), "cosmos.planner_max_frames"),
         planner_include_latest_frame=_as_bool(
             cosmos_raw.get("planner_include_latest_frame", True),

@@ -39,6 +39,7 @@ Telemetry remains a sidecar under `tools/telemetry` and does not change the core
 ```bash
 uv run python -m tools.telemetry.doctor --jetson-host jetson
 ```
+When `--session-dir` is provided, doctor now validates viewer run artifacts and surfaces run-health alerts.
 
 ### 1) Run runtime on Jetson
 ```bash
@@ -79,6 +80,16 @@ uv run python -m tools.telemetry.mac_viewer \
   --curate-profile hard_cases
 ```
 
+### 6) Summarize run history across sessions
+```bash
+uv run python -m tools.telemetry.run_report --root logs/telemetry
+```
+Report output now includes session coverage (`sessions_with_runs` vs `sessions_without_runs`) to catch missing run artifacts early.
+For CI-style gating, fail when the latest run looks unhealthy:
+```bash
+uv run python -m tools.telemetry.run_report --root logs/telemetry --strict
+```
+
 ## Session Bundle Contents (V3)
 - `manifest.json`: session metadata, schema version, V3 artifact pointers
 - `events.jsonl`: full event stream
@@ -95,6 +106,8 @@ uv run python -m tools.telemetry.mac_viewer \
 - `dataset_rows.jsonl`: optional export output
 - `dataset_manifest.json`: profile/run summary for dataset export
   - includes `inclusion_reason_counts` (`hard_case`, `annotation`, `weak_label`, `baseline`)
+- `viewer_summary.json`: viewer exit summary (`run_id`, mode, query, drops, event counts, quality gate, curation result)
+- `viewer_runs.jsonl`: append-only history of viewer runs for the session bundle
 
 ## Migration / Re-index Existing Sessions
 Upgrade any older session directory in-place:

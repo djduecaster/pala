@@ -24,8 +24,8 @@ if str(REPO_ROOT) not in sys.path:
 
 from pala.behavior.env_summarizer import EnvSummarizer
 from pala.behavior.intent_proposer import IntentProposer
+from pala.behavior.model_clients import extract_message_content, normalize_chat_url, post_chat_json
 from pala.behavior.prompts import SYSTEM_PROMPT, build_env_user_text, build_messages, build_planner_user_text
-from pala.behavior.remote_api import extract_message_content, normalize_chat_url, post_chat_json
 from pala.behavior.schemas import env_response_format, intent_response_format
 from pala.config import load_config
 
