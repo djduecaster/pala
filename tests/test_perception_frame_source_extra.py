@@ -75,10 +75,13 @@ def test_dummy_and_camera_frame_source_timestamp_paths():
 
 
 def test_threaded_frame_source_timeout_and_error_paths():
-    slow = ThreadedFrameSource(_SlowSource(delay_s=0.05))
+    class _NeverCapturingThreaded(ThreadedFrameSource):
+        def _run(self) -> None:  # override to avoid background captures entirely
+            self._stop.wait()
+
+    slow = _NeverCapturingThreaded(_SlowSource(delay_s=0.05))
     try:
-        # Timeout path while waiting for first capture.
-        assert slow.get_latest(timeout_s=0.001) is None
+        assert slow.get_latest(timeout_s=0.01) is None
     finally:
         slow.shutdown()
 

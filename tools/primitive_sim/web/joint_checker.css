@@ -1,0 +1,123 @@
+.joint-checker-page {
+  overflow: hidden;
+}
+
+.joint-checker-page .layout {
+  height: 100dvh;
+  min-height: 100dvh;
+  padding: 12px;
+  gap: 12px;
+  grid-template-columns: minmax(360px, 1fr) minmax(320px, 420px);
+}
+
+.joint-checker-page .stage-card {
+  min-height: 0;
+  padding: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.joint-checker-page #simCanvas {
+  width: 100%;
+  height: 100%;
+  max-height: calc(100dvh - 24px);
+  aspect-ratio: 1080 / 700;
+}
+
+.joint-checker-page .control-card {
+  min-height: 0;
+  max-height: calc(100dvh - 24px);
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding-right: 12px;
+}
+
+.joint-slider-list {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+
+.joint-slider-item {
+  border: 1px solid #1d3a45;
+  background: rgba(8, 16, 24, 0.6);
+  border-radius: 8px;
+  padding: 8px;
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 6px;
+}
+
+.joint-slider-row {
+  display: grid;
+  grid-template-columns: minmax(88px, 120px) 1fr minmax(90px, 104px);
+  gap: 8px;
+  align-items: center;
+}
+
+.joint-slider-row label {
+  color: #b6d8d2;
+  font-size: 0.84rem;
+}
+
+.joint-slider-row input[type="range"] {
+  width: 100%;
+}
+
+.joint-slider-row input[type="number"] {
+  width: 100%;
+}
+
+.joint-slider-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: #9ec6bf;
+  font-size: 0.78rem;
+}
+
+#dhTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.8rem;
+}
+
+#dhTable th,
+#dhTable td {
+  text-align: left;
+  padding: 6px;
+  border-bottom: 1px solid #1e3842;
+}
+
+#dhTable th {
+  color: #a2cbc4;
+  font-weight: 600;
+}
+
+@media (max-width: 1220px) {
+  .joint-checker-page {
+    overflow: hidden;
+  }
+
+  .joint-checker-page .layout {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(280px, 44dvh) minmax(0, 1fr);
+    height: 100dvh;
+    min-height: 100dvh;
+  }
+
+  .joint-checker-page .stage-card {
+    min-height: 0;
+  }
+
+  .joint-checker-page #simCanvas {
+    height: 100%;
+    max-height: none;
+  }
+
+  .joint-checker-page .control-card {
+    max-height: none;
+    overflow: auto;
+  }
+}

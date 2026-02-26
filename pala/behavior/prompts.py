@@ -46,9 +46,9 @@ def build_planner_user_text(
         "You are the PALA intent proposer.",
         "The camera view is my view as the lamp.",
         "Return JSON only matching schema `pala.intent_proposals.v2`.",
-        "Return exactly 3 proposals ranked best to worst.",
+        f"Return exactly {proposal_count} proposals ranked best to worst.",
         "Every proposal must include all required fields from the schema.",
-        "Do not duplicate primitive values across all 3 proposals unless no safe alternative exists.",
+        "Do not duplicate primitive values across all proposals unless no safe alternative exists.",
         "If person_present is true in context, do not return all-idle proposals.",
         "Use the current mode in context_json to shape your proposal choices.",
         "Allowed intents: idle_presence, acknowledge_presence, track_user, scan_environment, react_to_change, reset_pose, affirmation.",
@@ -64,7 +64,6 @@ def build_planner_user_text(
         "safety": policy_safety,
         "style": policy_style,
         "planner_prompt": planner_prompt,
-        "proposal_count": proposal_count,
     }
     policy_json = json.dumps(policy, separators=(",", ":"), ensure_ascii=True)
     ctx_json = json.dumps(context, separators=(",", ":"), ensure_ascii=True)

@@ -4,6 +4,7 @@ from pala.behavior.decision_types import BehaviorMode
 from pala.behavior.governor import (
     Governor,
     GovernorConfig,
+    _allowed_primitives_for_mode,
     _presence_boost,
     _risk_penalty,
     _source_bias,
@@ -92,3 +93,16 @@ def test_governor_helper_branches_for_presence_and_fallbacks():
     assert _presence_boost({"person_present": True}, "nod") == 0.06  # noqa: SLF001
     assert _presence_boost({"person_present": True}, "hold") == -0.04  # noqa: SLF001
     assert _presence_boost({"person_present": True}, "home") == 0.0  # noqa: SLF001
+
+
+def test_governor_rejects_mode_disallowed_primitives():
+    gov = Governor(GovernorConfig(block_high_risk=False))
+    candidate = _candidate(primitive="home", intent="reset_pose", command={"rate_rad_s": 1.2})
+    out = gov.evaluate([candidate], mode=BehaviorMode.SCAN_EXPLORE, signals={"person_present": False})
+    assert out[0].valid is False
+    assert out[0].reject_reason == "mode_disallowed"
+
+    recover = gov.evaluate([candidate], mode=BehaviorMode.RECOVER_RESET, signals={"person_present": False})
+    assert recover[0].valid is True
+
+    assert "home" in _allowed_primitives_for_mode(BehaviorMode.RECOVER_RESET)  # noqa: SLF001

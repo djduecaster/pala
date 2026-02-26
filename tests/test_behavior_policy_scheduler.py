@@ -38,7 +38,7 @@ def test_build_payloads_include_media_first(tmp_path):
     frame = np.zeros((16, 16, 3), dtype=np.uint8)
     policy._frame_window.add_frame(frame, mono_ns=time.monotonic_ns())
 
-    env_payload = policy._build_env_payload(st=None)
+    env_payload = policy._build_env_payload()
     planner_payload = policy._build_planner_payload(st=None, now=0.0)
 
     assert env_payload is not None
@@ -63,7 +63,7 @@ def test_build_payloads_use_json_schema_for_gemini_provider(tmp_path):
     frame = np.zeros((16, 16, 3), dtype=np.uint8)
     policy._frame_window.add_frame(frame, mono_ns=time.monotonic_ns())
 
-    env_payload = policy._build_env_payload(st=None)
+    env_payload = policy._build_env_payload()
     planner_payload = policy._build_planner_payload(st=None, now=0.0)
     assert env_payload is not None
     assert planner_payload is not None

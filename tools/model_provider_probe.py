@@ -202,7 +202,7 @@ def _planner_payload(model: str, *, max_tokens: int, provider: str) -> Dict[str,
         policy_safety="Keep movement safe and calm.",
         policy_style="Use calm by default.",
         planner_prompt="Return concrete next action proposals.",
-        max_proposals=2,
+        max_proposals=3,
     )
     return {
         "model": model,
@@ -212,7 +212,7 @@ def _planner_payload(model: str, *, max_tokens: int, provider: str) -> Dict[str,
         "presence_penalty": 0.0,
         "max_tokens": int(max_tokens),
         "stream": False,
-        "response_format": intent_response_format(provider=provider),
+        "response_format": intent_response_format(),
     }
 
 

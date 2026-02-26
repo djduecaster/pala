@@ -10,6 +10,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import statistics
 import sys
@@ -266,29 +267,22 @@ def _build_planner_context(current_action: dict[str, Any], latest_env: dict[str,
 
 def _redact_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     redacted = json.loads(json.dumps(payload))
-    messages = redacted.get("messages")
-    if not isinstance(messages, list):
-        return redacted
-    for msg in messages:
-        if not isinstance(msg, dict):
-            continue
-        content = msg.get("content")
-        if isinstance(content, str):
-            continue
-        if not isinstance(content, list):
-            continue
-        for item in content:
-            if not isinstance(item, dict):
-                continue
-            if item.get("type") != "image_url":
-                continue
-            image_url = item.get("image_url")
-            if not isinstance(image_url, dict):
-                continue
-            url = image_url.get("url")
-            if isinstance(url, str):
-                image_url["url"] = f"<image_data_url chars={len(url)}>"
-    return redacted
+    return _redact_data_urls(redacted)
+
+
+_DATA_IMAGE_URL_RE = re.compile(r"^data:image/[a-zA-Z0-9.+-]+;base64,", re.IGNORECASE)
+
+
+def _redact_data_urls(value: Any) -> Any:
+    if isinstance(value, str):
+        if _DATA_IMAGE_URL_RE.match(value.strip()):
+            return f"<image_data_url chars={len(value)}>"
+        return value
+    if isinstance(value, list):
+        return [_redact_data_urls(item) for item in value]
+    if isinstance(value, dict):
+        return {str(key): _redact_data_urls(item) for key, item in value.items()}
+    return value
 
 
 def _message_structure(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -522,6 +516,8 @@ def _request_artifact(
     parse_error: Optional[str],
     show_preview_chars: int,
 ) -> dict[str, Any]:
+    redacted_content = _redact_data_urls(content)
+    redacted_reasoning = _redact_data_urls(reasoning)
     response_meta = {
         "http_ok": result.ok,
         "http_status": result.status_code,
@@ -561,8 +557,8 @@ def _request_artifact(
         "request_payload_redacted": _redact_payload(payload),
         "request_payload_bytes": len(json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("utf-8")),
         "response": response_meta,
-        "message_content_preview": _preview(content, max_chars=show_preview_chars),
-        "reasoning_content_preview": _preview(reasoning, max_chars=show_preview_chars),
+        "message_content_preview": _preview(redacted_content, max_chars=show_preview_chars),
+        "reasoning_content_preview": _preview(redacted_reasoning, max_chars=show_preview_chars),
         "parse": {
             "ok": parse_ok,
             "stage": parse_stage,
@@ -766,7 +762,7 @@ def main() -> int:
                     "presence_penalty": 0.0,
                     "max_tokens": env_max_tokens,
                     "stream": False,
-                    "response_format": env_response_format(provider=str(provider)),
+                    "response_format": env_response_format(),
                 }
                 result = post_chat_json(
                     url=chat_url,
@@ -820,8 +816,8 @@ def main() -> int:
                     parse_error=rec.error,
                     show_preview_chars=display.max_preview_chars,
                 )
-                artifact["raw_message_content"] = content
-                artifact["http_response_json"] = result.response_json
+                artifact["raw_message_content"] = _redact_data_urls(content)
+                artifact["http_response_json"] = _redact_data_urls(result.response_json)
                 _write_json(requests_out / f"{request_idx:04d}_env.json", artifact)
                 _print_request(artifact, cfg=display)
 
@@ -849,7 +845,7 @@ def main() -> int:
                     "presence_penalty": 0.0,
                     "max_tokens": planner_max_tokens,
                     "stream": False,
-                    "response_format": intent_response_format(provider=str(provider)),
+                    "response_format": intent_response_format(),
                 }
                 result = post_chat_json(
                     url=chat_url,
@@ -908,8 +904,8 @@ def main() -> int:
                     parse_error=rec.error,
                     show_preview_chars=display.max_preview_chars,
                 )
-                artifact["raw_message_content"] = content
-                artifact["http_response_json"] = result.response_json
+                artifact["raw_message_content"] = _redact_data_urls(content)
+                artifact["http_response_json"] = _redact_data_urls(result.response_json)
                 _write_json(requests_out / f"{request_idx:04d}_planner.json", artifact)
                 _print_request(artifact, cfg=display)
 

@@ -1,7 +1,7 @@
 import time
 
 import pala.main as pala_main
-from pala.config.load import LoopRates, LoggingConfig, CameraConfig, RobotConfig, DeepStreamConfig
+from pala.config.load import LoopRates, LoggingConfig, CameraConfig, RobotConfig, DeepStreamConfig, load_config
 
 
 class _CaptureLogger:
@@ -59,6 +59,10 @@ def test_runtime_starts_with_checked_in_default_config(monkeypatch):
 
     monkeypatch.setattr(pala_main, "maybe_logger", _logger_stub)
     monkeypatch.setenv("PALA_MAX_RUNTIME_S", "0.5")
+
+    cfg = load_config("config/robot.yaml")
+    cfg.cosmos.enabled = False
+    monkeypatch.setattr(pala_main, "load_config", lambda _path: cfg)
 
     result = pala_main.main(["--config", "config/robot.yaml"])
     assert result == 0

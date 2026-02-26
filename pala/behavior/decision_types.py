@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Optional
 
 
 class BehaviorMode(str, Enum):
@@ -37,20 +36,3 @@ class ModeDecision:
     next_mode: BehaviorMode
     reason: str
     transitioned: bool
-
-
-@dataclass(frozen=True)
-class StalenessSignal:
-    age_s: float
-    penalty: float
-    expired: bool
-
-
-@dataclass(frozen=True)
-class ArbiterDebug:
-    threshold: float
-    effective_current: float
-    margin: float
-    best_utility: float
-    reason: str
-    chosen_primitive: Optional[str]

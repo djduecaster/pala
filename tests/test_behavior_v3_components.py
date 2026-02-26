@@ -633,7 +633,8 @@ def test_governor_and_action_compiler_and_arbiter_branches():
         same_primitive_streak=1,
         mode=BehaviorMode.ACKNOWLEDGE,
     )
-    assert result.decision in {"commit", "keep_current"}
+    assert result.decision == "commit"
+    assert result.reason == "same_signature_retrigger"
     assert result.chosen is not None
 
 

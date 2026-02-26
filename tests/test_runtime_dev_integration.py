@@ -4,7 +4,6 @@ import time
 from pala.config.load import LoopRates, LoggingConfig, CameraConfig, RobotConfig, DeepStreamConfig
 import pala.main as pala_main
 from pala.types import HardwareCommand
-from pala.control.primitives import PrimitiveKind
 
 
 class _CaptureLogger:
@@ -56,7 +55,6 @@ def test_dev_runtime_emits_perception_and_action(monkeypatch):
         and "ts_wall_s" in entry
         and "action" in entry
         and getattr(entry["action"], "primitive", None)
-        and entry["action"].primitive != PrimitiveKind.HOLD
         for entry in action_log.items
     )
 

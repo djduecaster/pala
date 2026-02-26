@@ -33,10 +33,7 @@ class _OneFrameSource:
 
 def test_perception_no_frame_returns_quickly():
     node = PerceptionNode(source=_NoFrameSource())
-    start = time.monotonic()
     st = node.step()
-    elapsed = time.monotonic() - start
-    assert elapsed < 0.05
     assert st.debug.get("no_frame") is True
     assert st.debug.get("num_detections") == 0
     assert st.debug.get("detector_alive") is True

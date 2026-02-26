@@ -115,8 +115,6 @@ def _canonicalize_env_payload(data: Any) -> Optional[Dict[str, Any]]:
         for key in ("person_present", "zone_hint", "activity_level", "novelty"):
             if key in root:
                 features_raw[key] = root.get(key)
-    if not isinstance(features_raw, dict) and isinstance(scene_value, dict):
-        features_raw = dict(scene_value)
     if isinstance(scene_value, dict):
         for key in ("person_present", "zone_hint", "activity_level", "novelty"):
             if key in scene_value and key not in features_raw:

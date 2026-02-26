@@ -1,18 +1,91 @@
-# Primitive Simulator (Sidecar Tool)
+# Primitive Studio (Sidecar Tool)
 
-This simulator runs PALA control primitives offline and renders a simple 3D lamp playback in a browser.
+Primitive Studio is a sidecar workflow for quickly understanding what each primitive looks like before hardware runs.
 
-It is sidecar-only under `tools/` and reuses the existing control executor math from `pala/control/executor.py`.
+It keeps runtime behavior math aligned by reusing `TrajectoryExecutor` from `pala/control/executor.py`.
 
-## Quick start
+## Studio mode (recommended)
 
-Generate a suite trace and launch the viewer:
+Run the interactive tuning tool:
+
+```bash
+uv run python tools/primitive_sim/run.py --scenario studio --port 8766
+```
+
+Then open:
+
+```text
+http://127.0.0.1:8766/tools/primitive_sim/web/index.html?studio=1
+```
+
+Both Studio and Joint Checker pages are available from this same server instance.
+
+Studio features:
+- Select any runtime primitive (`hold`, `home`, `move_to`, `gaze_to`, `glance`, `nod`, `breath`, `orient_to_zone`)
+- Tune primitive command fields
+- Run preview simulation with 3D lamp playback
+- Save tuned values to baseline params
+- Reload from baselines on startup
+- Top bar mode buttons: switch between Studio and Joint Checker
+- `Run Suite Playback` button: generates `logs/primitive_sim/latest_trace.json` and opens playback
+
+## Joint checker mode
+
+Run the dedicated joint slider page:
+
+```bash
+uv run python tools/primitive_sim/run.py --scenario joint_checker --port 8766
+```
+
+Then open:
+
+```text
+http://127.0.0.1:8766/tools/primitive_sim/web/joint_checker.html
+```
+
+Both Joint Checker and Studio pages are available from this same server instance.
+
+Joint checker features:
+- Per-joint sliders generated from `joint_names` + `joint_limits_rad`
+- Live angle readouts in radians and degrees
+- 3D pose rendering driven by current slider values
+- DH parameter table loaded from `config/robot.yaml`
+- Top bar mode buttons and `Run Suite Playback` button
+
+## Baseline params file
+
+Default path:
+
+```text
+tools/primitive_sim/baseline_params.json
+```
+
+Override path:
+
+```bash
+uv run python tools/primitive_sim/run.py --scenario studio --baseline path/to/baseline.json
+```
+
+Baseline schema stores command defaults per primitive (command fields only):
+
+```json
+{
+  "version": 1,
+  "primitives": {
+    "breath": {"amp_rad": 0.08, "period_s": 6.5, "rate_rad_s": 1.0}
+  }
+}
+```
+
+## Trace modes (existing CLI)
+
+Generate suite trace:
 
 ```bash
 uv run python tools/primitive_sim/run.py --scenario suite --serve
 ```
 
-Generate one primitive:
+Generate one primitive trace:
 
 ```bash
 uv run python tools/primitive_sim/run.py \
@@ -28,12 +101,6 @@ Generate without serving:
 
 ```bash
 uv run python tools/primitive_sim/run.py --scenario suite --output logs/primitive_sim/latest_trace.json
-```
-
-Then open:
-
-```text
-/tools/primitive_sim/web/index.html?trace=/logs/primitive_sim/latest_trace.json
 ```
 
 ## Scripted scenarios
@@ -60,31 +127,26 @@ Script format:
 }
 ```
 
-Notes:
-- `action` uses the same schema as `ActionPlan` payloads.
-- If `stop_on_done` is omitted, non-continuous primitives stop on completion and continuous primitives (`hold`, `breath`) run until `max_s`.
+## Viewer geometry sources
 
-## Viewer Kinematic Model
+Viewer geometry is included in trace metadata and used by the 3D renderer.
 
-The 3D viewer uses a DH-like chain aligned to the current lamp build:
-- fixed floor base + long vertical mast
-- yaw joint at mast top (rotates around vertical axis)
-- `pitch1` shoulder with default zero pose pointing straight up
-- `pitch2` elbow with zero pose collinear with upper arm
-- `roll` twist around the forearm tube
-- `pitch3` lampshade tilt (end-effector pitch)
+Priority:
+1. `dh_params`-derived values from `config/robot.yaml` (link lengths + theta offsets)
+2. Explicit overrides from `lamp_geometry` sections
+3. Viewer defaults for missing values
 
-## Geometry from config/robot.yaml
+Pitch convention:
+- Viewer defines all pitch joints about local `-Z`.
+- Viewer applies `theta = q + theta0`, so positive `q` pitches forward by construction.
 
-If present, the simulator reads lamp geometry from config and embeds it in trace metadata.
-
-Supported config locations:
+Supported override locations:
 - `lamp_geometry`
 - `sim_viewer.lamp_geometry`
 - `primitive_sim.lamp_geometry`
 - `tools.primitive_sim.lamp_geometry`
 
-Example (meters):
+Example:
 
 ```yaml
 sim_viewer:

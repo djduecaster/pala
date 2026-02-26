@@ -22,9 +22,11 @@ def test_deepstream_detector_async_returns_latest():
     det = _TestDetector()
     frame = np.zeros((10, 10, 3), dtype=np.uint8)
     try:
-        det.detect(frame)
-        time.sleep(0.01)
         out = det.detect(frame)
+        deadline = time.monotonic() + 0.2
+        while not out and time.monotonic() < deadline:
+            time.sleep(0.002)
+            out = det.detect(frame)
         assert out
         assert isinstance(out[0], Detection)
     finally:

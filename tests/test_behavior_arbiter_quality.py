@@ -109,8 +109,10 @@ def test_arbiter_limits_repeated_same_primitive_with_alternate_choice():
         same_primitive_streak=4,
         mode=BehaviorMode.SCAN_EXPLORE,
     )
-    assert result.chosen is not None
-    assert result.chosen.candidate.proposal.primitive in {"glance", "breath"}
+    assert result.decision == "commit"
+    assert result.reason == "utility_beats_threshold"
+    assert result.chosen is alt
+    assert result.chosen.candidate.proposal.primitive == "glance"
 
 
 def test_arbiter_uses_candidate_min_dwell_override_when_interrupts_are_disallowed():
@@ -134,6 +136,82 @@ def test_arbiter_uses_candidate_min_dwell_override_when_interrupts_are_disallowe
     )
     assert result.decision == "keep_current"
     assert result.reason == "min_dwell_not_met"
+
+
+def test_arbiter_applies_orient_cooldown_to_reduce_same_zone_chatter():
+    arb = Arbiter(ArbiterConfig(min_dwell_s=0.0, base_margin=0.0, orient_cooldown_s=2.0))
+    current = ActionPlan(
+        primitive=PrimitiveKind.ORIENT_TO_ZONE,
+        command={"zone": "left", "amp_rad": 0.2, "rate_rad_s": 1.2},
+        confidence=0.7,
+        style="focused",
+    )
+    candidate = _governed(
+        proposal=_proposal(
+            primitive="orient_to_zone",
+            command={"zone": "left", "amp_rad": 0.24, "rate_rad_s": 1.2},
+        ),
+        utility=1.1,
+    )
+
+    early = arb.select(
+        candidates=[candidate],
+        current_action=current,
+        current_utility=0.5,
+        action_age_s=0.5,
+        no_commit_s=0.5,
+        recent_switches=0,
+        planner_open_breaker=False,
+        same_primitive_streak=1,
+        mode=BehaviorMode.ENGAGE_TRACK,
+    )
+    assert early.decision == "keep_current"
+    assert early.reason == "orient_cooldown"
+
+    late = arb.select(
+        candidates=[candidate],
+        current_action=current,
+        current_utility=0.5,
+        action_age_s=2.3,
+        no_commit_s=2.3,
+        recent_switches=0,
+        planner_open_breaker=False,
+        same_primitive_streak=1,
+        mode=BehaviorMode.ENGAGE_TRACK,
+    )
+    assert late.decision == "commit"
+    assert late.reason == "utility_beats_threshold"
+
+
+def test_arbiter_allows_orient_zone_switch_during_cooldown_window():
+    arb = Arbiter(ArbiterConfig(min_dwell_s=0.0, base_margin=0.0, orient_cooldown_s=2.0))
+    current = ActionPlan(
+        primitive=PrimitiveKind.ORIENT_TO_ZONE,
+        command={"zone": "left", "amp_rad": 0.2, "rate_rad_s": 1.2},
+        confidence=0.7,
+        style="focused",
+    )
+    candidate = _governed(
+        proposal=_proposal(
+            primitive="orient_to_zone",
+            command={"zone": "right", "amp_rad": 0.2, "rate_rad_s": 1.2},
+        ),
+        utility=1.1,
+    )
+
+    result = arb.select(
+        candidates=[candidate],
+        current_action=current,
+        current_utility=0.5,
+        action_age_s=0.5,
+        no_commit_s=0.5,
+        recent_switches=0,
+        planner_open_breaker=False,
+        same_primitive_streak=1,
+        mode=BehaviorMode.ENGAGE_TRACK,
+    )
+    assert result.decision == "commit"
+    assert result.reason == "utility_beats_threshold"
 
 
 def test_arbiter_planner_breaker_adds_remote_threshold_penalty():

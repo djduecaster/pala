@@ -15,6 +15,7 @@ class ArbiterConfig:
     idle_after_s: float = 5.0
     terminal_retrigger_s: float = 1.4
     max_same_primitive_streak: int = 3
+    orient_cooldown_s: float = 2.0
 
 
 @dataclass
@@ -83,6 +84,22 @@ class Arbiter:
             return ArbiterResult(
                 decision="keep_current",
                 reason="same_signature",
+                chosen=best,
+                best_utility=best.utility,
+                threshold=0.0,
+                effective_current=0.0,
+                margin=0.0,
+            )
+
+        if (
+            current_action.primitive.value == "orient_to_zone"
+            and best.candidate.proposal.primitive == "orient_to_zone"
+            and action_age_s < max(0.0, self._cfg.orient_cooldown_s)
+            and _zone_from_action(current_action) == _zone_from_proposal(best)
+        ):
+            return ArbiterResult(
+                decision="keep_current",
+                reason="orient_cooldown",
                 chosen=best,
                 best_utility=best.utility,
                 threshold=0.0,
@@ -209,3 +226,25 @@ def _best_non_matching(valids: List[GovernedCandidate], primitive: str) -> Optio
     if not non_matching:
         return None
     return max(non_matching, key=lambda item: item.utility)
+
+
+def _zone_from_action(action: ActionPlan) -> Optional[str]:
+    command = action.command
+    if is_dataclass(command):
+        zone_value = getattr(command, "zone", None)
+    elif isinstance(command, Mapping):
+        zone_value = command.get("zone")
+    else:
+        zone_value = None
+    if not isinstance(zone_value, str):
+        return None
+    zone = zone_value.strip().lower()
+    return zone if zone in {"left", "center", "right"} else None
+
+
+def _zone_from_proposal(item: GovernedCandidate) -> Optional[str]:
+    zone_value = item.candidate.proposal.command.get("zone")
+    if not isinstance(zone_value, str):
+        return None
+    zone = zone_value.strip().lower()
+    return zone if zone in {"left", "center", "right"} else None

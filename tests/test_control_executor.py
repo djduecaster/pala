@@ -1,5 +1,4 @@
 import math
-import time
 
 from pala.control.executor import TrajectoryExecutor
 from pala.types import ActionPlan
@@ -98,7 +97,10 @@ def test_control_replaces_active_hold_without_cancel():
     assert executor.control_state.active_kind == PrimitiveKind.MOVE_TO
 
 
-def test_control_glance_finishes():
+def test_control_glance_finishes(monkeypatch):
+    fake_time = {"t": 1_000.0}
+    monkeypatch.setattr("pala.control.executor.time.monotonic", lambda: fake_time["t"])
+
     limits = [[-1.0, 1.0] for _ in range(5)]
     executor = TrajectoryExecutor(limits)
     glance = ActionPlan(
@@ -108,7 +110,7 @@ def test_control_glance_finishes():
     )
 
     executor.step(glance, dt=0.02)
-    time.sleep(0.06)
+    fake_time["t"] += 0.1
     executor.step(glance, dt=0.08)
 
     assert executor.control_state.status.value == "done"

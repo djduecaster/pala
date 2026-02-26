@@ -85,6 +85,29 @@ def test_maybe_logger_writes_jsonl(tmp_path):
     assert maybe_logger(None) is None
 
 
+def test_maybe_logger_redacts_data_image_urls(tmp_path):
+    path = tmp_path / "logs" / "events.jsonl"
+    logger = maybe_logger(str(path))
+    assert logger is not None
+    logger.write(
+        {
+            "payload": {
+                "a": "data:image/jpeg;base64,ABCDEF",
+                "b": ["ok", "data:image/png;base64,XYZ"],
+                "c": {"url": "http://example.com/image.jpg"},
+            }
+        }
+    )
+    logger.close()
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    row = json.loads(lines[0])
+    assert row["payload"]["a"] == "<image_data_url chars=29>"
+    assert row["payload"]["b"][1] == "<image_data_url chars=25>"
+    assert row["payload"]["c"]["url"] == "http://example.com/image.jpg"
+
+
 def test_jetson_detector_stub_raises_not_implemented():
     detector = JetsonDetector()
     frame = np.zeros((2, 2, 3), dtype=np.uint8)

@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>PALA Primitive Simulator</title>
+    <title>PALA Primitive Studio</title>
     <link rel="stylesheet" href="styles.css">
   </head>
   <body>
@@ -14,15 +14,52 @@
 
       <aside class="control-card">
         <header>
-          <h1>PALA Primitive Sim</h1>
+          <h1>PALA Primitive Studio</h1>
           <p id="traceSource">Trace: loading...</p>
+          <p id="modeLabel">Mode: bootstrap</p>
         </header>
+
+        <section class="group mode-group">
+          <div class="row mode-nav">
+            <a class="nav-btn" href="/tools/primitive_sim/web/index.html?studio=1">Studio</a>
+            <a class="nav-btn" href="/tools/primitive_sim/web/joint_checker.html">Joint Checker</a>
+            <button id="runSuiteBtn" type="button">Run Suite Playback</button>
+          </div>
+          <p id="suiteStatus" class="muted">Suite: idle</p>
+        </section>
+
+        <section id="studioGroup" class="group">
+          <div class="row">
+            <label class="inline stack" for="primitiveSelect">
+              Primitive
+              <select id="primitiveSelect"></select>
+            </label>
+            <label class="inline stack" for="styleSelect">
+              Style
+              <select id="styleSelect"></select>
+            </label>
+            <label class="inline stack" for="durationInput">
+              Duration (s)
+              <input id="durationInput" type="number" min="0.05" max="20" step="0.05" value="2.0">
+            </label>
+          </div>
+
+          <div id="paramForm" class="param-form"></div>
+
+          <div class="row">
+            <button id="runBtn" type="button">Run Preview</button>
+            <button id="resetBaselineBtn" type="button">Reset To Baseline</button>
+            <button id="saveBaselineBtn" type="button">Save Baseline</button>
+          </div>
+
+          <p id="baselineStatus">Baseline: pending...</p>
+        </section>
 
         <section class="group">
           <div class="row">
             <button id="playPauseBtn" type="button">Play</button>
             <button id="resetBtn" type="button">Reset</button>
-            <label class="inline">
+            <label class="inline" for="speedSelect">
               Speed
               <select id="speedSelect">
                 <option value="0.25">0.25x</option>

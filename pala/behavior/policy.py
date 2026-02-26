@@ -5,7 +5,6 @@ from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 import io
-import logging
 import time
 from typing import Any, Callable, Dict, Mapping, Optional
 
@@ -38,9 +37,6 @@ from .schemas import env_response_format, intent_response_format
 from .trace_bus import TraceBus
 from .types import ProposalCandidate, ProposerResponse
 from .world_state_store import DecisionSnapshot, EnvironmentSnapshot, WorldStateStore
-
-logger = logging.getLogger(__name__)
-
 
 @dataclass
 class BehaviorPolicyConfig:
@@ -81,6 +77,7 @@ class BehaviorPolicyConfig:
 
     arbiter_min_dwell_s: float = 1.2
     arbiter_base_margin: float = 0.08
+    arbiter_orient_cooldown_s: float = 1.2
 
     idle_after_s: float = 0.0
     idle_glance_after_s: float = 0.8
@@ -108,7 +105,6 @@ class BehaviorPolicyConfig:
 class _InFlightCall:
     request_id: int
     started_mono_s: float
-    payload_meta: Mapping[str, Any]
     future: Future[ModelResponse]
 
 
@@ -124,11 +120,7 @@ class BehaviorPolicy:
         config: Optional[BehaviorPolicyConfig] = None,
         clock: Optional[Callable[[], float]] = None,
         frame_cache: Optional[Any] = None,
-        dwell_s: float = 2.0,
-        cooldown_s: float = 1.0,
-        max_hold_s: float = 2.0,
     ):
-        _ = (dwell_s, cooldown_s, max_hold_s)
         self._cfg = config or BehaviorPolicyConfig()
         self._world_state = world_state or WorldStateStore()
         self._clock = clock or time.monotonic
@@ -150,6 +142,7 @@ class BehaviorPolicy:
                 min_dwell_s=max(0.0, float(self._cfg.arbiter_min_dwell_s)),
                 base_margin=max(0.0, float(self._cfg.arbiter_base_margin)),
                 idle_after_s=max(0.2, float(self._cfg.idle_after_s)),
+                orient_cooldown_s=max(0.0, float(self._cfg.arbiter_orient_cooldown_s)),
             )
         )
         self._idle_engine = IdleEngine(
@@ -425,7 +418,7 @@ class BehaviorPolicy:
             self._env_summarizer.mark_pending({"queued": True, "ts_mono_s": now})
             return
 
-        payload = self._build_env_payload(st=st)
+        payload = self._build_env_payload()
         if payload is None:
             return
         if not self._env_summarizer.submit_or_replace(payload):
@@ -437,7 +430,7 @@ class BehaviorPolicy:
 
         request = payload["request"]
         future = self._executor.submit(self._model_client.chat, request)
-        self._env_inflight = _InFlightCall(req_id, now, payload, future)
+        self._env_inflight = _InFlightCall(req_id, now, future)
         self._write_log(
             self._env_log,
             {
@@ -483,7 +476,7 @@ class BehaviorPolicy:
 
         request = payload["request"]
         future = self._executor.submit(self._model_client.chat, request)
-        self._planner_inflight = _InFlightCall(req_id, now, payload, future)
+        self._planner_inflight = _InFlightCall(req_id, now, future)
         self._write_log(
             self._planner_log,
             {
@@ -717,7 +710,7 @@ class BehaviorPolicy:
             self._last_planner_submit_s = now - (1.0 / max(0.05, planner_hz))
             self._maybe_schedule_planner(st=st, now=now)
 
-    def _build_env_payload(self, *, st: Optional[PerceptionState]) -> Optional[Dict[str, Any]]:
+    def _build_env_payload(self) -> Optional[Dict[str, Any]]:
         frames = self._frame_window.sample(max_frames=self._cfg.env_max_frames)
         if len(frames) < max(1, int(self._cfg.request_min_fresh_frames)):
             return None

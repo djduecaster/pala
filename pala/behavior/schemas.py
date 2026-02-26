@@ -14,8 +14,8 @@ INTENT_PROPOSALS_SCHEMA: Dict[str, Any] = {
         "notes_short": {"type": "string", "maxLength": 280},
         "proposals": {
             "type": "array",
-            "minItems": 3,
-            "maxItems": 3,
+            "minItems": 1,
+            "maxItems": 5,
             "items": {"$ref": "#/$defs/Proposal"},
         },
     },

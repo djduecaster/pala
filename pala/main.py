@@ -49,8 +49,6 @@ def main(argv: Optional[list[str]] = None) -> int:
     behavior = BehaviorPolicy(
         config=_build_behavior_config(cfg, run_log_dir=run_log_dir),
         frame_cache=latest_frame,
-        dwell_s=2.0,
-        cooldown_s=1.0,
     )
     executor = TrajectoryExecutor(cfg.joint_limits_rad, style_profiles=getattr(cfg, "style_profiles", None))
     servo = _build_servo(cfg)
@@ -534,7 +532,8 @@ def _build_behavior_config(cfg, *, run_log_dir: Optional[str] = None) -> Behavio
 
     planner_hz_cfg = float(getattr(cosmos, "planner_hz", 0.5))
     base_ttl_s = max(0.2, float(getattr(cosmos, "response_ttl_ms", 10000)) / 1000.0)
-    min_ttl_s = max(10.0, 2.5 * (1.0 / max(0.05, planner_hz_cfg)))
+    # Keep proposals fresh relative to planner cadence; avoid long stale windows.
+    min_ttl_s = max(1.5, 1.5 * (1.0 / max(0.05, planner_hz_cfg)))
 
     return BehaviorPolicyConfig(
         remote_enabled=remote_enabled,
@@ -564,6 +563,7 @@ def _build_behavior_config(cfg, *, run_log_dir: Optional[str] = None) -> Behavio
         planner_use_env_context=bool(getattr(cosmos, "planner_use_env_context", True)),
         arbiter_min_dwell_s=float(getattr(cosmos, "arbiter_min_dwell_s", 1.2)),
         arbiter_base_margin=arbiter_margin_cfg,
+        arbiter_orient_cooldown_s=float(getattr(cosmos, "arbiter_orient_cooldown_s", 1.2)),
         idle_after_s=idle_after_cfg,
         idle_glance_after_s=idle_glance_after_cfg,
         mode_min_dwell_s=float(getattr(cosmos, "mode_min_dwell_s", 1.0)),

@@ -44,6 +44,10 @@ class Governor:
                 out.append(GovernedCandidate(candidate=cand, valid=False, reject_reason="home_blocked"))
                 continue
 
+            if proposal.primitive not in _allowed_primitives_for_mode(mode):
+                out.append(GovernedCandidate(candidate=cand, valid=False, reject_reason="mode_disallowed"))
+                continue
+
             reason = _validate_command(proposal.primitive, proposal.command)
             if reason is not None:
                 out.append(GovernedCandidate(candidate=cand, valid=False, reject_reason=reason))
@@ -122,3 +126,14 @@ def _presence_boost(signals: Mapping[str, object], primitive: str) -> float:
     if primitive in {"hold", "breath"}:
         return -0.04
     return 0.0
+
+
+def _allowed_primitives_for_mode(mode: BehaviorMode) -> set[str]:
+    table = {
+        BehaviorMode.IDLE_PRESENCE: {"hold", "breath", "glance"},
+        BehaviorMode.ENGAGE_TRACK: {"hold", "breath", "glance", "nod", "orient_to_zone"},
+        BehaviorMode.ACKNOWLEDGE: {"hold", "breath", "glance", "nod", "orient_to_zone"},
+        BehaviorMode.SCAN_EXPLORE: {"hold", "breath", "glance", "orient_to_zone"},
+        BehaviorMode.RECOVER_RESET: {"home", "hold", "breath"},
+    }
+    return table.get(mode, {"hold", "breath"})

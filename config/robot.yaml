@@ -34,11 +34,12 @@ dh_params:
   pitch1_a: 0.38735
   pitch1_alpha: 0.0
   pitch1_d: 0.0
+  # Pitch frames in sim viewer are defined about local -Z, so positive q pitches forward.
   pitch1_theta0_deg: -90
   pitch2_a: 0.0
   pitch2_alpha: -1.57079633
   pitch2_d: 0.0
-  pitch2_theta0_deg: 0
+  pitch2_theta0_deg: 90
   roll_a: 0.0
   roll_alpha: 1.57079633
   roll_d: 0.32385
@@ -107,20 +108,21 @@ cosmos:
   policy_style: "Default style is calm; use curious for gentle tracking and focused for attentive task support."
   # Behavior cadence and parser policy.
   planner_hz: 0.5
-  summarizer_hz: 1.0
+  summarizer_hz: 0.2
   planner_event_delta_threshold: 0.65
   planner_event_cooldown_s: 0.7
   planner_max_proposals: 3
   planner_use_env_context: true
   arbiter_min_dwell_s: 1.2
   arbiter_base_margin: 0.10
+  arbiter_orient_cooldown_s: 1.2
   idle_after_s: 6.0
   idle_glance_after_s: 10.0
   mode_min_dwell_s: 1.0
   mode_engage_person_conf: 0.45
   mode_disengage_person_conf: 0.20
-  stale_penalty_per_s: 0.05
-  stale_expire_s: 14.0
+  stale_penalty_per_s: 0.08
+  stale_expire_s: 7.0
   planner_max_frames: 1
   planner_include_latest_frame: true
   # Scene summarizer cadence.
@@ -135,7 +137,7 @@ cosmos:
   behavior_client_error_backoff_s: 5.0
   env_max_tokens: 420
   planner_max_tokens: 480
-  response_ttl_ms: 12000
+  response_ttl_ms: 5000
   behavior_env_log_path: "logs/behavior_env.jsonl"
   behavior_planner_log_path: "logs/behavior_planner.jsonl"
   behavior_reasoning_log_path: "logs/behavior_reasoning.jsonl"

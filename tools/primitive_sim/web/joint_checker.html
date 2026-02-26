@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>PALA Joint Checker</title>
+    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="joint_checker.css">
+  </head>
+  <body class="joint-checker-page">
+    <main class="layout">
+      <section class="stage-card">
+        <canvas id="simCanvas" width="1080" height="700"></canvas>
+      </section>
+
+      <aside class="control-card">
+        <header>
+          <h1>PALA Joint Checker</h1>
+          <p id="configPath">Config: loading...</p>
+          <p id="modeLabel">Mode: DH + limits</p>
+        </header>
+
+        <section class="group mode-group">
+          <div class="row mode-nav">
+            <a class="nav-btn" href="/tools/primitive_sim/web/index.html?studio=1">Studio</a>
+            <a class="nav-btn" href="/tools/primitive_sim/web/joint_checker.html">Joint Checker</a>
+            <button id="runSuiteBtn" type="button">Run Suite Playback</button>
+          </div>
+          <p id="suiteStatus" class="muted">Suite: idle</p>
+        </section>
+
+        <section class="group">
+          <div class="row">
+            <button id="zeroBtn" type="button">Zero Pose</button>
+            <button id="midBtn" type="button">Mid Limits</button>
+            <button id="copyBtn" type="button">Copy Vector</button>
+          </div>
+          <p class="muted">Use sliders to set control angles directly (radians). Viewer applies DH-derived zero offsets.</p>
+        </section>
+
+        <section class="group">
+          <div id="jointSliders" class="joint-slider-list"></div>
+        </section>
+
+        <section class="group">
+          <pre id="statusBox">Loading...</pre>
+        </section>
+
+        <section class="group">
+          <table id="jointTable">
+            <thead>
+              <tr>
+                <th>Joint</th>
+                <th>Angle (rad)</th>
+                <th>Angle (deg)</th>
+                <th>Norm</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </section>
+
+        <section class="group">
+          <table id="dhTable">
+            <thead>
+              <tr>
+                <th>DH param</th>
+                <th>Value</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </section>
+      </aside>
+    </main>
+
+    <script src="joint_checker.js"></script>
+  </body>
+</html>

@@ -62,7 +62,7 @@ def test_policy_payload_shapes_and_context(tmp_path):
     frame = np.zeros((8, 8, 3), dtype=np.uint8)
     policy._frame_window.add_frame(frame, mono_ns=time.monotonic_ns())  # noqa: SLF001
 
-    env_payload = policy._build_env_payload(st=None)  # noqa: SLF001
+    env_payload = policy._build_env_payload()  # noqa: SLF001
     planner_payload = policy._build_planner_payload(st=None, now=10.0)  # noqa: SLF001
     assert env_payload is not None
     assert planner_payload is not None
@@ -104,7 +104,6 @@ def test_policy_watchdog_timeout_converts_to_transport_error(tmp_path):
     policy._env_inflight = _InFlightCall(  # noqa: SLF001
         request_id=100,
         started_mono_s=1.0,
-        payload_meta={},
         future=pending,
     )
     policy._drain_env_inflight(st=None, now=10.0)  # noqa: SLF001
@@ -117,7 +116,6 @@ def test_policy_safe_future_result_guard(tmp_path):
     call = _InFlightCall(
         request_id=1,
         started_mono_s=0.0,
-        payload_meta={},
         future=_DoneFuture("bad"),
     )
     result = policy._safe_future_result(call=call, now=1.0)  # noqa: SLF001

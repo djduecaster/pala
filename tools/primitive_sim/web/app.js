@@ -10,6 +10,19 @@ const statusBox = document.getElementById("statusBox");
 const jointTableBody = document.querySelector("#jointTable tbody");
 const traceSource = document.getElementById("traceSource");
 const fileInput = document.getElementById("fileInput");
+const modeLabel = document.getElementById("modeLabel");
+
+const studioGroup = document.getElementById("studioGroup");
+const primitiveSelect = document.getElementById("primitiveSelect");
+const styleSelect = document.getElementById("styleSelect");
+const durationInput = document.getElementById("durationInput");
+const paramForm = document.getElementById("paramForm");
+const baselineStatus = document.getElementById("baselineStatus");
+const runBtn = document.getElementById("runBtn");
+const resetBaselineBtn = document.getElementById("resetBaselineBtn");
+const saveBaselineBtn = document.getElementById("saveBaselineBtn");
+const runSuiteBtn = document.getElementById("runSuiteBtn");
+const suiteStatus = document.getElementById("suiteStatus");
 
 const state = {
   trace: null,
@@ -37,12 +50,19 @@ const state = {
     pitch3: -1,
     pitch: [],
   },
+  studio: {
+    enabled: false,
+    specs: [],
+    styles: [],
+    baseline: null,
+    selectedPrimitive: "",
+    commandDraft: {},
+    dirty: false,
+  },
 };
 
 const RAD_TO_DEG = 180 / Math.PI;
 
-// DH-like lamp geometry (meters, approximate): fixed mast -> yaw hub ->
-// pitch1 upper arm -> pitch2 forearm -> roll tube twist -> pitch3 shade tilt.
 const LAMP_GEOM = Object.freeze({
   baseRadius: 0.18,
   baseThickness: 0.028,
@@ -55,10 +75,8 @@ const LAMP_GEOM = Object.freeze({
   shadeLen: 0.18,
   shadeRearRadius: 0.068,
   shadeFrontRadius: 0.046,
-  // Joint zero-angle frame offsets (rad) for viewer FK.
-  // pitch1 default zero points straight up.
-  pitch1ZeroOffsetRad: Math.PI / 2,
-  pitch2ZeroOffsetRad: 0.0,
+  pitch1ZeroOffsetRad: -Math.PI / 2,
+  pitch2ZeroOffsetRad: Math.PI / 2,
   pitch3ZeroOffsetRad: 0.0,
 });
 
@@ -76,6 +94,10 @@ const LAMP_GEOM_POSITIVE_KEYS = new Set([
   "shadeRearRadius",
   "shadeFrontRadius",
 ]);
+
+function deepClone(v) {
+  return JSON.parse(JSON.stringify(v));
+}
 
 function clamp(v, lo, hi) {
   return Math.max(lo, Math.min(hi, v));
@@ -169,6 +191,11 @@ function rotZ(a) {
     [s, c, 0],
     [0, 0, 1],
   ];
+}
+
+// Pitch frames are defined with local -Z axis so +pitch moves forward by construction.
+function rotPitch(a) {
+  return rotZ(-a);
 }
 
 function resizeCanvas() {
@@ -394,16 +421,16 @@ function forwardKinematics(sample) {
   const yawHub = vecAdd(mastTop, [0, g.hubRise, 0]);
 
   const rotYaw = rotY(yaw);
-  const rotShoulder = matMul(rotYaw, rotZ(pitch1));
+  const rotShoulder = matMul(rotYaw, rotPitch(pitch1));
   const elbow = vecAdd(yawHub, matVec(rotShoulder, [g.upperArmLen, 0, 0]));
 
-  const rotElbow = matMul(rotShoulder, rotZ(pitch2));
+  const rotElbow = matMul(rotShoulder, rotPitch(pitch2));
   const wrist = vecAdd(elbow, matVec(rotElbow, [g.foreArmLen, 0, 0]));
 
   const rotRoll = matMul(rotElbow, rotX(roll));
   const headPivot = vecAdd(wrist, matVec(rotRoll, [g.wristStubLen, 0, 0]));
 
-  const rotHead = matMul(rotRoll, rotZ(pitch3));
+  const rotHead = matMul(rotRoll, rotPitch(pitch3));
   const shadeRear = vecAdd(headPivot, matVec(rotHead, [g.shadeNeckLen, 0, 0]));
   const shadeFront = vecAdd(shadeRear, matVec(rotHead, [0, -g.shadeLen, 0]));
 
@@ -489,7 +516,7 @@ function drawScene(sample) {
 
   ctx.fillStyle = "rgba(225, 245, 241, 0.82)";
   ctx.font = `${Math.max(14, Math.floor(canvas.height * 0.025))}px Space Grotesk, sans-serif`;
-  ctx.fillText("Drag canvas to orbit | DH-like chain: yaw -> pitch1 -> pitch2 -> roll -> pitch3", 16, 28);
+  ctx.fillText("Drag canvas to orbit | Chain: yaw -> pitch1 -> pitch2 -> roll -> pitch3", 16, 28);
 }
 
 function buildJointRows() {
@@ -652,6 +679,368 @@ function animate(ts) {
   requestAnimationFrame(animate);
 }
 
+async function apiGet(path) {
+  const res = await fetch(path, { cache: "no-store" });
+  if (!res.ok) {
+    const txt = await res.text();
+    throw new Error(`${res.status} ${res.statusText}: ${txt}`);
+  }
+  return res.json();
+}
+
+async function apiPost(path, payload) {
+  const res = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const body = await res.text();
+  let data = null;
+  try {
+    data = body ? JSON.parse(body) : {};
+  } catch (err) {
+    throw new Error(`${res.status} ${res.statusText}: invalid JSON response`);
+  }
+  if (!res.ok) {
+    throw new Error(data?.error || `${res.status} ${res.statusText}`);
+  }
+  return data;
+}
+
+function defaultDurationForPrimitive(primitive) {
+  if (primitive === "breath") {
+    return 5.0;
+  }
+  if (primitive === "hold") {
+    return 3.0;
+  }
+  if (primitive === "home") {
+    return 2.0;
+  }
+  if (primitive === "move_to") {
+    return 2.4;
+  }
+  if (primitive === "gaze_to") {
+    return 2.0;
+  }
+  if (primitive === "glance") {
+    return 1.2;
+  }
+  if (primitive === "nod") {
+    return 1.5;
+  }
+  if (primitive === "orient_to_zone") {
+    return 1.8;
+  }
+  return 2.0;
+}
+
+function setMode(text) {
+  modeLabel.textContent = `Mode: ${text}`;
+}
+
+function setBaselineStatus(text, isError = false) {
+  baselineStatus.textContent = text;
+  baselineStatus.className = isError ? "bad" : "ok";
+}
+
+function setSuiteStatus(text, isError = false) {
+  if (!suiteStatus) {
+    return;
+  }
+  suiteStatus.textContent = text;
+  suiteStatus.className = isError ? "muted bad" : "muted";
+}
+
+function getSelectedSpec() {
+  const id = state.studio.selectedPrimitive;
+  return state.studio.specs.find((s) => s.id === id) || null;
+}
+
+function baselineCommandFor(primitiveId) {
+  const src = state.studio.baseline?.primitives?.[primitiveId];
+  if (src && typeof src === "object") {
+    return deepClone(src);
+  }
+  return {};
+}
+
+function markDirty(isDirty) {
+  state.studio.dirty = Boolean(isDirty);
+  const dirtyTag = state.studio.dirty ? " (unsaved)" : "";
+  setBaselineStatus(`Baseline: ${state.studio.selectedPrimitive}${dirtyTag}`);
+}
+
+function createNumberInput(value, spec) {
+  const input = document.createElement("input");
+  input.type = "number";
+  input.value = Number.isFinite(Number(value)) ? String(value) : "0";
+  if (Number.isFinite(Number(spec.min))) {
+    input.min = String(spec.min);
+  }
+  if (Number.isFinite(Number(spec.max))) {
+    input.max = String(spec.max);
+  }
+  if (Number.isFinite(Number(spec.step))) {
+    input.step = String(spec.step);
+  }
+  return input;
+}
+
+function renderParamForm() {
+  paramForm.innerHTML = "";
+  const spec = getSelectedSpec();
+  if (!spec) {
+    return;
+  }
+
+  if (!Array.isArray(spec.params) || spec.params.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "muted";
+    empty.textContent = "No command parameters for this primitive.";
+    paramForm.appendChild(empty);
+    return;
+  }
+
+  spec.params.forEach((paramSpec) => {
+    const item = document.createElement("div");
+    item.className = "param-item";
+
+    const label = document.createElement("label");
+    label.className = "param-label";
+    label.textContent = paramSpec.label || paramSpec.name;
+    item.appendChild(label);
+
+    const name = paramSpec.name;
+    const type = paramSpec.type;
+    const currentValue = state.studio.commandDraft[name];
+
+    if (type === "bool") {
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.checked = Boolean(currentValue);
+      input.addEventListener("change", () => {
+        state.studio.commandDraft[name] = input.checked;
+        markDirty(true);
+      });
+      item.appendChild(input);
+      paramForm.appendChild(item);
+      return;
+    }
+
+    if (type === "enum") {
+      const select = document.createElement("select");
+      const options = Array.isArray(paramSpec.options) ? paramSpec.options : [];
+      options.forEach((opt) => {
+        const el = document.createElement("option");
+        el.value = String(opt);
+        el.textContent = String(opt);
+        select.appendChild(el);
+      });
+      const fallback = options.length > 0 ? String(options[0]) : "";
+      select.value = currentValue == null ? fallback : String(currentValue);
+      select.addEventListener("change", () => {
+        state.studio.commandDraft[name] = select.value;
+        markDirty(true);
+      });
+      item.appendChild(select);
+      paramForm.appendChild(item);
+      return;
+    }
+
+    if (type === "vector") {
+      const vecWrap = document.createElement("div");
+      vecWrap.className = "param-vector";
+      const labels = Array.isArray(paramSpec.labels) ? paramSpec.labels : [];
+      const mins = Array.isArray(paramSpec.mins) ? paramSpec.mins : [];
+      const maxs = Array.isArray(paramSpec.maxs) ? paramSpec.maxs : [];
+      const raw = Array.isArray(currentValue) ? currentValue : [];
+      const size = Math.max(labels.length, raw.length);
+      const values = [];
+      for (let i = 0; i < size; i += 1) {
+        values.push(Number(raw[i] ?? 0));
+      }
+      state.studio.commandDraft[name] = values;
+
+      for (let i = 0; i < size; i += 1) {
+        const row = document.createElement("div");
+        row.className = "param-vector-row";
+
+        const compLabel = document.createElement("span");
+        compLabel.className = "muted";
+        compLabel.textContent = labels[i] || `joint_${i}`;
+        row.appendChild(compLabel);
+
+        const input = createNumberInput(values[i], {
+          min: Number.isFinite(Number(mins[i])) ? Number(mins[i]) : undefined,
+          max: Number.isFinite(Number(maxs[i])) ? Number(maxs[i]) : undefined,
+          step: Number.isFinite(Number(paramSpec.step)) ? Number(paramSpec.step) : 0.01,
+        });
+        input.addEventListener("input", () => {
+          const next = Number(input.value);
+          state.studio.commandDraft[name][i] = Number.isFinite(next) ? next : 0;
+          markDirty(true);
+        });
+        row.appendChild(input);
+        vecWrap.appendChild(row);
+      }
+
+      item.appendChild(vecWrap);
+      paramForm.appendChild(item);
+      return;
+    }
+
+    const numericInput = createNumberInput(currentValue, paramSpec);
+    numericInput.addEventListener("input", () => {
+      let next = Number(numericInput.value);
+      if (!Number.isFinite(next)) {
+        return;
+      }
+      if (type === "int") {
+        next = Math.round(next);
+      }
+      state.studio.commandDraft[name] = next;
+      markDirty(true);
+    });
+    item.appendChild(numericInput);
+    paramForm.appendChild(item);
+  });
+}
+
+function setStudioPrimitive(nextPrimitive, { resetDuration = true } = {}) {
+  state.studio.selectedPrimitive = String(nextPrimitive);
+  primitiveSelect.value = state.studio.selectedPrimitive;
+  state.studio.commandDraft = baselineCommandFor(state.studio.selectedPrimitive);
+  if (resetDuration) {
+    durationInput.value = String(defaultDurationForPrimitive(state.studio.selectedPrimitive));
+  }
+  renderParamForm();
+  markDirty(false);
+}
+
+async function runStudioPreview() {
+  if (!state.studio.enabled) {
+    return;
+  }
+  const primitive = state.studio.selectedPrimitive;
+  const style = styleSelect.value || "calm";
+  const durationS = Number(durationInput.value);
+  const payload = {
+    primitive,
+    style,
+    duration_s: Number.isFinite(durationS) ? durationS : defaultDurationForPrimitive(primitive),
+    command: state.studio.commandDraft,
+  };
+
+  runBtn.disabled = true;
+  try {
+    const trace = await apiPost("/api/simulate", payload);
+    loadTrace(trace, `studio:${primitive}`);
+  } catch (err) {
+    statusBox.textContent = `Studio run failed: ${err}`;
+  } finally {
+    runBtn.disabled = false;
+  }
+}
+
+async function saveBaseline() {
+  if (!state.studio.enabled) {
+    return;
+  }
+  saveBaselineBtn.disabled = true;
+  try {
+    const updated = await apiPost("/api/baseline", {
+      primitive: state.studio.selectedPrimitive,
+      command: state.studio.commandDraft,
+    });
+    state.studio.baseline = updated;
+    state.studio.commandDraft = baselineCommandFor(state.studio.selectedPrimitive);
+    renderParamForm();
+    markDirty(false);
+    const stamp = new Date().toLocaleTimeString();
+    setBaselineStatus(`Baseline saved: ${state.studio.selectedPrimitive} at ${stamp}`);
+  } catch (err) {
+    setBaselineStatus(`Save failed: ${err}`, true);
+  } finally {
+    saveBaselineBtn.disabled = false;
+  }
+}
+
+async function runSuitePlayback() {
+  if (!runSuiteBtn) {
+    return;
+  }
+  runSuiteBtn.disabled = true;
+  const style = state.studio.enabled ? String(styleSelect.value || "calm") : "calm";
+  setSuiteStatus(`Suite: generating (${style})...`);
+  try {
+    const res = await apiPost("/api/suite", { style });
+    const viewerUrl = String(res?.viewer_url || "");
+    setSuiteStatus(`Suite: ready (${Number(res?.sample_count || 0)} samples). opening...`);
+    if (viewerUrl) {
+      window.location.href = viewerUrl;
+      return;
+    }
+    setSuiteStatus("Suite complete, but no viewer URL returned.", true);
+  } catch (err) {
+    setSuiteStatus(`Suite failed: ${err}`, true);
+  } finally {
+    runSuiteBtn.disabled = false;
+  }
+}
+
+function resetToBaseline() {
+  if (!state.studio.enabled) {
+    return;
+  }
+  state.studio.commandDraft = baselineCommandFor(state.studio.selectedPrimitive);
+  renderParamForm();
+  markDirty(false);
+}
+
+async function initStudioMode() {
+  const [meta, baseline] = await Promise.all([
+    apiGet("/api/primitives"),
+    apiGet("/api/baseline"),
+  ]);
+
+  if (!Array.isArray(meta?.primitives) || !meta.primitives.length) {
+    throw new Error("missing primitive metadata");
+  }
+
+  state.studio.enabled = true;
+  state.studio.specs = meta.primitives;
+  state.studio.styles = Array.isArray(meta.styles) && meta.styles.length ? meta.styles : ["calm"];
+  state.studio.baseline = baseline;
+
+  primitiveSelect.innerHTML = "";
+  state.studio.specs.forEach((spec) => {
+    const option = document.createElement("option");
+    option.value = spec.id;
+    option.textContent = spec.label || spec.id;
+    primitiveSelect.appendChild(option);
+  });
+
+  styleSelect.innerHTML = "";
+  state.studio.styles.forEach((style) => {
+    const option = document.createElement("option");
+    option.value = style;
+    option.textContent = style;
+    styleSelect.appendChild(option);
+  });
+  styleSelect.value = state.studio.styles.includes("calm") ? "calm" : state.studio.styles[0];
+
+  const defaultPrimitive =
+    typeof meta.default_primitive === "string" && meta.default_primitive
+      ? meta.default_primitive
+      : state.studio.specs[0].id;
+
+  setStudioPrimitive(defaultPrimitive);
+  setMode("studio");
+  setBaselineStatus(`Baseline: ${state.studio.selectedPrimitive}`);
+  await runStudioPreview();
+}
+
 playPauseBtn.addEventListener("click", playPause);
 resetBtn.addEventListener("click", resetPlayback);
 
@@ -664,6 +1053,44 @@ timeline.addEventListener("input", () => {
   playPauseBtn.textContent = "Play";
   state.lastFrameMs = null;
   setIndex(Number(timeline.value));
+});
+
+primitiveSelect.addEventListener("change", () => {
+  setStudioPrimitive(primitiveSelect.value, { resetDuration: true });
+});
+
+runBtn.addEventListener("click", () => {
+  runStudioPreview();
+});
+
+saveBaselineBtn.addEventListener("click", () => {
+  saveBaseline();
+});
+
+resetBaselineBtn.addEventListener("click", () => {
+  resetToBaseline();
+});
+
+if (runSuiteBtn) {
+  runSuiteBtn.addEventListener("click", () => {
+    runSuitePlayback();
+  });
+}
+
+styleSelect.addEventListener("change", () => {
+  if (state.studio.enabled) {
+    setBaselineStatus(`Baseline: ${state.studio.selectedPrimitive}${state.studio.dirty ? " (unsaved)" : ""}`);
+  }
+});
+
+durationInput.addEventListener("input", () => {
+  if (!state.studio.enabled) {
+    return;
+  }
+  const n = Number(durationInput.value);
+  if (!Number.isFinite(n) || n <= 0) {
+    durationInput.value = String(defaultDurationForPrimitive(state.studio.selectedPrimitive));
+  }
 });
 
 fileInput.addEventListener("change", async () => {
@@ -707,12 +1134,36 @@ window.addEventListener("resize", () => {
 
 (async function bootstrap() {
   const params = new URLSearchParams(window.location.search);
-  const tracePath = params.get("trace") || "/logs/primitive_sim/latest_trace.json";
-  try {
-    await loadFromUrl(tracePath);
-  } catch (err) {
-    traceSource.textContent = `Trace: failed to load ${tracePath}`;
-    statusBox.textContent = `Load error: ${err}`;
+  const tracePath = params.get("trace") || "";
+  const preferStudio = params.get("studio") !== "0";
+
+  if (preferStudio) {
+    try {
+      await initStudioMode();
+    } catch (err) {
+      state.studio.enabled = false;
+      setMode("playback (studio api unavailable)");
+      setBaselineStatus(`Studio unavailable: ${err}`, true);
+      if (!tracePath) {
+        studioGroup.classList.add("disabled");
+      }
+    }
+  } else {
+    setMode("playback");
   }
+
+  if (tracePath) {
+    try {
+      await loadFromUrl(tracePath);
+      setMode("playback");
+    } catch (err) {
+      traceSource.textContent = `Trace: failed to load ${tracePath}`;
+      statusBox.textContent = `Load error: ${err}`;
+    }
+  } else if (!state.samples.length && !state.studio.enabled) {
+    traceSource.textContent = "Trace: no trace selected";
+    statusBox.textContent = "No studio API found and no trace URL provided.";
+  }
+
   requestAnimationFrame(animate);
 })();

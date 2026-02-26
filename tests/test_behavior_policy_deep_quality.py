@@ -328,15 +328,16 @@ def test_policy_maybe_schedule_env_and_planner_guard_paths(tmp_path, monkeypatch
     assert policy._env_summarizer.take_latest_pending() is not None  # noqa: SLF001
     policy._env_inflight = None  # noqa: SLF001
 
-    monkeypatch.setattr(policy, "_build_env_payload", lambda *, st: None)
+    monkeypatch.setattr(policy, "_build_env_payload", lambda: None)
     policy._maybe_schedule_env(st=None, now=12.0)  # noqa: SLF001
     assert policy._env_inflight is None  # noqa: SLF001
 
-    monkeypatch.setattr(policy, "_build_env_payload", lambda *, st: {"request": SimpleNamespace(), "frames": 1})
-    policy._env_summarizer._inflight = True  # noqa: SLF001
+    monkeypatch.setattr(policy, "_build_env_payload", lambda: {"request": SimpleNamespace(), "frames": 1})
+    policy._env_summarizer.submit_or_replace({"req": "blocked"})  # noqa: SLF001
+    assert policy._env_summarizer.in_flight is True  # noqa: SLF001
     policy._maybe_schedule_env(st=None, now=13.0)  # noqa: SLF001
     assert policy._env_request_seq == 0  # noqa: SLF001
-    policy._env_summarizer._inflight = False  # noqa: SLF001
+    policy._env_summarizer.complete_request("")  # noqa: SLF001
 
     policy._last_env_submit_s = 0.0  # noqa: SLF001
     policy._env_log = _MemoryLog()  # noqa: SLF001
@@ -371,7 +372,6 @@ def test_policy_drain_env_inflight_success_parse_fail_and_pending_resubmit(tmp_p
     policy._env_inflight = _InFlightCall(
         request_id=1,
         started_mono_s=1.0,
-        payload_meta={},
         future=_DoneFuture(
             ModelResponse(
                 ok=True,
@@ -402,7 +402,6 @@ def test_policy_drain_env_inflight_success_parse_fail_and_pending_resubmit(tmp_p
     policy._env_inflight = _InFlightCall(
         request_id=2,
         started_mono_s=2.0,
-        payload_meta={},
         future=_DoneFuture(
             ModelResponse(
                 ok=True,
@@ -430,7 +429,6 @@ def test_policy_drain_planner_inflight_success_watchdog_and_parse_fail(tmp_path,
     policy._planner_inflight = _InFlightCall(
         request_id=1,
         started_mono_s=1.0,
-        payload_meta={},
         future=_DoneFuture(
             ModelResponse(
                 ok=True,
@@ -460,7 +458,6 @@ def test_policy_drain_planner_inflight_success_watchdog_and_parse_fail(tmp_path,
     policy._planner_inflight = _InFlightCall(
         request_id=2,
         started_mono_s=1.0,
-        payload_meta={},
         future=pending,
     )
     policy._drain_planner_inflight(st=None, now=10.0)  # noqa: SLF001
@@ -470,7 +467,6 @@ def test_policy_drain_planner_inflight_success_watchdog_and_parse_fail(tmp_path,
     policy._planner_inflight = _InFlightCall(
         request_id=3,
         started_mono_s=2.0,
-        payload_meta={},
         future=_DoneFuture(
             ModelResponse(
                 ok=True,
