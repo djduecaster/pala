@@ -51,12 +51,6 @@ def _load_reasoning_index(session_dir: str) -> List[Dict[str, Any]]:
     return [row for row in events if isinstance(row, dict)]
 
 
-def _save_manifest(session_dir: str, manifest: Dict[str, Any]) -> None:
-    path = os.path.join(session_dir, "manifest.json")
-    with open(path, "w", encoding="utf-8") as fh:
-        json.dump(manifest, fh, separators=(",", ":"), ensure_ascii=True)
-
-
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Upgrade telemetry capture bundle to V3 artifacts.")
     parser.add_argument("session_dir", help="Capture bundle directory containing events.jsonl/manifest.json.")
@@ -129,7 +123,9 @@ def main() -> int:
         upgraded["integrity_checked_file_count"] = int(verify.get("checked_file_count", 0))
     except Exception as exc:
         upgraded.setdefault("v3_artifact_errors", []).append(f"integrity: {exc!r}")
-    _save_manifest(session_dir, upgraded)
+    manifest_path = os.path.join(session_dir, "manifest.json")
+    with open(manifest_path, "w", encoding="utf-8") as fh:
+        json.dump(upgraded, fh, separators=(",", ":"), ensure_ascii=True)
     print("manifest upgraded to telemetry v3")
     return 0
 

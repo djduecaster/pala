@@ -23,8 +23,8 @@ from tools.telemetry.mac_viewer import (
     _apply_mode_defaults,
     _append_viewer_run,
     _build_viewer_summary,
-    _build_in_memory_alignment_rows,
     _build_in_memory_query_rows,
+    load_timeline_rows,
     DashboardState,
     _build_parser,
     _build_remote_agent_command,
@@ -44,9 +44,17 @@ from tools.telemetry.replay import SessionReplayReader
 from tools.telemetry.reasoning import format_reasoning_snippet, normalize_reasoning_message, redact_reasoning_text
 from tools.telemetry.quality import evaluate_quality_gate, load_quality_report
 from tools.telemetry.run_report import build_run_report
+from tools.telemetry.pipeline import _build_parser as _build_pipeline_parser
 from tools.telemetry.labels import load_labels_jsonl
 from tools.telemetry.schema_v3 import REASONING_TRACE_INDEX_PATH, TELEMETRY_SCHEMA_VERSION_V3
-from tools.telemetry.storage_sqlite import build_session_db, query_session_db, resolve_session_db_path
+from tools.telemetry.storage_sqlite import (
+    build_session_db,
+    query_case_detail_db,
+    query_cases_db,
+    query_session_db,
+    resolve_session_db_path,
+    review_case,
+)
 from tools.telemetry.trace_join import load_reasoning_trace_index
 from tools.telemetry.trace_graph import TraceEventRef, TraceGraphBuilder, TraceRecord, load_trace_index
 
@@ -153,6 +161,20 @@ def test_mode_defaults_apply_curate_profile():
     assert "status:parse_fail" in args.query
 
 
+def test_pipeline_parser_compile_command():
+    parser = _build_pipeline_parser()
+    args = parser.parse_args(["compile", "logs/telemetry/session"])
+    assert args.cmd == "compile"
+    assert args.session_dir == "logs/telemetry/session"
+
+
+def test_pipeline_parser_capture_requires_save_session():
+    parser = _build_pipeline_parser()
+    args = parser.parse_args(["capture", "--save-session", "logs/telemetry/session_v4"])
+    assert args.cmd == "capture"
+    assert args.save_session == "logs/telemetry/session_v4"
+
+
 def test_remote_command_forwards_pack_and_trace_limits():
     args = _build_parser().parse_args([])
     args.pack = ["runtime_core", "memory_debug"]
@@ -255,12 +277,12 @@ def test_dashboard_state_updates_command_from_video_tap_extra():
     assert state.command["joint_names"] == ["yaw", "pitch1"]
 
 
-def test_dashboard_state_updates_memory_and_timeline():
+def test_dashboard_state_tracks_memory_and_timeline_event_counts():
     state = DashboardState(host="jetson")
     state.apply({"source": "memory_log", "payload": {"data": {"type": "summary_event", "payload": {"highlights": ["a"]}}}})
     state.apply({"source": "timeline_log", "payload": {"data": {"type": "req_start", "payload": {"id": 3}}}})
-    assert state.memory is not None
-    assert state.timeline is not None
+    assert state.event_counts.get("memory_log") == 1
+    assert state.event_counts.get("timeline_log") == 1
 
 
 def test_field_filter_parsing_and_match():
@@ -343,11 +365,52 @@ def test_session_db_query_and_quality_gate(tmp_path):
     out = query_session_db(db_path, query="status:parse_fail req:42", limit=10)
     assert out["events"]
     assert out["events"][0]["req_id"] == 42
+    assert out["counts"]["events"] >= 1
+    assert "joined" in out["counts"]
 
     quality = load_quality_report(str(session_dir))
     assert quality is not None
     passed_warn, _ = evaluate_quality_gate(quality, "warn")
     assert isinstance(passed_warn, bool)
+
+
+def test_case_query_and_review_roundtrip(tmp_path):
+    session_dir = tmp_path / "session"
+    writer = SessionCaptureWriter(CaptureConfig(directory=str(session_dir), frames_mode="off", max_seconds=0.0))
+    writer.write(
+        {
+            "type": "event",
+            "source": "timeline_log",
+            "ts_wall_s": 1.0,
+            "payload": {
+                "data": {
+                    "type": "req_end",
+                    "payload": {
+                        "request_id": 42,
+                        "status": "parse_fail",
+                        "latency_ms": 2500,
+                        "reasoning": "parse failed after timeout",
+                    },
+                }
+            },
+        }
+    )
+    writer.close()
+
+    db_path = resolve_session_db_path(str(session_dir))
+    queried = query_cases_db(db_path, query="status:parse_fail", limit=10)
+    assert queried["total_count"] >= 1
+    assert queried["cases"]
+    case_id = str(queried["cases"][0].get("case_id") or "")
+    assert case_id.startswith("case:")
+    assert queried["cases"][0].get("source") == "sqlite.cases.v4"
+
+    updated = review_case(db_path, case_id=case_id, decision="accept", reviewer="pytest")
+    assert updated["decision"] == "accept"
+    detail = query_case_detail_db(db_path, case_id=case_id, event_limit=20)
+    assert detail["case"] is not None
+    assert detail["review"] is not None
+    assert detail["review"]["decision"] == "accept"
 
 
 def test_dataset_export_from_weak_labels(tmp_path):
@@ -964,35 +1027,57 @@ def test_build_in_memory_query_rows_supports_keyed_tokens():
     assert rows[0]["source"] == "timeline_log"
 
 
-def test_build_in_memory_alignment_rows_from_trace_event_refs():
-    trace = TraceRecord(
-        trace_id="req:9",
-        req_id=9,
-        start_ts_wall_s=1.0,
-        end_ts_wall_s=1.2,
-        duration_ms=200.0,
-        status="warning",
-        severity="warning",
-        summary="trace",
-        event_refs=(
-            TraceEventRef(
-                event_index=2,
-                source="timeline_log",
-                ts_wall_s=1.1,
-                req_id=9,
-                phase="req_end",
-                status="parse_fail",
-                latency_ms=2100.0,
-                severity="error",
-                summary="parse fail",
-            ),
-        ),
+def test_load_timeline_rows_requires_v3_schema(tmp_path):
+    session_dir = tmp_path / "session"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / "manifest.json").write_text(json.dumps({"schema_version": 2}), encoding="utf-8")
+    out = load_timeline_rows(
+        session_root=str(session_dir),
+        session_db_path=str(session_dir / "session.db"),
+        query_text="",
+        selected_trace_id="",
+        limit=20,
+        index_mode="sqlite",
     )
-    rows = _build_in_memory_alignment_rows(trace=trace, limit=5)
-    assert rows
-    assert rows[0]["event_index"] == 2
-    assert rows[0]["component"] == "timeline_log"
-    assert rows[0]["status"] == "parse_fail"
+    assert out.source == "unavailable"
+    assert out.unavailable_reason == "schema_version=2"
+    assert "migrate_session" in out.note
+
+
+def test_load_timeline_rows_from_sqlite_joined(tmp_path):
+    session_dir = tmp_path / "session"
+    writer = SessionCaptureWriter(CaptureConfig(directory=str(session_dir), frames_mode="off", max_seconds=0.0))
+    writer.write(
+        {
+            "type": "event",
+            "source": "timeline_log",
+            "ts_wall_s": 1.0,
+            "payload": {
+                "data": {
+                    "type": "req_end",
+                    "payload": {
+                        "request_id": 7,
+                        "status": "parse_fail",
+                        "latency_ms": 2400,
+                        "reasoning": "planner timed out while parsing",
+                    },
+                }
+            },
+        }
+    )
+    writer.close()
+    out = load_timeline_rows(
+        session_root=str(session_dir),
+        session_db_path=resolve_session_db_path(str(session_dir)),
+        query_text="status:parse_fail",
+        selected_trace_id="",
+        limit=20,
+        index_mode="sqlite",
+    )
+    assert out.source == "sqlite.cases.v4"
+    assert out.total_count >= len(out.rows)
+    assert len(out.rows) >= 1
+    assert out.rows[0].provenance == "sqlite.cases.v4"
 
 
 def test_integrity_report_write_and_verify(tmp_path):
@@ -1146,6 +1231,8 @@ def test_build_and_write_viewer_summary(tmp_path):
     state.quality_report = {"grade": "pass", "score": 91.5}
     state.quality_gate_passed = True
     state.quality_gate_note = "strict pass"
+    state.timeline_source = "sqlite.cases.v4"
+    state.timeline_total_rows = 8
     summary = _build_viewer_summary(
         mode="curate",
         state=state,
@@ -1158,7 +1245,7 @@ def test_build_and_write_viewer_summary(tmp_path):
     assert path.endswith("viewer_summary.json")
     loaded = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
     assert loaded["mode"] == "curate"
-    assert loaded["version"] == 2
+    assert loaded["version"] == 4
     assert loaded["schema_version"] == 3
     assert loaded["run_id"]
     assert loaded["event_counts"]["timeline_log"] == 3
@@ -1167,6 +1254,10 @@ def test_build_and_write_viewer_summary(tmp_path):
     assert loaded["dropped_events_local"] == 1
     assert loaded["quality_grade"] == "pass"
     assert loaded["quality_score"] == 91.5
+    assert loaded["case_source"] == "sqlite.cases.v4"
+    assert loaded["case_rows_total"] == 8
+    assert loaded["case_rows_visible"] == 0
+    assert loaded["case_unavailable_reason"] == ""
     assert loaded["exit_code"] == 0
 
 
@@ -1258,6 +1349,8 @@ def test_doctor_session_dir_invalid_viewer_runs_fails(tmp_path):
     checks = _check_session_dir(str(session_dir))
     summary = {check.name: check for check in checks}
     assert summary["session:viewer_runs.parse"].status == "fail"
+    assert summary["session:case_explorer.source"].status == "warn"
+    assert summary["session:case_explorer.ready"].status == "warn"
     assert summary["session:viewer_runs.health"].status == "pass"
 
 
@@ -1273,7 +1366,33 @@ def test_doctor_session_dir_viewer_latest_mismatch_warns(tmp_path):
     assert summary["session:viewer_summary.parse"].status == "pass"
     assert summary["session:viewer_runs.parse"].status == "pass"
     assert summary["session:viewer_runs.latest_match"].status == "warn"
+    assert summary["session:case_explorer.source"].status == "warn"
+    assert summary["session:case_explorer.ready"].status == "warn"
     assert summary["session:viewer_runs.health"].status == "pass"
+
+
+def test_doctor_session_dir_case_explorer_passes_with_sqlite_source(tmp_path):
+    session_dir = tmp_path / "session"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / "events.jsonl").write_text("{}", encoding="utf-8")
+    (session_dir / "manifest.json").write_text(json.dumps({"schema_version": 3}), encoding="utf-8")
+    (session_dir / "viewer_runs.jsonl").write_text(
+        json.dumps(
+            {
+                "run_id": "run-1",
+                "mode": "replay",
+                "exit_code": 0,
+                "case_source": "sqlite.cases.v4",
+                "case_unavailable_reason": "",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    checks = _check_session_dir(str(session_dir))
+    summary = {check.name: check for check in checks}
+    assert summary["session:case_explorer.source"].status == "pass"
+    assert summary["session:case_explorer.ready"].status == "pass"
 
 
 def test_build_run_report_aggregates_runs_and_summary_fallback(tmp_path):
@@ -1294,6 +1413,7 @@ def test_build_run_report_aggregates_runs_and_summary_fallback(tmp_path):
                         "quality_gate_passed": True,
                         "dropped_events_agent": 2,
                         "dropped_events_local": 1,
+                        "case_source": "sqlite.cases.v4",
                     }
                 ),
                 json.dumps(
@@ -1307,6 +1427,7 @@ def test_build_run_report_aggregates_runs_and_summary_fallback(tmp_path):
                         "dropped_events_agent": 5,
                         "dropped_events_local": 3,
                         "curation_result": {"ok": True},
+                        "case_source": "sqlite.cases.v4",
                     }
                 ),
             ]
@@ -1325,6 +1446,7 @@ def test_build_run_report_aggregates_runs_and_summary_fallback(tmp_path):
                 "quality_gate_passed": True,
                 "dropped_events_agent": 4,
                 "dropped_events_local": 2,
+                "case_source": "sqlite.cases.v4",
                 "ended_at_wall_s": 100.0,
             }
         ),
@@ -1351,6 +1473,8 @@ def test_build_run_report_aggregates_runs_and_summary_fallback(tmp_path):
     assert report["quality_score"]["p50"] == 88.0
     assert report["drops"]["agent_total"] == 11.0
     assert report["drops"]["local_total"] == 6.0
+    assert report["cases"]["source_counts"]["sqlite.cases.v4"] == 3
+    assert report["cases"]["unavailable_count"] == 0
     assert report["alerts"] == []
     assert report["alerts_count"] == 0
     assert report["health"] == "ok"
@@ -1381,6 +1505,7 @@ def test_build_run_report_detects_latest_regressions(tmp_path):
                 "quality_gate_passed": True,
                 "dropped_events_agent": 2,
                 "dropped_events_local": 2,
+                "case_source": "sqlite.cases.v4",
             }
         )
     rows.append(
@@ -1393,6 +1518,8 @@ def test_build_run_report_detects_latest_regressions(tmp_path):
             "quality_gate_passed": False,
             "dropped_events_agent": 44,
             "dropped_events_local": 42,
+            "case_source": "unavailable",
+            "case_unavailable_reason": "session_db_missing",
         }
     )
     (session_dir / "viewer_runs.jsonl").write_text(
@@ -1404,10 +1531,11 @@ def test_build_run_report_detects_latest_regressions(tmp_path):
     alerts = report["alerts"]
     assert "latest_exit_code_nonzero:2" in alerts
     assert "latest_quality_gate_failed" in alerts
+    assert "latest_case_unavailable:session_db_missing" in alerts
     assert any(text.startswith("quality_score_regression:") for text in alerts)
     assert any(text.startswith("agent_drop_spike:") for text in alerts)
     assert any(text.startswith("local_drop_spike:") for text in alerts)
-    assert report["alerts_count"] >= 4
+    assert report["alerts_count"] >= 5
     assert report["exit_nonzero_rate"] == (1.0 / 5.0)
     assert report["quality_gate_fail_rate"] == (1.0 / 5.0)
 
@@ -1444,6 +1572,7 @@ def test_doctor_session_dir_run_report_alerts_warn(tmp_path):
             "quality_gate_passed": True,
             "dropped_events_agent": 1,
             "dropped_events_local": 1,
+            "case_source": "sqlite.cases.v4",
         },
         {
             "run_id": "bad",
@@ -1454,6 +1583,8 @@ def test_doctor_session_dir_run_report_alerts_warn(tmp_path):
             "quality_gate_passed": False,
             "dropped_events_agent": 40,
             "dropped_events_local": 40,
+            "case_source": "unavailable",
+            "case_unavailable_reason": "schema_version=2",
         },
     ]
     (session_dir / "viewer_runs.jsonl").write_text(
@@ -1462,6 +1593,8 @@ def test_doctor_session_dir_run_report_alerts_warn(tmp_path):
     )
     checks = _check_session_dir(str(session_dir))
     summary = {check.name: check for check in checks}
+    assert summary["session:case_explorer.source"].status == "warn"
+    assert summary["session:case_explorer.ready"].status == "warn"
     assert summary["session:viewer_runs.health"].status == "warn"
     assert summary["session:viewer_runs.alerts"].status == "warn"
 

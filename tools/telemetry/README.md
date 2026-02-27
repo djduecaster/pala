@@ -1,20 +1,24 @@
-# Telemetry Tools (V3.x)
+# Telemetry Tools (V4 CaseOps)
 
 Telemetry remains a sidecar under `tools/telemetry` and does not change the core 4-loop runtime.
 
-## V3 Shipment
-- Backward-compatible V2 capture files are still written:
-  - `events.jsonl`, `index.json`, `reasoning_index.json`, `trace_index.json`, `manifest.json`
-- New V3 artifacts are now emitted automatically on capture close:
+## V4 Shipment
+- Case-centric telemetry workflow:
+  - `capture` -> `compile` -> `review` -> `export` -> `report`
+  - unified entrypoint: `tools.telemetry.pipeline`
+- Core artifacts emitted on capture close:
   - `session.db` (sqlite index for fast querying)
   - `quality_report.json` (capture health score + gates)
   - `reasoning_trace_index.json` (joined reasoning traces with perception/video context)
   - `labels.weak.jsonl` (heuristic weak labels for post-training prep)
-- Viewer V3 controls:
+- New V4 sqlite case tables:
+  - `cases`, `case_events`, `case_labels`, `case_reviews`
+  - canonical case source tag: `sqlite.cases.v4`
+- Viewer V4 controls:
   - `--index-mode auto|off|sqlite`
   - `--query '...'` + `--query-limit N`
   - `--quality-gate off|warn|strict`
-  - Core panels: `quality`, `query`, `alignment`, `annotations`
+  - Core panels: `case_list`, `case_detail`, `quality`, `query`, `annotations`
 - Capture manifest defaults now ship as schema version `3`.
 - New V3.x robustness:
   - `integrity.json` artifact checksums + replay verification
@@ -28,11 +32,12 @@ Telemetry remains a sidecar under `tools/telemetry` and does not change the core
   - Curation export fails fast if zero rows are produced.
   - `dataset_manifest.json` now includes coverage ratios (annotation/label/hard-case) and inclusion reason counts.
 
-## What V3 Solves
+## What V4 Solves
 - Faster offline triage with indexed telemetry search.
 - Standardized quality scoring to reject low-signal sessions.
 - Weak-label generation to bootstrap post-training datasets.
 - Replay dashboards that can show quality + query context directly.
+- Case Explorer: deterministic, sqlite-backed case triage with review decisions.
 
 ## Quickstart
 ### 0) Run telemetry doctor (recommended)
@@ -55,34 +60,31 @@ UV_PYTHON=/opt/homebrew/bin/python3.10 uv run python -m tools.telemetry.mac_view
   --jetson-host jetson
 ```
 
-### 3) Capture a V3 session bundle
+### 3) Capture + compile with pipeline CLI
 ```bash
-uv run python -m tools.telemetry.mac_viewer \
-  --mode live \
-  --save-session logs/telemetry/session_v3_001 \
-  --query 'status:parse_fail|timeout'
+uv run python -m tools.telemetry.pipeline capture \
+  --save-session logs/telemetry/session_v4_001 \
+  --jetson-host jetson
+uv run python -m tools.telemetry.pipeline compile logs/telemetry/session_v4_001
 ```
 
-### 4) Replay with indexed query + quality gate
+### 4) Review cases
 ```bash
-uv run python -m tools.telemetry.mac_viewer \
-  --mode replay \
-  --replay logs/telemetry/session_v3_001 \
-  --query 'status:parse_fail severity:error' \
+uv run python -m tools.telemetry.pipeline review \
+  logs/telemetry/session_v4_001 \
   --quality-gate strict
 ```
 
-### 5) One-click post-training curation export
+### 5) Export post-training rows
 ```bash
-uv run python -m tools.telemetry.mac_viewer \
-  --mode curate \
-  --replay logs/telemetry/session_v3_001 \
-  --curate-profile hard_cases
+uv run python -m tools.telemetry.pipeline export \
+  logs/telemetry/session_v4_001 \
+  --profile hard_cases
 ```
 
 ### 6) Summarize run history across sessions
 ```bash
-uv run python -m tools.telemetry.run_report --root logs/telemetry
+uv run python -m tools.telemetry.pipeline report --root logs/telemetry
 ```
 Report output now includes session coverage (`sessions_with_runs` vs `sessions_without_runs`) to catch missing run artifacts early.
 For CI-style gating, fail when the latest run looks unhealthy:
@@ -90,7 +92,7 @@ For CI-style gating, fail when the latest run looks unhealthy:
 uv run python -m tools.telemetry.run_report --root logs/telemetry --strict
 ```
 
-## Session Bundle Contents (V3)
+## Session Bundle Contents (V4)
 - `manifest.json`: session metadata, schema version, V3 artifact pointers
 - `events.jsonl`: full event stream
 - `index.json`: frame index
@@ -98,7 +100,7 @@ uv run python -m tools.telemetry.run_report --root logs/telemetry --strict
 - `trace_index.json`: request-level traces
 - `reasoning_trace_index.json`: canonical joined rows linking env/planner reasoning to perception + video context
 - `frames/`: optional JPEG frames
-- `session.db`: sqlite index (`events`, `reasoning`, `traces`, `trace_events`, `reasoning_traces`, `meta`)
+- `session.db`: sqlite index (`events`, `reasoning`, `traces`, `trace_events`, `reasoning_traces`, `cases`, `case_events`, `case_labels`, `case_reviews`, `meta`)
 - `quality_report.json`: numeric score + pass/warn/fail grade + gate checks
 - `integrity.json`: artifact checksum report used by replay/migrate checks
 - `annotations.jsonl`: user bookmarks from viewer hotkey (`b`)
@@ -108,12 +110,14 @@ uv run python -m tools.telemetry.run_report --root logs/telemetry --strict
   - includes `inclusion_reason_counts` (`hard_case`, `annotation`, `weak_label`, `baseline`)
 - `viewer_summary.json`: viewer exit summary (`run_id`, mode, query, drops, event counts, quality gate, curation result)
 - `viewer_runs.jsonl`: append-only history of viewer runs for the session bundle
+  - includes case explorer diagnostics (`case_source`, `case_rows_total`, `case_rows_visible`, `case_reviewed_visible`, `case_unavailable_reason`)
 
 ## Migration / Re-index Existing Sessions
 Upgrade any older session directory in-place:
 ```bash
 uv run python -m tools.telemetry.migrate_session logs/telemetry/session_old
 ```
+Case Explorer requires compiled sqlite artifacts: run `pipeline compile` (or `migrate_session`) before case triage.
 
 Also export dataset rows:
 ```bash
@@ -167,6 +171,15 @@ Common mode workflow:
 - Press `b` in viewer to bookmark the currently selected trace/reasoning context.
 - Writes to `annotations.jsonl` in the active replay/capture session directory.
 - `--curate-on-exit` exports `dataset_rows.jsonl` + `dataset_manifest.json` using the selected curation profile.
+
+## Case Explorer
+- Enabled by default in viewer modes.
+- Canonical source is `sqlite.cases.v4` from `session.db`.
+- No memory fallback: if `session.db` is unavailable, viewer shows compile guidance.
+- Use existing hotkeys:
+  - `j/k`: move reasoning selection, or case selection when case panel is focused.
+  - `o`: jump to case detail panel.
+  - `a/x/n/m`: case review decisions (`accept|reject|needs_context|label`).
 
 ## Quality Gate Behavior
 - `off`: no gating

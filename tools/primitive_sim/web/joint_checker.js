@@ -324,29 +324,14 @@ function resolveMapping(names) {
     pitch3: lower.indexOf("pitch3"),
   };
 
-  const used = new Set([mapping.yaw, mapping.roll, mapping.pitch1, mapping.pitch2, mapping.pitch3].filter((v) => v >= 0));
-  const pitchCandidates = [];
-  lower.forEach((name, idx) => {
-    if (!used.has(idx) && name.includes("pitch")) {
-      pitchCandidates.push(idx);
-    }
-  });
-  const fallback = [];
-  for (let i = 0; i < names.length; i += 1) {
-    if (!used.has(i)) {
-      fallback.push(i);
-    }
+  const missing = Object.entries(mapping)
+    .filter(([, idx]) => idx < 0)
+    .map(([name]) => name);
+  if (missing.length) {
+    throw new Error(
+      `Missing required joint names: ${missing.join(", ")}. expected yaw,pitch1,pitch2,roll,pitch3`,
+    );
   }
-  ["pitch1", "pitch2", "pitch3"].forEach((slot) => {
-    if (mapping[slot] >= 0) {
-      return;
-    }
-    if (pitchCandidates.length) {
-      mapping[slot] = pitchCandidates.shift();
-      return;
-    }
-    mapping[slot] = fallback.length ? fallback.shift() : -1;
-  });
   return mapping;
 }
 
@@ -675,15 +660,13 @@ async function apiPost(path, payload) {
     throw new Error(`${res.status} ${res.statusText}: invalid JSON response`);
   }
   if (!res.ok) {
-    throw new Error(data?.error || `${res.status} ${res.statusText}`);
+    const code = data?.code ? `${data.code}: ` : "";
+    throw new Error(`${code}${data?.error || `${res.status} ${res.statusText}`}`);
   }
   return data;
 }
 
 function setSuiteStatus(text, isError = false) {
-  if (!suiteStatus) {
-    return;
-  }
   suiteStatus.textContent = text;
   suiteStatus.className = isError ? "muted bad" : "muted";
 }
@@ -699,9 +682,6 @@ async function copyAnglesVector() {
 }
 
 async function runSuitePlayback() {
-  if (!runSuiteBtn) {
-    return;
-  }
   runSuiteBtn.disabled = true;
   setSuiteStatus("Suite: generating (calm)...");
   try {
@@ -730,11 +710,9 @@ function bindUi() {
   copyBtn.addEventListener("click", () => {
     copyAnglesVector();
   });
-  if (runSuiteBtn) {
-    runSuiteBtn.addEventListener("click", () => {
-      runSuitePlayback();
-    });
-  }
+  runSuiteBtn.addEventListener("click", () => {
+    runSuitePlayback();
+  });
 
   canvas.addEventListener("pointerdown", (ev) => {
     state.drag.active = true;
@@ -775,17 +753,29 @@ async function init() {
   bindUi();
   try {
     const meta = await apiGet("/api/joint_checker/meta");
+    if (!Array.isArray(meta.joint_names) || !meta.joint_names.length) {
+      throw new Error("joint_names metadata is required");
+    }
+    if (!Array.isArray(meta.joint_limits_rad) || meta.joint_limits_rad.length !== meta.joint_names.length) {
+      throw new Error("joint_limits_rad metadata is required and must match joint_names");
+    }
+    if (!Array.isArray(meta.default_angles_rad) || meta.default_angles_rad.length !== meta.joint_names.length) {
+      throw new Error("default_angles_rad metadata is required and must match joint_names");
+    }
+    if (!meta.dh_params || typeof meta.dh_params !== "object") {
+      throw new Error("dh_params metadata is required");
+    }
+
     state.configPath = String(meta.config_path || "");
-    state.jointNames = Array.isArray(meta.joint_names) ? meta.joint_names.map((v) => String(v)) : [];
-    state.jointLimits = Array.isArray(meta.joint_limits_rad) ? meta.joint_limits_rad : [];
+    state.jointNames = meta.joint_names.map((v) => String(v));
+    state.jointLimits = meta.joint_limits_rad;
     state.mapping = resolveMapping(state.jointNames);
     state.lampGeom = resolveLampGeometry(meta.lamp_geometry);
-    state.dhParams = meta.dh_params && typeof meta.dh_params === "object" ? meta.dh_params : {};
+    state.dhParams = meta.dh_params;
 
-    const rawDefault = Array.isArray(meta.default_angles_rad) ? meta.default_angles_rad : [];
     state.jointAngles = state.jointNames.map((_, i) => {
       const lim = state.jointLimits[i] || [-1.57, 1.57];
-      return clamp(Number(rawDefault[i] || 0), Number(lim[0]), Number(lim[1]));
+      return clamp(Number(meta.default_angles_rad[i]), Number(lim[0]), Number(lim[1]));
     });
 
     configPathEl.textContent = `Config: ${state.configPath || "(unknown)"}`;

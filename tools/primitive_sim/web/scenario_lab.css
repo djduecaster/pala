@@ -1,0 +1,104 @@
+.scenario-lab-page {
+  overflow: hidden;
+}
+
+.scenario-lab-page .layout {
+  height: 100dvh;
+  min-height: 100dvh;
+  padding: 12px;
+  gap: 12px;
+  grid-template-columns: minmax(420px, 1fr) minmax(340px, 460px);
+}
+
+.scenario-lab-page .stage-card {
+  min-height: 0;
+  padding: 6px;
+  display: flex;
+}
+
+#previewFrame {
+  width: 100%;
+  height: 100%;
+  border: 1px solid #24424d;
+  border-radius: 10px;
+  background: #0b1620;
+}
+
+.scenario-lab-page .control-card {
+  min-height: 0;
+  max-height: calc(100dvh - 24px);
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding-right: 12px;
+}
+
+#builderCommand,
+#scenarioJson {
+  width: 100%;
+  resize: vertical;
+  border-radius: 8px;
+  border: 1px solid #2a5965;
+  background: #112832;
+  color: var(--text);
+  padding: 8px;
+  font-family: "Space Mono", "SFMono-Regular", "Consolas", monospace;
+  font-size: 0.8rem;
+  line-height: 1.35;
+}
+
+#scenarioJson {
+  min-height: 220px;
+}
+
+#metricsBox {
+  margin: 0;
+  background: #0a141a;
+  border: 1px solid #223841;
+  border-radius: 8px;
+  padding: 10px;
+  min-height: 120px;
+  color: #e5f7f2;
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+}
+
+#historyTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.79rem;
+}
+
+#historyTable th,
+#historyTable td {
+  text-align: left;
+  padding: 6px;
+  border-bottom: 1px solid #1e3842;
+  vertical-align: top;
+}
+
+#historyTable th {
+  color: #a2cbc4;
+  font-weight: 600;
+}
+
+#historyTable button {
+  padding: 4px 8px;
+  font-size: 0.76rem;
+}
+
+@media (max-width: 1220px) {
+  .scenario-lab-page .layout {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(280px, 44dvh) minmax(0, 1fr);
+    height: 100dvh;
+    min-height: 100dvh;
+  }
+
+  .scenario-lab-page .stage-card {
+    min-height: 0;
+  }
+
+  .scenario-lab-page .control-card {
+    max-height: none;
+  }
+}

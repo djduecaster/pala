@@ -3,7 +3,7 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>PALA Primitive Studio</title>
+    <title>PALA Lamp Sim - Primitive Studio</title>
     <link rel="stylesheet" href="styles.css">
   </head>
   <body>
@@ -14,7 +14,7 @@
 
       <aside class="control-card">
         <header>
-          <h1>PALA Primitive Studio</h1>
+          <h1>PALA Lamp Sim - Primitive Studio</h1>
           <p id="traceSource">Trace: loading...</p>
           <p id="modeLabel">Mode: bootstrap</p>
         </header>
@@ -23,6 +23,8 @@
           <div class="row mode-nav">
             <a class="nav-btn" href="/tools/primitive_sim/web/index.html?studio=1">Studio</a>
             <a class="nav-btn" href="/tools/primitive_sim/web/joint_checker.html">Joint Checker</a>
+            <a class="nav-btn" href="/tools/primitive_sim/web/state_machine.html">State Machine</a>
+            <a class="nav-btn" href="/tools/primitive_sim/web/scenario_lab.html">Scenario Lab</a>
             <button id="runSuiteBtn" type="button">Run Suite Playback</button>
           </div>
           <p id="suiteStatus" class="muted">Suite: idle</p>
@@ -42,14 +44,38 @@
               Duration (s)
               <input id="durationInput" type="number" min="0.05" max="20" step="0.05" value="2.0">
             </label>
+            <span id="runStateBadge" class="run-state idle">Idle</span>
+          </div>
+
+          <div class="row">
+            <label class="inline" for="autoRunToggle">
+              <input id="autoRunToggle" type="checkbox" checked>
+              Auto-run
+            </label>
+            <label class="inline stack" for="autoRunMsInput">
+              Debounce (ms)
+              <input id="autoRunMsInput" type="number" min="50" max="1000" step="10" value="200">
+            </label>
+            <label class="inline" for="compareToggle">
+              <input id="compareToggle" type="checkbox">
+              Compare baseline
+            </label>
+            <label class="inline stack" for="compareModeSelect">
+              Compare mode
+              <select id="compareModeSelect">
+                <option value="overlay" selected>Overlay</option>
+                <option value="split">Split</option>
+              </select>
+            </label>
           </div>
 
           <div id="paramForm" class="param-form"></div>
 
-          <div class="row">
+          <div class="row action-row">
             <button id="runBtn" type="button">Run Preview</button>
             <button id="resetBaselineBtn" type="button">Reset To Baseline</button>
             <button id="saveBaselineBtn" type="button">Save Baseline</button>
+            <button id="saveAllBaselineBtn" type="button">Save All</button>
           </div>
 
           <p id="baselineStatus">Baseline: pending...</p>

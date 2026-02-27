@@ -177,6 +177,66 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_reasoning_traces_comp ON reasoning_traces(component);
         CREATE INDEX IF NOT EXISTS idx_reasoning_traces_ts ON reasoning_traces(ts_wall_s);
 
+        CREATE TABLE IF NOT EXISTS cases (
+            case_id TEXT PRIMARY KEY,
+            trace_id TEXT NOT NULL,
+            req_id INTEGER,
+            first_event_index INTEGER,
+            start_ts_wall_s REAL,
+            end_ts_wall_s REAL,
+            duration_ms REAL,
+            status TEXT,
+            severity TEXT,
+            component TEXT,
+            event_count INTEGER,
+            error_count INTEGER,
+            warning_count INTEGER,
+            max_latency_ms REAL,
+            hardness REAL,
+            summary TEXT,
+            snippet TEXT,
+            source TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_cases_trace ON cases(trace_id);
+        CREATE INDEX IF NOT EXISTS idx_cases_req ON cases(req_id);
+        CREATE INDEX IF NOT EXISTS idx_cases_status ON cases(status);
+        CREATE INDEX IF NOT EXISTS idx_cases_severity ON cases(severity);
+        CREATE INDEX IF NOT EXISTS idx_cases_hardness ON cases(hardness);
+        CREATE INDEX IF NOT EXISTS idx_cases_start_ts ON cases(start_ts_wall_s);
+
+        CREATE TABLE IF NOT EXISTS case_events (
+            case_id TEXT NOT NULL,
+            row_id INTEGER NOT NULL,
+            event_index INTEGER NOT NULL,
+            source TEXT NOT NULL,
+            component TEXT,
+            phase TEXT,
+            status TEXT,
+            severity TEXT,
+            ts_wall_s REAL,
+            latency_ms REAL,
+            snippet TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_case_events_case ON case_events(case_id);
+        CREATE INDEX IF NOT EXISTS idx_case_events_event ON case_events(event_index);
+
+        CREATE TABLE IF NOT EXISTS case_labels (
+            case_id TEXT NOT NULL,
+            label TEXT NOT NULL,
+            score REAL,
+            reason TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_case_labels_case ON case_labels(case_id);
+        CREATE INDEX IF NOT EXISTS idx_case_labels_label ON case_labels(label);
+
+        CREATE TABLE IF NOT EXISTS case_reviews (
+            case_id TEXT PRIMARY KEY,
+            decision TEXT NOT NULL,
+            note TEXT,
+            reviewer TEXT,
+            reviewed_at_wall_s REAL
+        );
+
         CREATE TABLE IF NOT EXISTS meta (
             key TEXT PRIMARY KEY,
             value TEXT
@@ -217,6 +277,215 @@ def _read_trace_records(
     for _, msg in events:
         builder.ingest(msg)
     return builder.traces()
+
+
+def _normalize_status(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    return text or "unknown"
+
+
+def _severity_rank(value: str) -> int:
+    sev = str(value or "").strip().lower()
+    if sev == "error":
+        return 3
+    if sev == "warning":
+        return 2
+    if sev == "info":
+        return 1
+    return 0
+
+
+def _status_rank(value: str) -> int:
+    status = _normalize_status(value)
+    if "parse_fail" in status:
+        return 6
+    if "timeout" in status:
+        return 5
+    if "error" in status or "fail" in status:
+        return 4
+    if "warning" in status:
+        return 3
+    if status in {"ok", "success"}:
+        return 2
+    return 1
+
+
+def _select_status(values: Sequence[str]) -> str:
+    if not values:
+        return "unknown"
+    return sorted((_normalize_status(v) for v in values), key=_status_rank, reverse=True)[0]
+
+
+def _select_severity(values: Sequence[str]) -> str:
+    if not values:
+        return "info"
+    return sorted((str(v or "info").strip().lower() for v in values), key=_severity_rank, reverse=True)[0]
+
+
+def _compute_hardness(
+    *,
+    status: str,
+    severity: str,
+    duration_ms: Optional[float],
+    error_count: int,
+    warning_count: int,
+    max_latency_ms: Optional[float],
+) -> float:
+    score = 0.0
+    status_norm = _normalize_status(status)
+    sev_norm = str(severity or "info").strip().lower()
+    if sev_norm == "error":
+        score += 0.40
+    elif sev_norm == "warning":
+        score += 0.25
+    if "parse_fail" in status_norm:
+        score += 0.30
+    elif "timeout" in status_norm:
+        score += 0.24
+    elif "error" in status_norm or "fail" in status_norm:
+        score += 0.18
+    if duration_ms is not None:
+        if duration_ms >= 4000.0:
+            score += 0.16
+        elif duration_ms >= 2000.0:
+            score += 0.10
+    if max_latency_ms is not None:
+        if max_latency_ms >= 2500.0:
+            score += 0.15
+        elif max_latency_ms >= 1200.0:
+            score += 0.08
+    score += min(0.12, max(0, int(error_count)) * 0.03)
+    score += min(0.06, max(0, int(warning_count)) * 0.015)
+    return round(max(0.0, min(1.0, score)), 3)
+
+
+def _case_labels(
+    *,
+    status: str,
+    severity: str,
+    hardness: float,
+) -> List[Tuple[str, float, str]]:
+    labels: List[Tuple[str, float, str]] = []
+    norm_status = _normalize_status(status)
+    norm_severity = str(severity or "").strip().lower()
+    if "parse_fail" in norm_status:
+        labels.append(("planner_parse_fail", 0.99, f"status={norm_status}"))
+    if "timeout" in norm_status:
+        labels.append(("planner_timeout", 0.96, f"status={norm_status}"))
+    if norm_severity == "error":
+        labels.append(("reasoning_error", 0.84, f"severity={norm_severity}"))
+    if hardness >= 0.70:
+        labels.append(("hard_case", max(0.7, min(1.0, hardness)), f"hardness={hardness:.3f}"))
+    return labels
+
+
+def _build_cases(
+    *,
+    reasoning_trace_rows: Sequence[Mapping[str, Any]],
+    traces: Sequence[TraceRecord],
+) -> Tuple[List[Tuple[Any, ...]], List[Tuple[Any, ...]], List[Tuple[Any, ...]]]:
+    grouped: Dict[str, List[Mapping[str, Any]]] = {}
+    for row in reasoning_trace_rows:
+        trace_id = _as_text(row.get("trace_id")) or f"event:{_as_int(row.get('event_index')) or 0}"
+        grouped.setdefault(trace_id, []).append(row)
+
+    case_rows: List[Tuple[Any, ...]] = []
+    case_event_rows: List[Tuple[Any, ...]] = []
+    case_label_rows: List[Tuple[Any, ...]] = []
+    trace_lookup: Dict[str, TraceRecord] = {trace.trace_id: trace for trace in traces}
+
+    for trace_id in sorted(grouped):
+        rows = sorted(grouped[trace_id], key=lambda row: _as_int(row.get("row_id")) or 0)
+        if not rows:
+            continue
+        case_id = f"case:{trace_id}"
+        req_id = _as_int(next((row.get("req_id") for row in rows if _as_int(row.get("req_id")) is not None), None))
+        first_event_index = min((_as_int(row.get("event_index")) or 0) for row in rows)
+        ts_values = [_as_float(row.get("ts_wall_s")) for row in rows if _as_float(row.get("ts_wall_s")) is not None]
+        start_ts = min(ts_values) if ts_values else None
+        end_ts = max(ts_values) if ts_values else None
+        trace = trace_lookup.get(trace_id)
+        if trace is not None:
+            if start_ts is None:
+                start_ts = _as_float(trace.start_ts_wall_s)
+            if end_ts is None:
+                end_ts = _as_float(trace.end_ts_wall_s)
+        duration_ms = None
+        if trace is not None and _as_float(trace.duration_ms) is not None:
+            duration_ms = _as_float(trace.duration_ms)
+        elif start_ts is not None and end_ts is not None:
+            duration_ms = max(0.0, (end_ts - start_ts) * 1000.0)
+
+        statuses = [_as_text(row.get("status")) for row in rows]
+        severities = [_as_text(row.get("severity")) for row in rows]
+        if trace is not None:
+            statuses.append(_as_text(trace.status))
+            severities.append(_as_text(trace.severity))
+        status = _select_status(statuses)
+        severity = _select_severity(severities)
+        components = [_as_text(row.get("component")) for row in rows if _as_text(row.get("component"))]
+        component = components[0] if components else "unknown"
+        latencies = [_as_float(row.get("latency_ms")) for row in rows if _as_float(row.get("latency_ms")) is not None]
+        max_latency_ms = max(latencies) if latencies else None
+        error_count = sum(1 for row in rows if _as_text(row.get("severity")).lower() == "error")
+        warning_count = sum(1 for row in rows if _as_text(row.get("severity")).lower() == "warning")
+        summary = _as_text(trace.summary) if trace is not None else ""
+        if not summary:
+            summary = _as_text(rows[-1].get("snippet"))
+        snippet = _as_text(rows[-1].get("snippet")) or summary
+        hardness = _compute_hardness(
+            status=status,
+            severity=severity,
+            duration_ms=duration_ms,
+            error_count=error_count,
+            warning_count=warning_count,
+            max_latency_ms=max_latency_ms,
+        )
+
+        case_rows.append(
+            (
+                case_id,
+                trace_id,
+                req_id,
+                first_event_index,
+                start_ts,
+                end_ts,
+                duration_ms,
+                status,
+                severity,
+                component,
+                len(rows),
+                error_count,
+                warning_count,
+                max_latency_ms,
+                hardness,
+                summary,
+                snippet,
+                "sqlite.cases.v4",
+            )
+        )
+
+        for row in rows:
+            case_event_rows.append(
+                (
+                    case_id,
+                    _as_int(row.get("row_id")) or 0,
+                    _as_int(row.get("event_index")) or 0,
+                    _as_text(row.get("source")),
+                    _as_text(row.get("component")),
+                    _as_text(row.get("phase")),
+                    _as_text(row.get("status")),
+                    _as_text(row.get("severity")),
+                    _as_float(row.get("ts_wall_s")),
+                    _as_float(row.get("latency_ms")),
+                    _as_text(row.get("snippet")),
+                )
+            )
+
+        for label, score, reason in _case_labels(status=status, severity=severity, hardness=hardness):
+            case_label_rows.append((case_id, label, score, reason))
+
+    return case_rows, case_event_rows, case_label_rows
 
 
 def build_session_db(
@@ -314,6 +583,7 @@ def build_session_db(
         )
 
     reasoning_trace_rows = build_reasoning_trace_rows(events, traces=traces)
+    case_rows, case_event_rows, case_label_rows = _build_cases(reasoning_trace_rows=reasoning_trace_rows, traces=traces)
 
     with sqlite3.connect(target_db) as conn:
         _ensure_schema(conn)
@@ -322,6 +592,9 @@ def build_session_db(
         conn.execute("DELETE FROM traces")
         conn.execute("DELETE FROM trace_events")
         conn.execute("DELETE FROM reasoning_traces")
+        conn.execute("DELETE FROM cases")
+        conn.execute("DELETE FROM case_events")
+        conn.execute("DELETE FROM case_labels")
         conn.execute("DELETE FROM meta")
 
         conn.executemany(
@@ -431,6 +704,35 @@ def build_session_db(
                     for ref in trace.event_refs
                 ],
             )
+        if case_rows:
+            conn.executemany(
+                """
+                INSERT INTO cases (
+                    case_id, trace_id, req_id, first_event_index, start_ts_wall_s, end_ts_wall_s, duration_ms,
+                    status, severity, component, event_count, error_count, warning_count, max_latency_ms, hardness,
+                    summary, snippet, source
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                case_rows,
+            )
+        if case_event_rows:
+            conn.executemany(
+                """
+                INSERT INTO case_events (
+                    case_id, row_id, event_index, source, component, phase, status, severity, ts_wall_s, latency_ms, snippet
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                case_event_rows,
+            )
+        if case_label_rows:
+            conn.executemany(
+                """
+                INSERT INTO case_labels (
+                    case_id, label, score, reason
+                ) VALUES (?, ?, ?, ?)
+                """,
+                case_label_rows,
+            )
 
         now = time.time()
         meta_rows = [
@@ -439,6 +741,8 @@ def build_session_db(
             ("reasoning_count", str(len(reasoning_rows))),
             ("trace_count", str(len(traces))),
             ("reasoning_trace_count", str(len(reasoning_trace_rows))),
+            ("case_count", str(len(case_rows))),
+            ("case_label_count", str(len(case_label_rows))),
             ("source_counts_json", json.dumps(source_counts, separators=(",", ":"), ensure_ascii=True)),
         ]
         conn.executemany("INSERT INTO meta (key, value) VALUES (?, ?)", meta_rows)
@@ -450,6 +754,8 @@ def build_session_db(
         "reasoning_count": len(reasoning_rows),
         "trace_count": len(traces),
         "reasoning_trace_count": len(reasoning_trace_rows),
+        "case_count": len(case_rows),
+        "case_label_count": len(case_label_rows),
         "source_counts": source_counts,
     }
 
@@ -690,17 +996,17 @@ def query_session_db(
     if sort_key in {"latency", "latency_ms"}:
         order_events = f"COALESCE(e.latency_ms,-1) {order_sql}, e.seq DESC"
         order_reasoning = f"COALESCE(latency_ms,-1) {order_sql}, event_index DESC"
-        order_joined = f"COALESCE(latency_ms,-1) {order_sql}, row_id DESC"
+        order_joined = f"COALESCE(latency_ms,-1) {order_sql}, row_id {order_sql}"
         order_traces = f"COALESCE(duration_ms,-1) {order_sql}, start_ts_wall_s DESC"
     elif sort_key == "severity":
         order_events = f"{_severity_order_expr('e.severity')} {order_sql}, e.seq DESC"
         order_reasoning = f"{_severity_order_expr('severity')} {order_sql}, event_index DESC"
-        order_joined = f"{_severity_order_expr('severity')} {order_sql}, row_id DESC"
+        order_joined = f"{_severity_order_expr('severity')} {order_sql}, row_id {order_sql}"
         order_traces = f"{_severity_order_expr('severity')} {order_sql}, start_ts_wall_s DESC"
     elif sort_key in {"ts", "time", "timestamp"}:
         order_events = f"COALESCE(e.ts_wall_s,0) {order_sql}, e.seq DESC"
         order_reasoning = f"COALESCE(ts_wall_s,0) {order_sql}, event_index DESC"
-        order_joined = f"COALESCE(ts_wall_s,0) {order_sql}, row_id DESC"
+        order_joined = f"COALESCE(ts_wall_s,0) {order_sql}, row_id {order_sql}"
         order_traces = f"COALESCE(start_ts_wall_s,0) {order_sql}, trace_id DESC"
     else:
         order_events = "e.seq DESC"
@@ -710,6 +1016,15 @@ def query_session_db(
 
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
+        if want_events:
+            event_count = int(
+                conn.execute(
+                    f"SELECT COUNT(*) AS n FROM events e {where_events}",
+                    tuple(event_params),
+                ).fetchone()["n"]
+            )
+        else:
+            event_count = 0
         if want_events:
             events = [
                 dict(row)
@@ -723,6 +1038,15 @@ def query_session_db(
         else:
             events = []
         if want_traces:
+            trace_count = int(
+                conn.execute(
+                    f"SELECT COUNT(*) AS n FROM traces {where_traces}",
+                    tuple(trace_params),
+                ).fetchone()["n"]
+            )
+        else:
+            trace_count = 0
+        if want_traces:
             traces = [
                 dict(row)
                 for row in conn.execute(
@@ -734,6 +1058,15 @@ def query_session_db(
         else:
             traces = []
         if want_reasoning:
+            reasoning_count = int(
+                conn.execute(
+                    f"SELECT COUNT(*) AS n FROM reasoning {where_reasoning}",
+                    tuple(reasoning_params),
+                ).fetchone()["n"]
+            )
+        else:
+            reasoning_count = 0
+        if want_reasoning:
             reasoning = [
                 dict(row)
                 for row in conn.execute(
@@ -744,6 +1077,15 @@ def query_session_db(
             ]
         else:
             reasoning = []
+        if want_joined:
+            joined_count = int(
+                conn.execute(
+                    f"SELECT COUNT(*) AS n FROM reasoning_traces {where_joined}",
+                    tuple(joined_params),
+                ).fetchone()["n"]
+            )
+        else:
+            joined_count = 0
         if want_joined:
             joined = [
                 dict(row)
@@ -767,5 +1109,205 @@ def query_session_db(
         "traces": traces,
         "reasoning": reasoning,
         "joined": joined,
+        "counts": {
+            "events": event_count,
+            "traces": trace_count,
+            "reasoning": reasoning_count,
+            "joined": joined_count,
+        },
         "meta": meta,
+    }
+
+
+def query_cases_db(
+    path: str,
+    *,
+    query: str,
+    limit: int = 25,
+) -> Dict[str, Any]:
+    db_path = resolve_session_db_path(path)
+    if not os.path.exists(db_path):
+        raise FileNotFoundError(f"session db missing: {db_path}")
+    groups = _parse_query_tokens(query)
+    lim = max(1, int(limit))
+
+    clauses: List[str] = []
+    params: List[Any] = []
+    _append_or_like(clauses, params, "c.trace_id", groups["trace"])
+    _append_or_equals(clauses, params, "c.severity", groups["severity"])
+    _append_or_equals(clauses, params, "c.status", groups["status"])
+    _append_or_equals(clauses, params, "c.component", groups["component"])
+    _append_numeric_filters(clauses, params, column="c.max_latency_ms", filters=groups["latency_ms"])
+    _append_numeric_filters(clauses, params, column="c.duration_ms", filters=groups["duration_ms"])
+    _append_ts_range(clauses, params, column="c.start_ts_wall_s", filters=groups["ts"])
+    for value in groups["req"]:
+        req_value = _as_int(value)
+        if req_value is not None:
+            clauses.append("c.req_id = ?")
+            params.append(req_value)
+    for value in groups["text"]:
+        clauses.append("(c.case_id LIKE ? OR c.summary LIKE ? OR c.snippet LIKE ?)")
+        like = f"%{value}%"
+        params.extend([like, like, like])
+
+    where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    sort_key, order_sql = _sort_parts(groups)
+    if sort_key in {"severity"}:
+        order_sql_expr = f"{_severity_order_expr('c.severity')} {order_sql}, c.hardness DESC, c.start_ts_wall_s DESC"
+    elif sort_key in {"latency", "latency_ms"}:
+        order_sql_expr = f"COALESCE(c.max_latency_ms, -1) {order_sql}, c.hardness DESC, c.start_ts_wall_s DESC"
+    elif sort_key in {"duration", "duration_ms"}:
+        order_sql_expr = f"COALESCE(c.duration_ms, -1) {order_sql}, c.hardness DESC, c.start_ts_wall_s DESC"
+    elif sort_key in {"hardness", "score"}:
+        order_sql_expr = f"COALESCE(c.hardness, -1) {order_sql}, c.start_ts_wall_s DESC"
+    elif sort_key in {"ts", "time", "timestamp"}:
+        order_sql_expr = f"COALESCE(c.start_ts_wall_s, 0) {order_sql}, c.hardness DESC"
+    else:
+        order_sql_expr = "c.hardness DESC, c.start_ts_wall_s DESC"
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        total_count = int(
+            conn.execute(
+                f"SELECT COUNT(*) AS n FROM cases c {where_sql}",
+                tuple(params),
+            ).fetchone()["n"]
+        )
+        rows = [
+            dict(row)
+            for row in conn.execute(
+                f"""
+                SELECT
+                    c.case_id,
+                    c.trace_id,
+                    c.req_id,
+                    c.first_event_index,
+                    c.start_ts_wall_s,
+                    c.end_ts_wall_s,
+                    c.duration_ms,
+                    c.status,
+                    c.severity,
+                    c.component,
+                    c.event_count,
+                    c.error_count,
+                    c.warning_count,
+                    c.max_latency_ms,
+                    c.hardness,
+                    c.summary,
+                    c.snippet,
+                    c.source,
+                    r.decision,
+                    r.reviewed_at_wall_s,
+                    (
+                        SELECT GROUP_CONCAT(label, ',')
+                        FROM case_labels cl
+                        WHERE cl.case_id = c.case_id
+                    ) AS labels_csv
+                FROM cases c
+                LEFT JOIN case_reviews r ON r.case_id = c.case_id
+                {where_sql}
+                ORDER BY {order_sql_expr}
+                LIMIT ?
+                """,
+                (*params, lim),
+            ).fetchall()
+        ]
+        meta_rows = conn.execute("SELECT key, value FROM meta").fetchall()
+
+    meta = {str(row["key"]): row["value"] for row in meta_rows}
+    return {
+        "db_path": db_path,
+        "query": query,
+        "cases": rows,
+        "total_count": total_count,
+        "meta": meta,
+    }
+
+
+def query_case_detail_db(
+    path: str,
+    *,
+    case_id: str,
+    event_limit: int = 200,
+) -> Dict[str, Any]:
+    db_path = resolve_session_db_path(path)
+    if not os.path.exists(db_path):
+        raise FileNotFoundError(f"session db missing: {db_path}")
+    case_key = str(case_id or "").strip()
+    if not case_key:
+        return {"case": None, "events": [], "labels": [], "review": None}
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        case_row = conn.execute("SELECT * FROM cases WHERE case_id = ?", (case_key,)).fetchone()
+        labels = [
+            dict(row)
+            for row in conn.execute(
+                "SELECT label, score, reason FROM case_labels WHERE case_id = ? ORDER BY score DESC, label ASC",
+                (case_key,),
+            ).fetchall()
+        ]
+        events = [
+            dict(row)
+            for row in conn.execute(
+                """
+                SELECT row_id, event_index, source, component, phase, status, severity, ts_wall_s, latency_ms, snippet
+                FROM case_events
+                WHERE case_id = ?
+                ORDER BY row_id DESC
+                LIMIT ?
+                """,
+                (case_key, max(1, int(event_limit))),
+            ).fetchall()
+        ]
+        review_row = conn.execute(
+            "SELECT decision, note, reviewer, reviewed_at_wall_s FROM case_reviews WHERE case_id = ?",
+            (case_key,),
+        ).fetchone()
+    return {
+        "case": dict(case_row) if case_row is not None else None,
+        "events": events,
+        "labels": labels,
+        "review": dict(review_row) if review_row is not None else None,
+    }
+
+
+def review_case(
+    path: str,
+    *,
+    case_id: str,
+    decision: str,
+    note: str = "",
+    reviewer: str = "viewer",
+) -> Dict[str, Any]:
+    db_path = resolve_session_db_path(path)
+    if not os.path.exists(db_path):
+        raise FileNotFoundError(f"session db missing: {db_path}")
+    case_key = str(case_id or "").strip()
+    if not case_key:
+        raise ValueError("case_id is required")
+    decision_key = str(decision or "").strip().lower()
+    if decision_key not in {"accept", "reject", "needs_context", "label"}:
+        raise ValueError(f"unsupported decision: {decision}")
+    reviewed_at = time.time()
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO case_reviews (case_id, decision, note, reviewer, reviewed_at_wall_s)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(case_id) DO UPDATE SET
+                decision=excluded.decision,
+                note=excluded.note,
+                reviewer=excluded.reviewer,
+                reviewed_at_wall_s=excluded.reviewed_at_wall_s
+            """,
+            (case_key, decision_key, str(note or ""), str(reviewer or "viewer"), float(reviewed_at)),
+        )
+        conn.commit()
+    return {
+        "db_path": db_path,
+        "case_id": case_key,
+        "decision": decision_key,
+        "note": str(note or ""),
+        "reviewer": str(reviewer or "viewer"),
+        "reviewed_at_wall_s": float(reviewed_at),
     }

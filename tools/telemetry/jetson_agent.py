@@ -785,7 +785,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--pack-override",
         action="append",
         default=[],
-        help="Pack override key=value. Keys: include_sources, exclude_sources, add_journal, set_journal, panels.",
+        help="Pack override key=value. Keys: include_sources, exclude_sources, add_journal, set_journal.",
     )
     parser.add_argument(
         "--field-filter",

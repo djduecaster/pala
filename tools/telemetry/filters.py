@@ -15,7 +15,6 @@ class FieldFilter:
     source: str
     path: Tuple[str, ...]
     op: str
-    raw_value: str
     value: Any
     regex: Optional[re.Pattern[str]] = None
 
@@ -63,7 +62,6 @@ def parse_field_filter(expr: str) -> FieldFilter:
             source=source,
             path=path,
             op=op,
-            raw_value=raw_value,
             value=raw_value,
             regex=compiled,
         )
@@ -72,7 +70,6 @@ def parse_field_filter(expr: str) -> FieldFilter:
         source=source,
         path=path,
         op=op,
-        raw_value=raw_value,
         value=_coerce_scalar(raw_value),
     )
 

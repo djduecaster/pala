@@ -8,14 +8,6 @@ PROTOCOL_NAME = "pala.telemetry"
 PROTOCOL_VERSION = 1
 
 
-def monotonic_s() -> float:
-    return time.monotonic()
-
-
-def wall_s() -> float:
-    return time.time()
-
-
 def event(
     *,
     source: str,
@@ -32,8 +24,8 @@ def event(
         "type": msg_type,
         "source": source,
         "level": level,
-        "ts_mono_s": monotonic_s() if ts_mono_s is None else float(ts_mono_s),
-        "ts_wall_s": wall_s() if ts_wall_s is None else float(ts_wall_s),
+        "ts_mono_s": time.monotonic() if ts_mono_s is None else float(ts_mono_s),
+        "ts_wall_s": time.time() if ts_wall_s is None else float(ts_wall_s),
         "payload": payload,
     }
     if seq is not None:

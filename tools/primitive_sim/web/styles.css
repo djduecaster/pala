@@ -90,6 +90,15 @@ header p {
   flex-wrap: wrap;
 }
 
+.row.action-row {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding-top: 8px;
+  padding-bottom: 8px;
+  background: linear-gradient(180deg, rgba(9, 20, 26, 0.95), rgba(9, 20, 26, 0.7));
+}
+
 button,
 select,
 input[type="file"],
@@ -158,6 +167,44 @@ button:disabled {
   min-width: 116px;
 }
 
+#autoRunMsInput {
+  width: 96px;
+}
+
+.run-state {
+  margin-left: auto;
+  align-self: center;
+  padding: 4px 8px;
+  border-radius: 999px;
+  border: 1px solid #244550;
+  font-size: 0.78rem;
+  letter-spacing: 0.01em;
+}
+
+.run-state.idle {
+  color: var(--muted);
+}
+
+.run-state.dirty {
+  color: #ffd89a;
+  border-color: #885f2d;
+}
+
+.run-state.running {
+  color: #98ddff;
+  border-color: #356a87;
+}
+
+.run-state.synced {
+  color: var(--accent-2);
+  border-color: #2d6d66;
+}
+
+.run-state.error {
+  color: #ffb2a9;
+  border-color: #7b3b34;
+}
+
 .slider-label {
   display: block;
   color: var(--muted);
@@ -209,6 +256,29 @@ button:disabled {
   font-size: 0.84rem;
 }
 
+.param-control-row {
+  display: grid;
+  grid-template-columns: 26px minmax(100px, 1fr) 26px auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.param-control-row .step-btn {
+  padding: 4px 0;
+  text-align: center;
+}
+
+.param-value-note {
+  color: #9ec6bf;
+  font-size: 0.78rem;
+  min-width: 78px;
+}
+
+.field-error {
+  border-color: #8f3e38;
+  box-shadow: 0 0 0 1px rgba(255, 107, 93, 0.22);
+}
+
 .param-vector {
   display: grid;
   grid-template-columns: 1fr;
@@ -217,7 +287,7 @@ button:disabled {
 
 .param-vector-row {
   display: grid;
-  grid-template-columns: minmax(88px, 1fr) minmax(120px, 1fr);
+  grid-template-columns: minmax(68px, 1fr) minmax(150px, 1fr);
   gap: 8px;
   align-items: center;
 }

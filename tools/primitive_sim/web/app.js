@@ -12,7 +12,6 @@ const traceSource = document.getElementById("traceSource");
 const fileInput = document.getElementById("fileInput");
 const modeLabel = document.getElementById("modeLabel");
 
-const studioGroup = document.getElementById("studioGroup");
 const primitiveSelect = document.getElementById("primitiveSelect");
 const styleSelect = document.getElementById("styleSelect");
 const durationInput = document.getElementById("durationInput");
@@ -21,11 +20,16 @@ const baselineStatus = document.getElementById("baselineStatus");
 const runBtn = document.getElementById("runBtn");
 const resetBaselineBtn = document.getElementById("resetBaselineBtn");
 const saveBaselineBtn = document.getElementById("saveBaselineBtn");
+const saveAllBaselineBtn = document.getElementById("saveAllBaselineBtn");
 const runSuiteBtn = document.getElementById("runSuiteBtn");
 const suiteStatus = document.getElementById("suiteStatus");
+const autoRunToggle = document.getElementById("autoRunToggle");
+const autoRunMsInput = document.getElementById("autoRunMsInput");
+const compareToggle = document.getElementById("compareToggle");
+const compareModeSelect = document.getElementById("compareModeSelect");
+const runStateBadge = document.getElementById("runStateBadge");
 
 const state = {
-  trace: null,
   samples: [],
   jointNames: [],
   jointLimits: [],
@@ -48,7 +52,6 @@ const state = {
     pitch1: -1,
     pitch2: -1,
     pitch3: -1,
-    pitch: [],
   },
   studio: {
     enabled: false,
@@ -58,6 +61,17 @@ const state = {
     selectedPrimitive: "",
     commandDraft: {},
     dirty: false,
+    autoRunEnabled: true,
+    autoRunDebounceMs: 200,
+    autoRunTimer: null,
+    runInFlight: false,
+    rerunQueued: false,
+    requestToken: 0,
+    compareEnabled: false,
+    compareMode: "overlay",
+    baselineTrace: null,
+    baselineSourceLabel: "",
+    draftSourceLabel: "",
   },
 };
 
@@ -95,8 +109,56 @@ const LAMP_GEOM_POSITIVE_KEYS = new Set([
   "shadeFrontRadius",
 ]);
 
+const LAMP_THEME_DRAFT = Object.freeze({
+  baseOuter: "rgba(240, 225, 194, 0.92)",
+  baseInner: "rgba(198, 170, 126, 0.86)",
+  mast: "rgba(227, 232, 237, 0.96)",
+  hubRing: "rgba(178, 198, 212, 0.84)",
+  hubTick: "rgba(182, 198, 212, 0.76)",
+  arm1: "#d8e2e6",
+  arm2: "#dbe6eb",
+  arm3: "#cfd8de",
+  neck: "#becbd4",
+  shadeRear: "rgba(253, 232, 185, 0.95)",
+  shadeFront: "rgba(255, 214, 150, 0.95)",
+  shadeStrut: "rgba(255, 206, 128, 0.85)",
+  rollRing: "rgba(255, 154, 61, 0.9)",
+  rollTick: "rgba(255, 154, 61, 0.92)",
+  yawArrow: "rgba(255, 154, 61, 0.95)",
+  marker1: "#a8c5d6",
+  marker2: "#8bb8d7",
+  marker3: "#94d4d0",
+  marker4: "#f7ce86",
+});
+
+const LAMP_THEME_BASELINE = Object.freeze({
+  baseOuter: "rgba(136, 199, 206, 0.55)",
+  baseInner: "rgba(96, 161, 170, 0.55)",
+  mast: "rgba(149, 206, 216, 0.62)",
+  hubRing: "rgba(132, 191, 209, 0.62)",
+  hubTick: "rgba(132, 191, 209, 0.5)",
+  arm1: "rgba(146, 214, 220, 0.74)",
+  arm2: "rgba(146, 214, 220, 0.74)",
+  arm3: "rgba(146, 214, 220, 0.74)",
+  neck: "rgba(146, 214, 220, 0.74)",
+  shadeRear: "rgba(111, 186, 197, 0.78)",
+  shadeFront: "rgba(111, 186, 197, 0.78)",
+  shadeStrut: "rgba(111, 186, 197, 0.72)",
+  rollRing: "rgba(118, 215, 211, 0.85)",
+  rollTick: "rgba(118, 215, 211, 0.85)",
+  yawArrow: "rgba(118, 215, 211, 0.88)",
+  marker1: "rgba(118, 215, 211, 0.88)",
+  marker2: "rgba(118, 215, 211, 0.88)",
+  marker3: "rgba(118, 215, 211, 0.88)",
+  marker4: "rgba(118, 215, 211, 0.88)",
+});
+
 function deepClone(v) {
   return JSON.parse(JSON.stringify(v));
+}
+
+function stableJson(value) {
+  return JSON.stringify(value ?? null);
 }
 
 function clamp(v, lo, hi) {
@@ -301,7 +363,7 @@ function drawJointMarker(point, color, radiusPx, camera) {
   ctx.fill();
 }
 
-function drawShadeFrustum(rearCenter, frontCenter, axis, rearR, frontR, camera) {
+function drawShadeFrustum(rearCenter, frontCenter, axis, rearR, frontR, camera, theme) {
   const basis = orthonormalBasis(axis);
   const rearPts = [];
   const frontPts = [];
@@ -315,12 +377,12 @@ function drawShadeFrustum(rearCenter, frontCenter, axis, rearR, frontR, camera) 
     frontPts.push(vecAdd(frontCenter, vecScale(radial, frontR)));
   }
   for (let i = 0; i < segs; i += 1) {
-    drawLine3D(rearPts[i], rearPts[(i + 1) % segs], "rgba(253, 232, 185, 0.95)", 1.8, camera);
-    drawLine3D(frontPts[i], frontPts[(i + 1) % segs], "rgba(255, 214, 150, 0.95)", 1.4, camera);
+    drawLine3D(rearPts[i], rearPts[(i + 1) % segs], theme.shadeRear, 1.8, camera);
+    drawLine3D(frontPts[i], frontPts[(i + 1) % segs], theme.shadeFront, 1.4, camera);
   }
   const struts = [0, 4, 8, 12];
   struts.forEach((i) => {
-    drawLine3D(rearPts[i], frontPts[i], "rgba(255, 206, 128, 0.85)", 1.5, camera);
+    drawLine3D(rearPts[i], frontPts[i], theme.shadeStrut, 1.5, camera);
   });
 }
 
@@ -353,38 +415,16 @@ function resolveMapping(names) {
     pitch1: lower.indexOf("pitch1"),
     pitch2: lower.indexOf("pitch2"),
     pitch3: lower.indexOf("pitch3"),
-    pitch: [],
   };
 
-  const used = new Set(
-    [mapping.yaw, mapping.roll, mapping.pitch1, mapping.pitch2, mapping.pitch3].filter((v) => v >= 0),
-  );
-  const genericPitch = [];
-  lower.forEach((name, idx) => {
-    if (name.includes("pitch") && !used.has(idx)) {
-      genericPitch.push(idx);
-    }
-  });
-
-  const fallback = [];
-  for (let i = 0; i < names.length; i += 1) {
-    if (!used.has(i)) {
-      fallback.push(i);
-    }
+  const missing = Object.entries(mapping)
+    .filter(([, idx]) => idx < 0)
+    .map(([name]) => name);
+  if (missing.length) {
+    throw new Error(
+      `Missing required joint names: ${missing.join(", ")}. expected yaw,pitch1,pitch2,roll,pitch3`,
+    );
   }
-
-  ["pitch1", "pitch2", "pitch3"].forEach((slot) => {
-    if (mapping[slot] >= 0) {
-      return;
-    }
-    if (genericPitch.length > 0) {
-      mapping[slot] = genericPitch.shift();
-      return;
-    }
-    mapping[slot] = fallback.length > 0 ? fallback.shift() : -1;
-  });
-
-  mapping.pitch = [mapping.pitch1, mapping.pitch2, mapping.pitch3].filter((idx) => idx >= 0);
   return mapping;
 }
 
@@ -451,21 +491,21 @@ function forwardKinematics(sample) {
   };
 }
 
-function drawLamp(sample, camera) {
+function drawLamp(sample, camera, theme = LAMP_THEME_DRAFT) {
   const k = forwardKinematics(sample);
   const g = state.lampGeom || LAMP_GEOM;
 
-  drawCircle3D(k.baseCenter, [0, 1, 0], g.baseRadius, "rgba(240, 225, 194, 0.92)", 3.6, camera, 36);
-  drawCircle3D(k.baseCenter, [0, 1, 0], g.baseRadius * 0.58, "rgba(198, 170, 126, 0.86)", 1.8, camera, 28);
-  drawLine3D(k.mastBottom, k.mastTop, "rgba(227, 232, 237, 0.96)", 8, camera);
+  drawCircle3D(k.baseCenter, [0, 1, 0], g.baseRadius, theme.baseOuter, 3.6, camera, 36);
+  drawCircle3D(k.baseCenter, [0, 1, 0], g.baseRadius * 0.58, theme.baseInner, 1.8, camera, 28);
+  drawLine3D(k.mastBottom, k.mastTop, theme.mast, 8, camera);
 
-  drawCircle3D(k.yawHub, [0, 1, 0], 0.055, "rgba(178, 198, 212, 0.84)", 1.9, camera, 24);
-  drawLine3D(k.yawHub, vecAdd(k.yawHub, [0, 0.04, 0]), "rgba(182, 198, 212, 0.76)", 3, camera);
+  drawCircle3D(k.yawHub, [0, 1, 0], 0.055, theme.hubRing, 1.9, camera, 24);
+  drawLine3D(k.yawHub, vecAdd(k.yawHub, [0, 0.04, 0]), theme.hubTick, 3, camera);
 
-  drawLine3D(k.yawHub, k.elbow, "#d8e2e6", 6.5, camera);
-  drawLine3D(k.elbow, k.wrist, "#dbe6eb", 6.2, camera);
-  drawLine3D(k.wrist, k.headPivot, "#cfd8de", 5.2, camera);
-  drawLine3D(k.headPivot, k.shadeRear, "#becbd4", 4.2, camera);
+  drawLine3D(k.yawHub, k.elbow, theme.arm1, 6.5, camera);
+  drawLine3D(k.elbow, k.wrist, theme.arm2, 6.2, camera);
+  drawLine3D(k.wrist, k.headPivot, theme.arm3, 5.2, camera);
+  drawLine3D(k.headPivot, k.shadeRear, theme.neck, 4.2, camera);
 
   drawShadeFrustum(
     k.shadeRear,
@@ -474,49 +514,106 @@ function drawLamp(sample, camera) {
     g.shadeRearRadius,
     g.shadeFrontRadius,
     camera,
+    theme,
   );
 
-  drawCircle3D(k.headPivot, k.forearmAxis, 0.04, "rgba(255, 154, 61, 0.9)", 1.4, camera, 18);
+  drawCircle3D(k.headPivot, k.forearmAxis, 0.04, theme.rollRing, 1.4, camera, 18);
   drawLine3D(
     vecAdd(k.headPivot, vecScale(k.rollCueDir, 0.05)),
     vecAdd(k.headPivot, vecScale(k.rollCueDir, -0.05)),
-    "rgba(255, 154, 61, 0.92)",
+    theme.rollTick,
     2.2,
     camera,
   );
 
-  drawJointMarker(k.yawHub, "#a8c5d6", 4.3, camera);
-  drawJointMarker(k.elbow, "#8bb8d7", 4.0, camera);
-  drawJointMarker(k.wrist, "#94d4d0", 3.8, camera);
-  drawJointMarker(k.headPivot, "#f7ce86", 3.8, camera);
+  drawJointMarker(k.yawHub, theme.marker1, 4.3, camera);
+  drawJointMarker(k.elbow, theme.marker2, 4.0, camera);
+  drawJointMarker(k.wrist, theme.marker3, 3.8, camera);
+  drawJointMarker(k.headPivot, theme.marker4, 3.8, camera);
 
   const yawArrow = matVec(k.rotYaw, [0.2, 0, 0]);
   drawLine3D(
     vecAdd(k.yawHub, [0, 0.02, 0]),
     vecAdd(vecAdd(k.yawHub, [0, 0.02, 0]), yawArrow),
-    "rgba(255, 154, 61, 0.95)",
+    theme.yawArrow,
     2.5,
     camera,
   );
 }
 
+function drawBackdrop() {
+  const bg = ctx.createLinearGradient(0, 0, 0, canvas.height);
+  bg.addColorStop(0.0, "#0d2f3c");
+  bg.addColorStop(0.65, "#0a1d28");
+  bg.addColorStop(1.0, "#071219");
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+}
+
+function sampleFromTrace(trace, idx) {
+  const samples = Array.isArray(trace?.samples) ? trace.samples : [];
+  if (!samples.length) {
+    return null;
+  }
+  const clamped = clamp(Math.round(idx), 0, samples.length - 1);
+  return samples[clamped];
+}
+
 function drawScene(sample) {
   resizeCanvas();
-
-  const g = ctx.createLinearGradient(0, 0, 0, canvas.height);
-  g.addColorStop(0.0, "#0d2f3c");
-  g.addColorStop(0.65, "#0a1d28");
-  g.addColorStop(1.0, "#071219");
-  ctx.fillStyle = g;
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  drawBackdrop();
 
   const camera = makeCamera();
   drawGrid(camera);
-  drawLamp(sample, camera);
+
+  const compareEnabled =
+    state.studio.compareEnabled &&
+    state.studio.baselineTrace &&
+    Array.isArray(state.studio.baselineTrace.samples) &&
+    state.studio.baselineTrace.samples.length > 0;
+  if (compareEnabled) {
+    const baselineSample = sampleFromTrace(state.studio.baselineTrace, state.idx);
+    if (state.studio.compareMode === "split" && baselineSample) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(0, 0, canvas.width * 0.5, canvas.height);
+      ctx.clip();
+      drawGrid(camera);
+      drawLamp(baselineSample, camera, LAMP_THEME_BASELINE);
+      ctx.restore();
+
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(canvas.width * 0.5, 0, canvas.width * 0.5, canvas.height);
+      ctx.clip();
+      drawGrid(camera);
+      drawLamp(sample, camera, LAMP_THEME_DRAFT);
+      ctx.restore();
+
+      ctx.strokeStyle = "rgba(179, 212, 222, 0.35)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(canvas.width * 0.5, 0);
+      ctx.lineTo(canvas.width * 0.5, canvas.height);
+      ctx.stroke();
+    } else {
+      if (baselineSample) {
+        drawLamp(baselineSample, camera, LAMP_THEME_BASELINE);
+      }
+      drawLamp(sample, camera, LAMP_THEME_DRAFT);
+    }
+  } else {
+    drawLamp(sample, camera, LAMP_THEME_DRAFT);
+  }
 
   ctx.fillStyle = "rgba(225, 245, 241, 0.82)";
   ctx.font = `${Math.max(14, Math.floor(canvas.height * 0.025))}px Space Grotesk, sans-serif`;
   ctx.fillText("Drag canvas to orbit | Chain: yaw -> pitch1 -> pitch2 -> roll -> pitch3", 16, 28);
+  if (compareEnabled) {
+    const modeTag = state.studio.compareMode === "split" ? "split" : "overlay";
+    ctx.fillStyle = "rgba(193, 235, 228, 0.84)";
+    ctx.fillText(`Compare: baseline(cyan) vs draft(orange) [${modeTag}]`, 16, 54);
+  }
 }
 
 function buildJointRows() {
@@ -595,26 +692,59 @@ function setIndex(nextIdx) {
   drawScene(sample);
 }
 
-function loadTrace(trace, sourceLabel) {
+function updateTraceSourceLabel() {
+  if (state.studio.compareEnabled && state.studio.baselineSourceLabel && state.studio.draftSourceLabel) {
+    traceSource.textContent = `Trace: draft=${state.studio.draftSourceLabel} | baseline=${state.studio.baselineSourceLabel}`;
+    return;
+  }
+  if (state.studio.draftSourceLabel) {
+    traceSource.textContent = `Trace: ${state.studio.draftSourceLabel}`;
+    return;
+  }
+  if (state.studio.baselineSourceLabel) {
+    traceSource.textContent = `Trace: ${state.studio.baselineSourceLabel}`;
+    return;
+  }
+  traceSource.textContent = "Trace: loading...";
+}
+
+function loadTrace(trace, sourceLabel, { asBaseline = false } = {}) {
   if (!trace || !Array.isArray(trace.samples) || trace.samples.length === 0) {
     throw new Error("Trace must contain a non-empty samples array");
   }
 
-  state.trace = trace;
+  if (asBaseline) {
+    state.studio.baselineTrace = trace;
+    state.studio.baselineSourceLabel = String(sourceLabel);
+    updateTraceSourceLabel();
+    if (state.samples.length) {
+      drawScene(state.samples[state.idx]);
+    }
+    return;
+  }
+
   state.samples = trace.samples;
 
-  const names = Array.isArray(trace?.metadata?.joint_names)
-    ? trace.metadata.joint_names.map((v) => String(v))
-    : trace.samples[0].joint_angles_rad.map((_, i) => `joint_${i}`);
+  const namesRaw = trace?.metadata?.joint_names;
+  const limitsRaw = trace?.metadata?.joint_limits_rad;
+  const dtRaw = trace?.metadata?.dt_s;
+  if (!Array.isArray(namesRaw) || !namesRaw.length) {
+    throw new Error("Trace metadata.joint_names is required");
+  }
+  if (!Array.isArray(limitsRaw) || limitsRaw.length !== namesRaw.length) {
+    throw new Error("Trace metadata.joint_limits_rad is required and must match joint_names");
+  }
+  if (!Number.isFinite(Number(dtRaw)) || Number(dtRaw) <= 0) {
+    throw new Error("Trace metadata.dt_s must be a positive number");
+  }
 
-  const limits = Array.isArray(trace?.metadata?.joint_limits_rad)
-    ? trace.metadata.joint_limits_rad
-    : names.map(() => [-1.57, 1.57]);
+  const names = namesRaw.map((v) => String(v));
+  const limits = limitsRaw;
 
   state.jointNames = names;
   state.jointLimits = limits;
   state.lampGeom = resolveLampGeometry(trace?.metadata?.lamp_geometry);
-  state.dtS = Number(trace?.metadata?.dt_s || 1 / 60);
+  state.dtS = Number(dtRaw);
   state.mapping = resolveMapping(names);
 
   timeline.min = "0";
@@ -629,7 +759,8 @@ function loadTrace(trace, sourceLabel) {
   state.lastFrameMs = null;
   playPauseBtn.textContent = "Play";
 
-  traceSource.textContent = `Trace: ${sourceLabel}`;
+  state.studio.draftSourceLabel = String(sourceLabel);
+  updateTraceSourceLabel();
   setIndex(0);
 }
 
@@ -702,7 +833,8 @@ async function apiPost(path, payload) {
     throw new Error(`${res.status} ${res.statusText}: invalid JSON response`);
   }
   if (!res.ok) {
-    throw new Error(data?.error || `${res.status} ${res.statusText}`);
+    const code = data?.code ? `${data.code}: ` : "";
+    throw new Error(`${code}${data?.error || `${res.status} ${res.statusText}`}`);
   }
   return data;
 }
@@ -739,15 +871,38 @@ function setMode(text) {
   modeLabel.textContent = `Mode: ${text}`;
 }
 
+function setRunState(kind, detail = "") {
+  const next = String(kind || "idle");
+  runStateBadge.className = `run-state ${next}`;
+  if (detail) {
+    runStateBadge.textContent = detail;
+    return;
+  }
+  if (next === "dirty") {
+    runStateBadge.textContent = "Unsaved";
+    return;
+  }
+  if (next === "running") {
+    runStateBadge.textContent = "Running";
+    return;
+  }
+  if (next === "synced") {
+    runStateBadge.textContent = "Synced";
+    return;
+  }
+  if (next === "error") {
+    runStateBadge.textContent = "Run Error";
+    return;
+  }
+  runStateBadge.textContent = "Idle";
+}
+
 function setBaselineStatus(text, isError = false) {
   baselineStatus.textContent = text;
   baselineStatus.className = isError ? "bad" : "ok";
 }
 
 function setSuiteStatus(text, isError = false) {
-  if (!suiteStatus) {
-    return;
-  }
   suiteStatus.textContent = text;
   suiteStatus.className = isError ? "muted bad" : "muted";
 }
@@ -759,16 +914,53 @@ function getSelectedSpec() {
 
 function baselineCommandFor(primitiveId) {
   const src = state.studio.baseline?.primitives?.[primitiveId];
-  if (src && typeof src === "object") {
-    return deepClone(src);
+  if (!src || typeof src !== "object") {
+    throw new Error(`Missing baseline command for primitive: ${primitiveId}`);
   }
-  return {};
+  return deepClone(src);
 }
 
-function markDirty(isDirty) {
-  state.studio.dirty = Boolean(isDirty);
+function syncDirtyFromBaseline() {
+  const baselineCmd = baselineCommandFor(state.studio.selectedPrimitive);
+  state.studio.dirty = stableJson(baselineCmd) !== stableJson(state.studio.commandDraft);
   const dirtyTag = state.studio.dirty ? " (unsaved)" : "";
-  setBaselineStatus(`Baseline: ${state.studio.selectedPrimitive}${dirtyTag}`);
+  const stamp = String(state.studio.baseline?.updated_at_utc || "").trim();
+  const stampTag = stamp ? ` | updated ${stamp}` : "";
+  setBaselineStatus(`Baseline: ${state.studio.selectedPrimitive}${dirtyTag}${stampTag}`);
+}
+
+function clearAutoRunTimer() {
+  if (state.studio.autoRunTimer != null) {
+    window.clearTimeout(state.studio.autoRunTimer);
+    state.studio.autoRunTimer = null;
+  }
+}
+
+function scheduleStudioRun(reason = "edit") {
+  if (!state.studio.enabled) {
+    return;
+  }
+  clearAutoRunTimer();
+  if (!state.studio.autoRunEnabled) {
+    setRunState("dirty", `Dirty (${reason})`);
+    return;
+  }
+  const waitMs = clamp(Math.round(Number(state.studio.autoRunDebounceMs || 200)), 50, 1000);
+  state.studio.autoRunTimer = window.setTimeout(() => {
+    state.studio.autoRunTimer = null;
+    runStudioPreview({ manual: false, reason: `auto:${reason}` });
+  }, waitMs);
+}
+
+function markDirty(isDirty, { schedule = true, reason = "edit" } = {}) {
+  state.studio.dirty = Boolean(isDirty);
+  syncDirtyFromBaseline();
+  if (state.studio.dirty && !state.studio.runInFlight) {
+    setRunState("dirty");
+  }
+  if (schedule) {
+    scheduleStudioRun(reason);
+  }
 }
 
 function createNumberInput(value, spec) {
@@ -785,6 +977,37 @@ function createNumberInput(value, spec) {
     input.step = String(spec.step);
   }
   return input;
+}
+
+function isAngularParam(name) {
+  return String(name).toLowerCase().endsWith("_rad");
+}
+
+function setNumberInputVisualState(input, isError) {
+  if (isError) {
+    input.classList.add("field-error");
+  } else {
+    input.classList.remove("field-error");
+  }
+}
+
+function clampBySpec(numeric, spec, type) {
+  let next = numeric;
+  if (Number.isFinite(Number(spec.min))) {
+    next = Math.max(next, Number(spec.min));
+  }
+  if (Number.isFinite(Number(spec.max))) {
+    next = Math.min(next, Number(spec.max));
+  }
+  if (type === "int") {
+    next = Math.round(next);
+  }
+  return next;
+}
+
+function updateVectorDraft(name, idx, numeric, spec) {
+  const next = clampBySpec(numeric, spec, "float");
+  state.studio.commandDraft[name][idx] = next;
 }
 
 function renderParamForm() {
@@ -821,7 +1044,7 @@ function renderParamForm() {
       input.checked = Boolean(currentValue);
       input.addEventListener("change", () => {
         state.studio.commandDraft[name] = input.checked;
-        markDirty(true);
+        markDirty(true, { reason: name });
       });
       item.appendChild(input);
       paramForm.appendChild(item);
@@ -841,7 +1064,7 @@ function renderParamForm() {
       select.value = currentValue == null ? fallback : String(currentValue);
       select.addEventListener("change", () => {
         state.studio.commandDraft[name] = select.value;
-        markDirty(true);
+        markDirty(true, { reason: name });
       });
       item.appendChild(select);
       paramForm.appendChild(item);
@@ -871,17 +1094,64 @@ function renderParamForm() {
         compLabel.textContent = labels[i] || `joint_${i}`;
         row.appendChild(compLabel);
 
-        const input = createNumberInput(values[i], {
+        const vectorSpec = {
           min: Number.isFinite(Number(mins[i])) ? Number(mins[i]) : undefined,
           max: Number.isFinite(Number(maxs[i])) ? Number(maxs[i]) : undefined,
           step: Number.isFinite(Number(paramSpec.step)) ? Number(paramSpec.step) : 0.01,
-        });
+        };
+        const input = createNumberInput(values[i], vectorSpec);
+        const control = document.createElement("div");
+        control.className = "param-control-row";
+        const minus = document.createElement("button");
+        minus.type = "button";
+        minus.className = "step-btn";
+        minus.textContent = "-";
+        const plus = document.createElement("button");
+        plus.type = "button";
+        plus.className = "step-btn";
+        plus.textContent = "+";
+        const note = document.createElement("span");
+        note.className = "param-value-note";
+
+        const applyValue = (rawValue) => {
+          const numeric = Number(rawValue);
+          if (!Number.isFinite(numeric)) {
+            setNumberInputVisualState(input, true);
+            return;
+          }
+          setNumberInputVisualState(input, false);
+          updateVectorDraft(name, i, numeric, vectorSpec);
+          input.value = String(state.studio.commandDraft[name][i]);
+          note.textContent = `${(Number(state.studio.commandDraft[name][i]) * RAD_TO_DEG).toFixed(1)} deg`;
+          markDirty(true, { reason: `${name}[${i}]` });
+        };
+
         input.addEventListener("input", () => {
-          const next = Number(input.value);
-          state.studio.commandDraft[name][i] = Number.isFinite(next) ? next : 0;
-          markDirty(true);
+          applyValue(input.value);
         });
-        row.appendChild(input);
+
+        const stepValue = Number.isFinite(Number(vectorSpec.step)) ? Number(vectorSpec.step) : 0.01;
+        minus.addEventListener("click", () => {
+          const baseValue = Number(input.value);
+          if (!Number.isFinite(baseValue)) {
+            return;
+          }
+          applyValue(baseValue - stepValue);
+        });
+        plus.addEventListener("click", () => {
+          const baseValue = Number(input.value);
+          if (!Number.isFinite(baseValue)) {
+            return;
+          }
+          applyValue(baseValue + stepValue);
+        });
+
+        control.appendChild(minus);
+        control.appendChild(input);
+        control.appendChild(plus);
+        control.appendChild(note);
+        note.textContent = `${(Number(values[i] || 0) * RAD_TO_DEG).toFixed(1)} deg`;
+        row.appendChild(control);
         vecWrap.appendChild(row);
       }
 
@@ -891,23 +1161,82 @@ function renderParamForm() {
     }
 
     const numericInput = createNumberInput(currentValue, paramSpec);
-    numericInput.addEventListener("input", () => {
-      let next = Number(numericInput.value);
-      if (!Number.isFinite(next)) {
+    const controlRow = document.createElement("div");
+    controlRow.className = "param-control-row";
+    const minus = document.createElement("button");
+    minus.type = "button";
+    minus.className = "step-btn";
+    minus.textContent = "-";
+    const plus = document.createElement("button");
+    plus.type = "button";
+    plus.className = "step-btn";
+    plus.textContent = "+";
+    const note = document.createElement("span");
+    note.className = "param-value-note";
+
+    const applyValue = (rawValue) => {
+      const numeric = Number(rawValue);
+      if (!Number.isFinite(numeric)) {
+        setNumberInputVisualState(numericInput, true);
         return;
       }
-      if (type === "int") {
-        next = Math.round(next);
-      }
+      setNumberInputVisualState(numericInput, false);
+      const next = clampBySpec(numeric, paramSpec, type);
       state.studio.commandDraft[name] = next;
-      markDirty(true);
+      numericInput.value = String(next);
+      if (isAngularParam(name)) {
+        note.textContent = `${(next * RAD_TO_DEG).toFixed(1)} deg`;
+      } else {
+        note.textContent = "";
+      }
+      markDirty(true, { reason: name });
+    };
+
+    numericInput.addEventListener("input", () => {
+      applyValue(numericInput.value);
     });
-    item.appendChild(numericInput);
+
+    const stepValue = Number.isFinite(Number(paramSpec.step)) ? Number(paramSpec.step) : type === "int" ? 1 : 0.01;
+    minus.addEventListener("click", () => {
+      const baseValue = Number(numericInput.value);
+      if (!Number.isFinite(baseValue)) {
+        return;
+      }
+      applyValue(baseValue - stepValue);
+    });
+    plus.addEventListener("click", () => {
+      const baseValue = Number(numericInput.value);
+      if (!Number.isFinite(baseValue)) {
+        return;
+      }
+      applyValue(baseValue + stepValue);
+    });
+
+    controlRow.appendChild(minus);
+    controlRow.appendChild(numericInput);
+    controlRow.appendChild(plus);
+    controlRow.appendChild(note);
+    if (isAngularParam(name)) {
+      note.textContent = `${(Number(currentValue || 0) * RAD_TO_DEG).toFixed(1)} deg`;
+    }
+    item.appendChild(controlRow);
     paramForm.appendChild(item);
   });
 }
 
-function setStudioPrimitive(nextPrimitive, { resetDuration = true } = {}) {
+function buildStudioPayload(command) {
+  const primitive = state.studio.selectedPrimitive;
+  const style = styleSelect.value || "calm";
+  const durationS = Number(durationInput.value);
+  return {
+    primitive,
+    style,
+    duration_s: Number.isFinite(durationS) ? durationS : defaultDurationForPrimitive(primitive),
+    command,
+  };
+}
+
+function setStudioPrimitive(nextPrimitive, { resetDuration = true, schedule = true } = {}) {
   state.studio.selectedPrimitive = String(nextPrimitive);
   primitiveSelect.value = state.studio.selectedPrimitive;
   state.studio.commandDraft = baselineCommandFor(state.studio.selectedPrimitive);
@@ -915,31 +1244,66 @@ function setStudioPrimitive(nextPrimitive, { resetDuration = true } = {}) {
     durationInput.value = String(defaultDurationForPrimitive(state.studio.selectedPrimitive));
   }
   renderParamForm();
-  markDirty(false);
+  markDirty(false, { schedule, reason: "primitive" });
 }
 
-async function runStudioPreview() {
+async function runStudioPreview({ manual = false, reason = "manual" } = {}) {
   if (!state.studio.enabled) {
     return;
   }
-  const primitive = state.studio.selectedPrimitive;
-  const style = styleSelect.value || "calm";
-  const durationS = Number(durationInput.value);
-  const payload = {
-    primitive,
-    style,
-    duration_s: Number.isFinite(durationS) ? durationS : defaultDurationForPrimitive(primitive),
-    command: state.studio.commandDraft,
-  };
+  clearAutoRunTimer();
+  if (state.studio.runInFlight) {
+    state.studio.rerunQueued = true;
+    return;
+  }
 
+  state.studio.runInFlight = true;
+  const token = ++state.studio.requestToken;
   runBtn.disabled = true;
+  setRunState("running", manual ? "Running" : "Auto-running");
+  statusBox.textContent = `Studio run: ${reason}`;
+
   try {
-    const trace = await apiPost("/api/simulate", payload);
-    loadTrace(trace, `studio:${primitive}`);
+    const primitive = state.studio.selectedPrimitive;
+    const draftPayload = buildStudioPayload(state.studio.commandDraft);
+
+    let draftTrace;
+    let baselineTrace = null;
+    if (state.studio.compareEnabled) {
+      const baselinePayload = buildStudioPayload(baselineCommandFor(primitive));
+      [draftTrace, baselineTrace] = await Promise.all([
+        apiPost("/api/simulate", draftPayload),
+        apiPost("/api/simulate", baselinePayload),
+      ]);
+    } else {
+      draftTrace = await apiPost("/api/simulate", draftPayload);
+    }
+
+    if (token !== state.studio.requestToken) {
+      return;
+    }
+
+    if (baselineTrace) {
+      loadTrace(baselineTrace, `baseline:${primitive}`, { asBaseline: true });
+    } else {
+      state.studio.baselineTrace = null;
+      state.studio.baselineSourceLabel = "";
+      updateTraceSourceLabel();
+    }
+
+    loadTrace(draftTrace, `studio:${primitive}`);
+    syncDirtyFromBaseline();
+    setRunState("synced", state.studio.dirty ? "Preview (unsaved)" : "Preview synced");
   } catch (err) {
+    setRunState("error", "Run Error");
     statusBox.textContent = `Studio run failed: ${err}`;
   } finally {
+    state.studio.runInFlight = false;
     runBtn.disabled = false;
+    if (state.studio.rerunQueued) {
+      state.studio.rerunQueued = false;
+      runStudioPreview({ manual: false, reason: "queued" });
+    }
   }
 }
 
@@ -956,13 +1320,45 @@ async function saveBaseline() {
     state.studio.baseline = updated;
     state.studio.commandDraft = baselineCommandFor(state.studio.selectedPrimitive);
     renderParamForm();
-    markDirty(false);
-    const stamp = new Date().toLocaleTimeString();
+    syncDirtyFromBaseline();
+    const stamp = String(updated?.updated_at_utc || new Date().toISOString());
     setBaselineStatus(`Baseline saved: ${state.studio.selectedPrimitive} at ${stamp}`);
+    setRunState("synced", "Baseline saved");
+    if (state.studio.compareEnabled) {
+      runStudioPreview({ manual: false, reason: "baseline_saved" });
+    }
   } catch (err) {
     setBaselineStatus(`Save failed: ${err}`, true);
+    setRunState("error", "Save Error");
   } finally {
     saveBaselineBtn.disabled = false;
+  }
+}
+
+async function saveAllBaselines() {
+  if (!state.studio.enabled) {
+    return;
+  }
+  saveAllBaselineBtn.disabled = true;
+  try {
+    const nextPrimitives = deepClone(state.studio.baseline?.primitives || {});
+    nextPrimitives[state.studio.selectedPrimitive] = deepClone(state.studio.commandDraft);
+    const updated = await apiPost("/api/baseline", { primitives: nextPrimitives });
+    state.studio.baseline = updated;
+    state.studio.commandDraft = baselineCommandFor(state.studio.selectedPrimitive);
+    renderParamForm();
+    syncDirtyFromBaseline();
+    const stamp = String(updated?.updated_at_utc || new Date().toISOString());
+    setBaselineStatus(`Baseline saved (all): ${stamp}`);
+    setRunState("synced", "Baseline saved");
+    if (state.studio.compareEnabled) {
+      runStudioPreview({ manual: false, reason: "baseline_save_all" });
+    }
+  } catch (err) {
+    setBaselineStatus(`Save all failed: ${err}`, true);
+    setRunState("error", "Save Error");
+  } finally {
+    saveAllBaselineBtn.disabled = false;
   }
 }
 
@@ -995,7 +1391,7 @@ function resetToBaseline() {
   }
   state.studio.commandDraft = baselineCommandFor(state.studio.selectedPrimitive);
   renderParamForm();
-  markDirty(false);
+  markDirty(false, { reason: "reset_to_baseline" });
 }
 
 async function initStudioMode() {
@@ -1007,10 +1403,16 @@ async function initStudioMode() {
   if (!Array.isArray(meta?.primitives) || !meta.primitives.length) {
     throw new Error("missing primitive metadata");
   }
+  if (!Array.isArray(meta.styles) || !meta.styles.length) {
+    throw new Error("missing style metadata");
+  }
+  if (typeof meta.default_primitive !== "string" || !meta.default_primitive.trim()) {
+    throw new Error("missing default primitive metadata");
+  }
 
   state.studio.enabled = true;
   state.studio.specs = meta.primitives;
-  state.studio.styles = Array.isArray(meta.styles) && meta.styles.length ? meta.styles : ["calm"];
+  state.studio.styles = meta.styles;
   state.studio.baseline = baseline;
 
   primitiveSelect.innerHTML = "";
@@ -1030,15 +1432,18 @@ async function initStudioMode() {
   });
   styleSelect.value = state.studio.styles.includes("calm") ? "calm" : state.studio.styles[0];
 
-  const defaultPrimitive =
-    typeof meta.default_primitive === "string" && meta.default_primitive
-      ? meta.default_primitive
-      : state.studio.specs[0].id;
+  state.studio.autoRunEnabled = autoRunToggle.checked;
+  state.studio.autoRunDebounceMs = clamp(Math.round(Number(autoRunMsInput.value)), 50, 1000);
+  state.studio.compareEnabled = compareToggle.checked;
+  state.studio.compareMode = String(compareModeSelect.value || "overlay");
 
-  setStudioPrimitive(defaultPrimitive);
+  const defaultPrimitive = String(meta.default_primitive);
+
+  setStudioPrimitive(defaultPrimitive, { schedule: false });
   setMode("studio");
-  setBaselineStatus(`Baseline: ${state.studio.selectedPrimitive}`);
-  await runStudioPreview();
+  syncDirtyFromBaseline();
+  setRunState("idle");
+  await runStudioPreview({ manual: true, reason: "init" });
 }
 
 playPauseBtn.addEventListener("click", playPause);
@@ -1056,31 +1461,34 @@ timeline.addEventListener("input", () => {
 });
 
 primitiveSelect.addEventListener("change", () => {
-  setStudioPrimitive(primitiveSelect.value, { resetDuration: true });
+  setStudioPrimitive(primitiveSelect.value, { resetDuration: true, schedule: true });
 });
 
 runBtn.addEventListener("click", () => {
-  runStudioPreview();
+  runStudioPreview({ manual: true, reason: "manual_click" });
 });
 
 saveBaselineBtn.addEventListener("click", () => {
   saveBaseline();
 });
 
+saveAllBaselineBtn.addEventListener("click", () => {
+  saveAllBaselines();
+});
+
 resetBaselineBtn.addEventListener("click", () => {
   resetToBaseline();
 });
 
-if (runSuiteBtn) {
-  runSuiteBtn.addEventListener("click", () => {
-    runSuitePlayback();
-  });
-}
+runSuiteBtn.addEventListener("click", () => {
+  runSuitePlayback();
+});
 
 styleSelect.addEventListener("change", () => {
-  if (state.studio.enabled) {
-    setBaselineStatus(`Baseline: ${state.studio.selectedPrimitive}${state.studio.dirty ? " (unsaved)" : ""}`);
+  if (!state.studio.enabled) {
+    return;
   }
+  scheduleStudioRun("style");
 });
 
 durationInput.addEventListener("input", () => {
@@ -1090,6 +1498,32 @@ durationInput.addEventListener("input", () => {
   const n = Number(durationInput.value);
   if (!Number.isFinite(n) || n <= 0) {
     durationInput.value = String(defaultDurationForPrimitive(state.studio.selectedPrimitive));
+  }
+  scheduleStudioRun("duration");
+});
+
+autoRunToggle.addEventListener("change", () => {
+  state.studio.autoRunEnabled = autoRunToggle.checked;
+  if (state.studio.autoRunEnabled && state.studio.dirty) {
+    scheduleStudioRun("auto_run_enabled");
+  }
+});
+
+autoRunMsInput.addEventListener("input", () => {
+  const parsed = Number(autoRunMsInput.value);
+  state.studio.autoRunDebounceMs = clamp(Math.round(Number.isFinite(parsed) ? parsed : 200), 50, 1000);
+  autoRunMsInput.value = String(state.studio.autoRunDebounceMs);
+});
+
+compareToggle.addEventListener("change", () => {
+  state.studio.compareEnabled = compareToggle.checked;
+  scheduleStudioRun("compare_toggle");
+});
+
+compareModeSelect.addEventListener("change", () => {
+  state.studio.compareMode = String(compareModeSelect.value || "overlay");
+  if (state.samples.length) {
+    drawScene(state.samples[state.idx]);
   }
 });
 
@@ -1137,32 +1571,24 @@ window.addEventListener("resize", () => {
   const tracePath = params.get("trace") || "";
   const preferStudio = params.get("studio") !== "0";
 
-  if (preferStudio) {
-    try {
+  try {
+    if (preferStudio) {
       await initStudioMode();
-    } catch (err) {
-      state.studio.enabled = false;
-      setMode("playback (studio api unavailable)");
-      setBaselineStatus(`Studio unavailable: ${err}`, true);
-      if (!tracePath) {
-        studioGroup.classList.add("disabled");
+      if (tracePath) {
+        await loadFromUrl(tracePath);
+        setMode("playback");
       }
-    }
-  } else {
-    setMode("playback");
-  }
-
-  if (tracePath) {
-    try {
+    } else {
+      if (!tracePath) {
+        throw new Error("trace query parameter is required when studio=0");
+      }
       await loadFromUrl(tracePath);
       setMode("playback");
-    } catch (err) {
-      traceSource.textContent = `Trace: failed to load ${tracePath}`;
-      statusBox.textContent = `Load error: ${err}`;
     }
-  } else if (!state.samples.length && !state.studio.enabled) {
-    traceSource.textContent = "Trace: no trace selected";
-    statusBox.textContent = "No studio API found and no trace URL provided.";
+  } catch (err) {
+    setMode("error");
+    traceSource.textContent = "Trace: load failed";
+    statusBox.textContent = `Bootstrap error: ${err}`;
   }
 
   requestAnimationFrame(animate);

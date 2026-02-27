@@ -1,10 +1,10 @@
-# Primitive Studio (Sidecar Tool)
+# Lamp Sim (Sidecar Tool)
 
-Primitive Studio is a sidecar workflow for quickly understanding what each primitive looks like before hardware runs.
+Lamp Sim is a sidecar workflow for quickly understanding primitives, joint geometry, and behavior modes before hardware runs.
 
 It keeps runtime behavior math aligned by reusing `TrajectoryExecutor` from `pala/control/executor.py`.
 
-## Studio mode (recommended)
+## Primitive Studio mode (recommended)
 
 Run the interactive tuning tool:
 
@@ -18,15 +18,18 @@ Then open:
 http://127.0.0.1:8766/tools/primitive_sim/web/index.html?studio=1
 ```
 
-Both Studio and Joint Checker pages are available from this same server instance.
+Studio, Joint Checker, State Machine, and Scenario Lab pages are available from this same server instance.
 
 Studio features:
 - Select any runtime primitive (`hold`, `home`, `move_to`, `gaze_to`, `glance`, `nod`, `breath`, `orient_to_zone`)
 - Tune primitive command fields
+- Live auto-run preview with configurable debounce (default 200ms)
 - Run preview simulation with 3D lamp playback
+- Compare mode: baseline (cyan) vs draft (orange) in `overlay` or `split`
 - Save tuned values to baseline params
+- Save all baseline params in one write (`Save All`)
 - Reload from baselines on startup
-- Top bar mode buttons: switch between Studio and Joint Checker
+- Top bar mode buttons: switch between Studio, Joint Checker, State Machine, and Scenario Lab
 - `Run Suite Playback` button: generates `logs/primitive_sim/latest_trace.json` and opens playback
 
 ## Joint checker mode
@@ -43,7 +46,7 @@ Then open:
 http://127.0.0.1:8766/tools/primitive_sim/web/joint_checker.html
 ```
 
-Both Joint Checker and Studio pages are available from this same server instance.
+Joint Checker, Studio, State Machine, and Scenario Lab pages are available from this same server instance.
 
 Joint checker features:
 - Per-joint sliders generated from `joint_names` + `joint_limits_rad`
@@ -51,6 +54,79 @@ Joint checker features:
 - 3D pose rendering driven by current slider values
 - DH parameter table loaded from `config/robot.yaml`
 - Top bar mode buttons and `Run Suite Playback` button
+
+## State machine mode
+
+Run the behavior mode simulator:
+
+```bash
+uv run python tools/primitive_sim/run.py --scenario state_machine --port 8766
+```
+
+Then open:
+
+```text
+http://127.0.0.1:8766/tools/primitive_sim/web/state_machine.html
+```
+
+State machine features:
+- Visual mode graph for `idle_presence`, `scan_explore`, `engage_track`, `acknowledge`, `recover_reset`
+- Step or auto-run mode transitions from editable input signals
+- Signal controls: person presence/confidence, activity, novelty, env delta, health breakers
+- Live primitive response table using deterministic `IdleEngine` proposals
+- Allowed-primitive readout per mode
+- Reuses runtime `ModeManager` + `IdleEngine` semantics for transition/proposal behavior
+
+## Scenario lab mode
+
+Run scenario composition + evaluation:
+
+```bash
+uv run python tools/primitive_sim/run.py --scenario scenario_lab --port 8766
+```
+
+Then open:
+
+```text
+http://127.0.0.1:8766/tools/primitive_sim/web/scenario_lab.html
+```
+
+Scenario Lab features:
+- Build multi-step primitive scenarios from a step builder or direct JSON
+- Validate scenarios before execution (`dry_run` compile path)
+- Run scenarios and auto-open embedded playback preview
+- Scenario metrics (`duration`, `path_length`, `peak/mean velocity`, `limit margin/violations`, `switch count`)
+- Save experiment records to JSONL history and reload trace previews from history
+
+Default experiments path:
+
+```text
+logs/primitive_sim/experiments.jsonl
+```
+
+Override path:
+
+```bash
+uv run python tools/primitive_sim/run.py --scenario scenario_lab --experiments path/to/experiments.jsonl
+```
+
+## Roadmap
+
+Phase 1 (implemented):
+- Primitive Studio tuning
+- Joint Checker
+- State Machine simulator
+- Scenario Lab (compose + run + evaluate + save history)
+
+Phase 2 (next):
+- Parameter sweep / optimizer for primitive defaults
+- Batch A/B eval runner (baseline vs candidate) with scorecards
+- Servo/hardware emulation layer (latency, deadband, quantization)
+
+Phase 3 (next):
+- Fault-injection scenarios for breaker/perception dropouts
+- Reachability/workspace map and safety envelope visualizer
+- Evidence-pack exporter for demo/ablation artifacts
 
 ## Baseline params file
 
@@ -66,16 +142,22 @@ Override path:
 uv run python tools/primitive_sim/run.py --scenario studio --baseline path/to/baseline.json
 ```
 
-Baseline schema stores command defaults per primitive (command fields only):
+Baseline schema stores command defaults per primitive plus metadata:
 
 ```json
 {
-  "version": 1,
+  "version": 2,
+  "updated_by": "primitive_studio",
+  "updated_at_utc": "2026-02-27T00:00:00Z",
   "primitives": {
     "breath": {"amp_rad": 0.08, "period_s": 6.5, "rate_rad_s": 1.0}
   }
 }
 ```
+
+Baseline loading is strict:
+- Baseline files must already be v2.
+- Missing primitive payloads or invalid command fields fail fast.
 
 ## Trace modes (existing CLI)
 

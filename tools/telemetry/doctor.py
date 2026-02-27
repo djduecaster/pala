@@ -223,6 +223,29 @@ def _check_session_dir(session_dir: str) -> List[Check]:
             )
         else:
             out.append(Check(name="session:viewer_runs.latest_match", status="pass", detail="ok"))
+
+    latest_viewer_obj = viewer_runs_last_obj if isinstance(viewer_runs_last_obj, dict) else viewer_summary_obj
+    if isinstance(latest_viewer_obj, dict):
+        case_source = str(latest_viewer_obj.get("case_source") or "").strip()
+        case_reason = str(latest_viewer_obj.get("case_unavailable_reason") or "").strip()
+        if case_source == "sqlite.cases.v4":
+            out.append(Check(name="session:case_explorer.source", status="pass", detail=case_source))
+            out.append(Check(name="session:case_explorer.ready", status="pass", detail="ready"))
+        elif case_source:
+            out.append(Check(name="session:case_explorer.source", status="warn", detail=case_source))
+            out.append(
+                Check(
+                    name="session:case_explorer.ready",
+                    status="warn",
+                    detail=(case_reason or "unavailable"),
+                )
+            )
+        else:
+            out.append(Check(name="session:case_explorer.source", status="warn", detail="missing"))
+            out.append(Check(name="session:case_explorer.ready", status="warn", detail="no case metadata"))
+    elif os.path.exists(summary_path) or os.path.exists(runs_path):
+        out.append(Check(name="session:case_explorer.source", status="warn", detail="unavailable"))
+        out.append(Check(name="session:case_explorer.ready", status="warn", detail="no viewer run rows"))
     if os.path.exists(summary_path) or os.path.exists(runs_path):
         try:
             run_health = build_run_report(session_dirs=[root], limit=25)

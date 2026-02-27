@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>PALA Lamp Sim - Scenario Lab</title>
+    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="scenario_lab.css">
+  </head>
+  <body class="scenario-lab-page">
+    <main class="layout">
+      <section class="stage-card">
+        <iframe
+          id="previewFrame"
+          title="Scenario playback preview"
+          src="about:blank"></iframe>
+      </section>
+
+      <aside class="control-card">
+        <header>
+          <h1>PALA Lamp Sim - Scenario Lab</h1>
+          <p id="configPath">Config: loading...</p>
+          <p id="modeLabel">Mode: scenario composition</p>
+        </header>
+
+        <section class="group mode-group">
+          <div class="row mode-nav">
+            <a class="nav-btn" href="/tools/primitive_sim/web/index.html?studio=1">Studio</a>
+            <a class="nav-btn" href="/tools/primitive_sim/web/joint_checker.html">Joint Checker</a>
+            <a class="nav-btn" href="/tools/primitive_sim/web/state_machine.html">State Machine</a>
+            <a class="nav-btn" href="/tools/primitive_sim/web/scenario_lab.html">Scenario Lab</a>
+            <button id="runSuiteBtn" type="button">Run Suite Playback</button>
+          </div>
+          <p id="suiteStatus" class="muted">Suite: idle</p>
+        </section>
+
+        <section class="group">
+          <div class="row">
+            <label class="inline stack" for="builderPrimitive">
+              Primitive
+              <select id="builderPrimitive"></select>
+            </label>
+            <label class="inline stack" for="builderStyle">
+              Style
+              <select id="builderStyle"></select>
+            </label>
+            <label class="inline stack" for="builderDuration">
+              Duration (s)
+              <input id="builderDuration" type="number" min="0.05" max="20" step="0.05" value="2.0">
+            </label>
+            <label class="inline" for="builderStopOnDone">
+              <input id="builderStopOnDone" type="checkbox" checked>
+              Stop on done
+            </label>
+          </div>
+          <label for="builderCommand">Step command JSON</label>
+          <textarea id="builderCommand" rows="3">{}</textarea>
+          <div class="row">
+            <button id="addStepBtn" type="button">Add Step</button>
+            <button id="loadTemplateBtn" type="button">Load Template</button>
+            <button id="clearScenarioBtn" type="button">Clear</button>
+          </div>
+        </section>
+
+        <section class="group">
+          <label for="scenarioJson">Scenario JSON</label>
+          <textarea id="scenarioJson" rows="14"></textarea>
+          <div class="row">
+            <button id="validateBtn" type="button">Validate</button>
+            <button id="runBtn" type="button">Run Scenario</button>
+          </div>
+        </section>
+
+        <section class="group">
+          <div class="row">
+            <label class="inline stack" for="experimentName">
+              Experiment name
+              <input id="experimentName" type="text" placeholder="e.g. greeting_v2">
+            </label>
+            <label class="inline stack" for="experimentNotes">
+              Notes
+              <input id="experimentNotes" type="text" placeholder="what changed?">
+            </label>
+            <button id="saveExperimentBtn" type="button">Save Experiment</button>
+          </div>
+        </section>
+
+        <section class="group">
+          <pre id="metricsBox">Metrics: pending</pre>
+        </section>
+
+        <section class="group">
+          <table id="historyTable">
+            <thead>
+              <tr>
+                <th>Saved</th>
+                <th>Name</th>
+                <th>Samples</th>
+                <th>Duration</th>
+                <th>Trace</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </section>
+
+        <section class="group">
+          <pre id="statusBox">Loading...</pre>
+        </section>
+      </aside>
+    </main>
+
+    <script src="scenario_lab.js"></script>
+  </body>
+</html>

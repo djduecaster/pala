@@ -38,7 +38,7 @@ from tools.telemetry.quality import evaluate_quality_gate, load_quality_report
 from tools.telemetry.reasoning import ReasoningEvent, format_reasoning_snippet, normalize_reasoning_message
 from tools.telemetry.replay import SessionReplayReader
 from tools.telemetry.schema_v3 import TELEMETRY_SCHEMA_VERSION_V3
-from tools.telemetry.storage_sqlite import query_session_db, resolve_session_db_path
+from tools.telemetry.storage_sqlite import query_cases_db, query_session_db, resolve_session_db_path, review_case
 from tools.telemetry.integrity import verify_integrity_report
 from tools.telemetry.trace_graph import TraceGraphBuilder, TraceRecord, resolve_trace_index_path, load_trace_index
 
@@ -85,6 +85,39 @@ def _normalize_jetson_dir(path: str) -> tuple[str, Optional[str]]:
     return raw, None
 
 
+@dataclass(frozen=True)
+class TimelineRow:
+    row_id: int
+    case_id: str
+    event_index: int
+    trace_id: str
+    req_id: Optional[int]
+    component: str
+    source: str
+    ts_wall_s: Optional[float]
+    phase: str
+    status: str
+    severity: str
+    latency_ms: Optional[float]
+    confidence: Optional[float]
+    snippet: str
+    labels_csv: str
+    decision: str
+    perception_frame_id: Optional[int]
+    video_frame_id: Optional[int]
+    perception_zone_hint: str
+    provenance: str = "sqlite.reasoning_traces"
+
+
+@dataclass(frozen=True)
+class TimelineRowsResult:
+    rows: List[TimelineRow]
+    total_count: int
+    source: str
+    note: str = ""
+    unavailable_reason: str = ""
+
+
 @dataclass
 class DashboardState:
     host: str
@@ -96,13 +129,8 @@ class DashboardState:
     event_counts: Dict[str, int] = field(default_factory=dict)
     perception: Optional[Dict[str, Any]] = None
     action: Optional[Dict[str, Any]] = None
-    memory: Optional[Dict[str, Any]] = None
-    timeline: Optional[Dict[str, Any]] = None
     command: Optional[Dict[str, Any]] = None
     tegrastats: Optional[Dict[str, Any]] = None
-    transport: Optional[Dict[str, Any]] = None
-    capture_status: Optional[Dict[str, Any]] = None
-    agent: Optional[Dict[str, Any]] = None
     logs: Deque[str] = field(default_factory=lambda: collections.deque(maxlen=12))
     warnings: Deque[str] = field(default_factory=lambda: collections.deque(maxlen=8))
     dropped_events_reported: int = 0
@@ -130,8 +158,12 @@ class DashboardState:
     query_text: str = ""
     query_rows: List[Dict[str, Any]] = field(default_factory=list)
     query_note: str = ""
-    alignment_rows: List[Dict[str, Any]] = field(default_factory=list)
-    alignment_note: str = ""
+    timeline_rows: List[TimelineRow] = field(default_factory=list)
+    timeline_note: str = ""
+    timeline_source: str = "unavailable"
+    timeline_unavailable_reason: str = "timeline not initialized"
+    timeline_total_rows: int = 0
+    timeline_selected_row_id: Optional[int] = None
     integrity_report: Optional[Dict[str, Any]] = None
     annotations: Deque[Dict[str, Any]] = field(default_factory=lambda: collections.deque(maxlen=120))
     annotation_keys: set[str] = field(default_factory=set)
@@ -170,22 +202,7 @@ class DashboardState:
                 self.action = data
             return
 
-        if source == "memory_log":
-            data = payload.get("data")
-            if isinstance(data, dict):
-                self.memory = data
-            return
-
         if source == "timeline_log":
-            data = payload.get("data")
-            if isinstance(data, dict):
-                self.timeline = data
-            return
-
-        if source == "command_log":
-            data = payload.get("data")
-            if isinstance(data, dict):
-                self.command = data
             return
 
         if source == "tegrastats":
@@ -193,14 +210,12 @@ class DashboardState:
             return
 
         if source == "transport_stats":
-            self.transport = payload
             dropped = payload.get("dropped_events")
             if isinstance(dropped, int):
                 self.dropped_events_reported = max(self.dropped_events_reported, dropped)
             return
 
         if source == "capture_status":
-            self.capture_status = payload
             status = payload.get("status")
             if isinstance(status, str):
                 self.logs.append(f"capture: {status}")
@@ -209,7 +224,6 @@ class DashboardState:
             return
 
         if source == "agent":
-            self.agent = payload
             self.last_agent_wall_s = time.time()
             dropped = payload.get("dropped_events")
             if isinstance(dropped, int):
@@ -381,6 +395,51 @@ class DashboardState:
         target_idx = max(0, min(len(self.trace_records) - 1, current_idx + int(delta)))
         self.trace_selected_id = self.trace_records[target_idx].trace_id
 
+    def set_timeline_rows(
+        self,
+        rows: List[TimelineRow],
+        *,
+        total_count: int,
+        source: str,
+        note: str = "",
+        unavailable_reason: str = "",
+    ) -> None:
+        self.timeline_rows = list(rows)
+        self.timeline_total_rows = max(0, int(total_count))
+        self.timeline_source = str(source or "unavailable")
+        self.timeline_note = str(note or "")
+        self.timeline_unavailable_reason = str(unavailable_reason or "")
+
+        if self.timeline_rows:
+            row_ids = {row.row_id for row in self.timeline_rows}
+            if self.timeline_selected_row_id not in row_ids:
+                self.timeline_selected_row_id = self.timeline_rows[-1].row_id
+        else:
+            self.timeline_selected_row_id = None
+
+    def selected_timeline_row(self) -> Optional[TimelineRow]:
+        if not self.timeline_rows:
+            return None
+        if self.timeline_selected_row_id is not None:
+            for row in self.timeline_rows:
+                if row.row_id == self.timeline_selected_row_id:
+                    return row
+        self.timeline_selected_row_id = self.timeline_rows[-1].row_id
+        return self.timeline_rows[-1]
+
+    def move_timeline_selection(self, delta: int) -> None:
+        if not self.timeline_rows:
+            self.timeline_selected_row_id = None
+            return
+        current_idx = len(self.timeline_rows) - 1
+        if self.timeline_selected_row_id is not None:
+            for idx, row in enumerate(self.timeline_rows):
+                if row.row_id == self.timeline_selected_row_id:
+                    current_idx = idx
+                    break
+        target_idx = max(0, min(len(self.timeline_rows) - 1, current_idx + int(delta)))
+        self.timeline_selected_row_id = self.timeline_rows[target_idx].row_id
+
     def toggle_trace_pin(self) -> None:
         selected = self.selected_trace()
         if selected is None:
@@ -409,9 +468,7 @@ class DashboardState:
 @dataclass
 class _VideoWindow:
     root: Any
-    container: Any
     label: Any
-    photo: Any = None
     last_frame_id: int = -1
 
 
@@ -428,21 +485,31 @@ class ModeConfig:
 MODE_CONFIGS: Dict[str, ModeConfig] = {
     "live": ModeConfig(
         pack="reasoning_live",
-        panels=("summary", "trace_list", "reasoning_stream", "alignment", "quality", "video"),
+        panels=("summary", "trace_list", "reasoning_stream", "case_list", "case_detail", "quality", "video"),
         quality_gate="warn",
         index_mode="auto",
         no_video=False,
     ),
     "replay": ModeConfig(
         pack="reasoning_live",
-        panels=("summary", "trace_list", "trace_detail", "reasoning_stream", "alignment", "query", "quality", "video"),
+        panels=(
+            "summary",
+            "trace_list",
+            "trace_detail",
+            "reasoning_stream",
+            "case_list",
+            "case_detail",
+            "query",
+            "quality",
+            "video",
+        ),
         quality_gate="warn",
         index_mode="auto",
         no_video=False,
     ),
     "curate": ModeConfig(
         pack="behavior_v2_debug",
-        panels=("summary", "trace_list", "trace_detail", "alignment", "query", "quality", "annotations"),
+        panels=("summary", "trace_list", "trace_detail", "case_list", "case_detail", "query", "quality", "annotations"),
         default_query="kind:joined severity:error|warning status:parse_fail|timeout sort:severity",
         quality_gate="strict",
         index_mode="sqlite",
@@ -842,7 +909,7 @@ def _init_video_window(args: argparse.Namespace, state: DashboardState) -> Optio
             state.warnings.append(f"video_window_init_failed: {exc.__class__.__name__}")
         return None
 
-    return _VideoWindow(root=root, container=container, label=label)
+    return _VideoWindow(root=root, label=label)
 
 
 def _overlay_image(image: Image.Image, state: DashboardState) -> Image.Image:
@@ -1012,7 +1079,6 @@ def _pump_video_window(
         photo = ImageTk.PhotoImage(image)
         window.label.configure(image=photo)
         window.label.image = photo
-        window.photo = photo
     except Exception as exc:
         state.video_decode_errors += 1
         state.warnings.append(f"video_window_update_failed: {exc!r}")
@@ -1157,29 +1223,155 @@ def _build_in_memory_query_rows(state: DashboardState, *, limit: int) -> List[Di
     return rows
 
 
-def _build_in_memory_alignment_rows(*, trace: Optional[TraceRecord], limit: int) -> List[Dict[str, Any]]:
-    if trace is None:
-        return []
-    lim = max(1, int(limit))
-    rows: List[Dict[str, Any]] = []
-    for ref in trace.event_refs:
-        rows.append(
-            {
-                "event_index": ref.event_index,
-                "component": ref.source,
-                "phase": ref.phase,
-                "status": ref.status,
-                "latency_ms": ref.latency_ms,
-                "perception_frame_id": None,
-                "video_frame_id": None,
-                "perception_zone_hint": None,
-                "source": ref.source,
-                "severity": ref.severity,
-                "snippet": ref.summary,
-            }
+def _load_manifest_schema_version(session_dir: str) -> Optional[int]:
+    root = str(session_dir or "").strip()
+    if not root:
+        return None
+    manifest_path = os.path.join(root, "manifest.json")
+    if not os.path.exists(manifest_path):
+        return None
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as fh:
+            decoded = json.load(fh)
+    except Exception:
+        return None
+    if not isinstance(decoded, dict):
+        return None
+    try:
+        return int(decoded.get("schema_version", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_int_optional(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_float_optional(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _to_timeline_row(case_row: Mapping[str, Any], *, ordinal: int) -> TimelineRow:
+    first_event_index = int(case_row.get("first_event_index", 0) or 0)
+    row_id = first_event_index if first_event_index > 0 else int(ordinal)
+    return TimelineRow(
+        row_id=row_id,
+        case_id=str(case_row.get("case_id") or ""),
+        event_index=first_event_index,
+        trace_id=str(case_row.get("trace_id") or ""),
+        req_id=_as_int_optional(case_row.get("req_id")),
+        component=str(case_row.get("component") or ""),
+        source=str(case_row.get("source") or "sqlite.cases.v4"),
+        ts_wall_s=_as_float_optional(case_row.get("start_ts_wall_s")),
+        phase="case",
+        status=str(case_row.get("status") or ""),
+        severity=str(case_row.get("severity") or "info"),
+        latency_ms=_as_float_optional(case_row.get("max_latency_ms")),
+        confidence=_as_float_optional(case_row.get("hardness")),
+        snippet=str(case_row.get("summary") or case_row.get("snippet") or ""),
+        labels_csv=str(case_row.get("labels_csv") or ""),
+        decision=str(case_row.get("decision") or ""),
+        perception_frame_id=None,
+        video_frame_id=None,
+        perception_zone_hint="",
+        provenance="sqlite.cases.v4",
+    )
+
+
+def load_timeline_rows(
+    *,
+    session_root: str,
+    session_db_path: str,
+    query_text: str,
+    selected_trace_id: str,
+    limit: int,
+    index_mode: str,
+    required_schema_version: int = TELEMETRY_SCHEMA_VERSION_V3,
+) -> TimelineRowsResult:
+    mode = str(index_mode or "auto")
+    if mode == "off":
+        return TimelineRowsResult(
+            rows=[],
+            total_count=0,
+            source="unavailable",
+            note="case explorer requires sqlite index (index_mode=off)",
+            unavailable_reason="index_mode_off",
         )
-    rows.sort(key=lambda row: int(row.get("event_index", 0) or 0), reverse=True)
-    return rows[:lim]
+    root = _expand_local_path(session_root)
+    if not root:
+        return TimelineRowsResult(
+            rows=[],
+            total_count=0,
+            source="unavailable",
+            note="case explorer requires --save-session (live) or --replay <session_dir>",
+            unavailable_reason="session_root_missing",
+        )
+    schema_version = _load_manifest_schema_version(root)
+    if schema_version is not None and schema_version < int(required_schema_version):
+        return TimelineRowsResult(
+            rows=[],
+            total_count=0,
+            source="unavailable",
+            note=(
+                f"case explorer requires schema_version>={required_schema_version}; "
+                "run: uv run python -m tools.telemetry.migrate_session <session_dir>"
+            ),
+            unavailable_reason=f"schema_version={schema_version}",
+        )
+    db_path = _expand_local_path(session_db_path) if str(session_db_path or "").strip() else resolve_session_db_path(root)
+    if not db_path or (not os.path.exists(db_path)):
+        return TimelineRowsResult(
+            rows=[],
+            total_count=0,
+            source="unavailable",
+            note=(
+                "session.db unavailable for case explorer; capture/migrate session first: "
+                "uv run python -m tools.telemetry.migrate_session <session_dir>"
+            ),
+            unavailable_reason="session_db_missing",
+        )
+    parts: List[str] = ["sort:hardness", "order:desc"]
+    trace_id = str(selected_trace_id or "").strip()
+    if trace_id:
+        parts.append(f"trace:{trace_id}")
+    query = str(query_text or "").strip()
+    if query:
+        parts.append(query)
+    case_query = " ".join(parts)
+    try:
+        out = query_cases_db(db_path, query=case_query, limit=max(4, int(limit)))
+    except Exception as exc:
+        return TimelineRowsResult(
+            rows=[],
+            total_count=0,
+            source="unavailable",
+            note=f"case sqlite query failed: {exc!r}",
+            unavailable_reason="sqlite_query_failed",
+        )
+    case_rows = list(out.get("cases", []))
+    rows = [_to_timeline_row(row, ordinal=idx + 1) for idx, row in enumerate(case_rows) if isinstance(row, dict)]
+    total_count = int(out.get("total_count", len(rows)) or 0)
+    query_note = (
+        f"source=sqlite.cases.v4 matched={len(rows)}/{total_count} "
+        f"trace={(trace_id or '*')} limit={max(4, int(limit))}"
+    )
+    return TimelineRowsResult(
+        rows=rows,
+        total_count=total_count,
+        source="sqlite.cases.v4",
+        note=query_note,
+        unavailable_reason="",
+    )
 
 
 def _render_reasoning_stream(lines: List[str], state: DashboardState, args: argparse.Namespace) -> None:
@@ -1322,31 +1514,59 @@ def _render_query_panel(lines: List[str], state: DashboardState, args: argparse.
     lines.append("")
 
 
-def _render_alignment_panel(lines: List[str], state: DashboardState, args: argparse.Namespace) -> None:
-    lines.append(f"{_focus_prefix(state, 'alignment')}Alignment")
-    trace = state.selected_trace()
-    if trace is None:
-        lines.append("  no trace selected")
+def _render_timeline_panel(lines: List[str], state: DashboardState, args: argparse.Namespace) -> None:
+    lines.append(f"{_focus_prefix(state, 'case_list')}Case Explorer")
+    selected_trace = state.selected_trace()
+    trace_id = selected_trace.trace_id if selected_trace is not None else ""
+    lines.append(f"  source={state.timeline_source or 'unavailable'} trace={(trace_id or '*')}")
+    lines.append(
+        f"  rows={len(state.timeline_rows)}/{max(0, int(state.timeline_total_rows))} "
+        f"selected={state.timeline_selected_row_id if state.timeline_selected_row_id is not None else 'n/a'}"
+    )
+    if state.timeline_note:
+        lines.append(f"  note={_shorten(state.timeline_note, 140)}")
+    if state.timeline_unavailable_reason:
+        lines.append(f"  unavailable={_shorten(state.timeline_unavailable_reason, 140)}")
+    if not state.timeline_rows:
+        lines.append("  no timeline rows")
         lines.append("")
         return
-    lines.append(f"  trace={trace.trace_id} req_id={trace.req_id if trace.req_id is not None else '-'}")
-    if state.alignment_note:
-        lines.append(f"  note={_shorten(state.alignment_note, 120)}")
-    if not state.alignment_rows:
-        lines.append("  no joined rows")
+    selected = state.selected_timeline_row()
+    selected_id = selected.row_id if selected is not None else None
+    for row in state.timeline_rows[-max(4, int(args.max_log_lines)) :]:
+        marker = "*" if row.row_id == selected_id else " "
+        latency_text = f"{row.latency_ms:.0f}ms" if row.latency_ms is not None else "-"
+        hardness_text = f"{row.confidence:.2f}" if row.confidence is not None else "-"
+        lines.append(
+            f" {marker} case={row.case_id or '-'} row={row.row_id} ts={row.ts_wall_s} comp={row.component or '-'} "
+            f"phase={row.phase or '-'} status={row.status or '-'} lat={latency_text} "
+            f"hard={hardness_text} decision={row.decision or '-'} req={row.req_id if row.req_id is not None else '-'}"
+        )
+        if row.snippet:
+            lines.append(f"    {_shorten(row.snippet, 180)}")
+    lines.append("")
+
+
+def _render_timeline_detail_panel(lines: List[str], state: DashboardState) -> None:
+    lines.append(f"{_focus_prefix(state, 'case_detail')}Case Detail")
+    row = state.selected_timeline_row()
+    if row is None:
+        lines.append("  no case selected")
         lines.append("")
         return
-    for row in state.alignment_rows[: max(4, int(args.max_log_lines))]:
-        lat = row.get("latency_ms")
-        lat_text = f"{float(lat):.0f}ms" if isinstance(lat, (int, float)) else "-"
-        lines.append(
-            f"  #{row.get('event_index')} comp={row.get('component') or '-'} phase={row.get('phase') or '-'} "
-            f"status={row.get('status') or '-'} lat={lat_text}"
-        )
-        lines.append(
-            f"    p_frame={row.get('perception_frame_id') or '-'} v_frame={row.get('video_frame_id') or '-'} "
-            f"zone={row.get('perception_zone_hint') or '-'}"
-        )
+    lines.append(
+        f"  case={row.case_id or '-'} row={row.row_id} trace={row.trace_id or '-'} req={row.req_id if row.req_id is not None else '-'} "
+        f"source={row.provenance}"
+    )
+    lines.append(
+        f"  ts={row.ts_wall_s} comp={row.component or '-'} phase={row.phase or '-'} "
+        f"status={row.status or '-'} sev={row.severity or '-'} lat={row.latency_ms} hard={row.confidence}"
+    )
+    lines.append(
+        f"  labels={row.labels_csv or '-'} decision={row.decision or '-'}"
+    )
+    if row.snippet:
+        lines.append(f"  snippet={_shorten(row.snippet, 260)}")
     lines.append("")
 
 
@@ -1440,11 +1660,16 @@ def _build_viewer_summary(
     duration_s = max(0.0, ended_wall_s - float(state.started_wall_s))
     quality_grade = None
     quality_score = None
+    case_source = str(state.timeline_source or "unavailable")
+    case_reason = str(state.timeline_unavailable_reason or "")
+    if case_source == "sqlite.cases.v4":
+        case_reason = ""
+    reviewed_count = sum(1 for row in state.timeline_rows if str(row.decision or "").strip())
     if isinstance(state.quality_report, dict):
         quality_grade = state.quality_report.get("grade")
         quality_score = state.quality_report.get("score")
     return {
-        "version": 2,
+        "version": 4,
         "schema_version": int(TELEMETRY_SCHEMA_VERSION_V3),
         "run_id": f"{int(ended_wall_s * 1000)}-{os.getpid()}",
         "mode": str(mode or "live"),
@@ -1457,6 +1682,11 @@ def _build_viewer_summary(
         "quality_gate_note": str(state.quality_gate_note or ""),
         "quality_grade": quality_grade,
         "quality_score": quality_score,
+        "case_source": case_source,
+        "case_rows_total": int(state.timeline_total_rows),
+        "case_rows_visible": int(len(state.timeline_rows)),
+        "case_reviewed_visible": int(reviewed_count),
+        "case_unavailable_reason": case_reason,
         "event_counts": dict(state.event_counts),
         "trace_count": len(state.trace_records),
         "reasoning_count": len(state.reasoning_events),
@@ -1593,6 +1823,11 @@ def _render(state: DashboardState, *, now_wall_s: float, args: argparse.Namespac
             )
         if state.query_text:
             lines.append(f"Query: '{state.query_text}' rows_shown={len(state.query_rows)}")
+        lines.append(
+            "Cases: "
+            f"source={state.timeline_source} rows={len(state.timeline_rows)}/{state.timeline_total_rows} "
+            f"selected={(state.timeline_selected_row_id if state.timeline_selected_row_id is not None else 'n/a')}"
+        )
         if state.connection_note:
             lines.append(f"Note: {_shorten(state.connection_note, 120)}")
         lines.append("")
@@ -1612,8 +1847,11 @@ def _render(state: DashboardState, *, now_wall_s: float, args: argparse.Namespac
     if _panel_enabled(args, "query"):
         _render_query_panel(lines, state, args)
 
-    if _panel_enabled(args, "alignment"):
-        _render_alignment_panel(lines, state, args)
+    if _panel_enabled(args, "case_list"):
+        _render_timeline_panel(lines, state, args)
+
+    if _panel_enabled(args, "case_detail"):
+        _render_timeline_detail_panel(lines, state)
 
     if _panel_enabled(args, "annotations"):
         _render_annotations_panel(lines, state, args)
@@ -1638,17 +1876,18 @@ def _render(state: DashboardState, *, now_wall_s: float, args: argparse.Namespac
         lines.append("Hotkeys")
         lines.append("  ?: toggle this help")
         lines.append("  h/l: move focus panel")
-        lines.append("  j/k: previous/next reasoning event")
+        lines.append("  j/k: previous/next reasoning event (or case when case panel is focused)")
         lines.append("  u/i: previous/next trace")
         lines.append("  f: cycle reasoning filter (all/errors/slow)")
         lines.append("  r: toggle reasoning redaction")
-        lines.append("  o: focus trace detail panel")
+        lines.append("  o: focus case detail panel")
         lines.append("  p: pin/unpin selected trace")
         lines.append("  b: bookmark selected trace/event")
+        lines.append("  a/x/n/m: review case (accept/reject/needs_context/label)")
         lines.append("  Ctrl-C: exit")
         lines.append("")
     lines.append(
-        "Cmd: [? help] [h/l focus] [j/k reasoning] [u/i trace] [o detail] [p pin] [b bookmark] [f filter] [r redact] [Ctrl-C exit]"
+        "Cmd: [? help] [h/l focus] [j/k reasoning|case] [u/i trace] [o detail] [a/x/n/m review] [p pin] [b bookmark] [f filter] [r redact] [Ctrl-C exit]"
     )
     return "\n".join(lines)
 
@@ -1735,7 +1974,6 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-log-lines", type=int, default=8, help=hidden)
     parser.add_argument("--reasoning-snippet-max-chars", type=int, default=180, help=hidden)
     parser.add_argument("--reasoning-redact", choices=["on", "off"], default="on", help=hidden)
-    parser.add_argument("--reasoning-kpi-window-s", type=float, default=120.0, help=hidden)
     parser.add_argument("--reasoning-slow-ms", type=float, default=2000.0, help=hidden)
     parser.add_argument("--trace-match-window-s", type=float, default=2.0, help=hidden)
     parser.add_argument("--trace-max-events", type=int, default=1000, help=hidden)
@@ -1837,8 +2075,7 @@ def main() -> int:
     refresh_s = 1.0 / max(1.0, float(args.refresh_hz))
     last_draw = 0.0
     last_query_refresh_s = 0.0
-    last_alignment_refresh_s = 0.0
-    last_alignment_trace_id = ""
+    last_timeline_refresh_s = 0.0
     session_db_path = ""
     capture_writer: Optional[SessionCaptureWriter] = None
     save_session_dir, save_session_note = _resolve_live_save_session_dir(
@@ -1893,6 +2130,13 @@ def main() -> int:
     def _resolve_lookup_root() -> str:
         if session_db_path and os.path.exists(session_db_path):
             return session_db_path
+        if replay_mode and os.path.isdir(replay_dir):
+            return replay_dir
+        if save_session_dir and os.path.isdir(save_session_dir):
+            return save_session_dir
+        return ""
+
+    def _resolve_timeline_session_root() -> str:
         if replay_mode and os.path.isdir(replay_dir):
             return replay_dir
         if save_session_dir and os.path.isdir(save_session_dir):
@@ -2004,10 +2248,16 @@ def main() -> int:
                 state.cycle_focus_panel(delta=1)
                 continue
             if key == "j":
-                state.move_reasoning_selection(delta=-1, slow_ms=float(args.reasoning_slow_ms))
+                if state.focus_panel in {"case_list", "case_detail"}:
+                    state.move_timeline_selection(-1)
+                else:
+                    state.move_reasoning_selection(delta=-1, slow_ms=float(args.reasoning_slow_ms))
                 continue
             if key == "k":
-                state.move_reasoning_selection(delta=1, slow_ms=float(args.reasoning_slow_ms))
+                if state.focus_panel in {"case_list", "case_detail"}:
+                    state.move_timeline_selection(1)
+                else:
+                    state.move_reasoning_selection(delta=1, slow_ms=float(args.reasoning_slow_ms))
                 continue
             if key == "u":
                 state.move_trace_selection(-1)
@@ -2016,8 +2266,27 @@ def main() -> int:
                 state.move_trace_selection(1)
                 continue
             if key == "o":
-                if "trace_detail" in state.active_panels:
+                if "case_detail" in state.active_panels:
+                    state.focus_panel = "case_detail"
+                elif "trace_detail" in state.active_panels:
                     state.focus_panel = "trace_detail"
+                continue
+            if key in {"a", "x", "n", "m"}:
+                decision = {"a": "accept", "x": "reject", "n": "needs_context", "m": "label"}[key]
+                if session_db_path and os.path.exists(session_db_path):
+                    selected_case = state.selected_timeline_row()
+                    if selected_case is not None and selected_case.case_id:
+                        try:
+                            review_case(
+                                session_db_path,
+                                case_id=selected_case.case_id,
+                                decision=decision,
+                                note="",
+                                reviewer="viewer",
+                            )
+                            state.logs.append(f"case review: {selected_case.case_id} -> {decision}")
+                        except Exception as exc:
+                            state.warnings.append(f"case review failed: {exc!r}")
                 continue
             if key == "p":
                 state.toggle_trace_pin()
@@ -2164,39 +2433,27 @@ def main() -> int:
                     state.query_rows = _build_in_memory_query_rows(state, limit=int(args.query_limit))
                     state.query_note = "memory query (reasoning + trace events; session db unavailable)"
 
-        if (now - last_alignment_refresh_s) >= 1.0:
-            lookup_root = _resolve_lookup_root()
+        if (now - last_timeline_refresh_s) >= 1.0:
             selected = state.selected_trace()
             current_trace_id = selected.trace_id if selected is not None else ""
-            if not current_trace_id:
-                state.alignment_rows = []
-                state.alignment_note = "no selected trace"
-            elif (current_trace_id != last_alignment_trace_id) or (not state.alignment_rows):
-                if lookup_root:
-                    try:
-                        out = query_session_db(
-                            lookup_root,
-                            query=f"kind:joined trace:{current_trace_id}",
-                            limit=max(8, int(args.query_limit) * 3),
-                        )
-                        state.alignment_rows = list(out.get("joined", []))
-                        state.alignment_note = f"trace={current_trace_id} rows={len(state.alignment_rows)}"
-                    except Exception as exc:
-                        state.alignment_rows = _build_in_memory_alignment_rows(
-                            trace=selected,
-                            limit=max(8, int(args.query_limit) * 3),
-                        )
-                        state.alignment_note = (
-                            f"memory fallback ({len(state.alignment_rows)} rows) after sqlite error: {exc!r}"
-                        )
-                else:
-                    state.alignment_rows = _build_in_memory_alignment_rows(
-                        trace=selected,
-                        limit=max(8, int(args.query_limit) * 3),
-                    )
-                    state.alignment_note = f"memory fallback trace rows={len(state.alignment_rows)}"
-            last_alignment_refresh_s = now
-            last_alignment_trace_id = current_trace_id
+            timeline_limit = max(8, int(args.query_limit) * 4)
+            timeline_out = load_timeline_rows(
+                session_root=_resolve_timeline_session_root(),
+                session_db_path=session_db_path,
+                query_text=state.query_text,
+                selected_trace_id=current_trace_id,
+                limit=timeline_limit,
+                index_mode=str(args.index_mode or "auto"),
+                required_schema_version=int(TELEMETRY_SCHEMA_VERSION_V3),
+            )
+            state.set_timeline_rows(
+                timeline_out.rows,
+                total_count=timeline_out.total_count,
+                source=timeline_out.source,
+                note=timeline_out.note,
+                unavailable_reason=timeline_out.unavailable_reason,
+            )
+            last_timeline_refresh_s = now
 
         if (not replay_mode) and proc is not None and proc.poll() is None:
             stale_ref_s = state.last_rx_wall_s

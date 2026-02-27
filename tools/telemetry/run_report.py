@@ -144,6 +144,11 @@ def _build_alerts(rows: Sequence[Tuple[str, Dict[str, Any]]]) -> List[str]:
     latest_curation = latest.get("curation_result")
     if isinstance(latest_curation, dict) and latest_curation.get("ok") is False:
         alerts.append("latest_curation_failed")
+    latest_case_source = str(latest.get("case_source") or "").strip()
+    latest_case_reason = str(latest.get("case_unavailable_reason") or "").strip()
+    if latest_case_source and latest_case_source != "sqlite.cases.v4":
+        suffix = f":{latest_case_reason}" if latest_case_reason else ""
+        alerts.append(f"latest_case_unavailable{suffix}")
 
     if len(rows) < 2:
         return alerts
@@ -208,6 +213,8 @@ def build_run_report(
     quality_score_values: List[float] = []
     dropped_agent_values: List[float] = []
     dropped_local_values: List[float] = []
+    case_source_counts: Dict[str, int] = {}
+    case_unavailable_count = 0
     exit_known = 0
     exit_nonzero = 0
     quality_known = 0
@@ -236,6 +243,11 @@ def build_run_report(
         dropped_local = run.get("dropped_events_local")
         if isinstance(dropped_local, (int, float)):
             dropped_local_values.append(max(0.0, float(dropped_local)))
+        case_source = str(run.get("case_source") or "").strip()
+        if case_source:
+            case_source_counts[case_source] = case_source_counts.get(case_source, 0) + 1
+            if case_source != "sqlite.cases.v4":
+                case_unavailable_count += 1
         qgp = run.get("quality_gate_passed")
         if isinstance(qgp, bool):
             quality_known += 1
@@ -262,6 +274,8 @@ def build_run_report(
             "quality_gate_passed": latest_run.get("quality_gate_passed"),
             "dropped_events_agent": latest_run.get("dropped_events_agent"),
             "dropped_events_local": latest_run.get("dropped_events_local"),
+            "case_source": latest_run.get("case_source"),
+            "case_unavailable_reason": latest_run.get("case_unavailable_reason"),
         }
 
     avg_duration = None
@@ -306,6 +320,10 @@ def build_run_report(
             "agent_p95": _percentile(dropped_agent_values, 95.0),
             "local_total": sum(dropped_local_values) if dropped_local_values else 0.0,
             "local_p95": _percentile(dropped_local_values, 95.0),
+        },
+        "cases": {
+            "source_counts": case_source_counts,
+            "unavailable_count": case_unavailable_count,
         },
         "alerts": alerts,
         "alerts_count": len(alerts),
@@ -388,6 +406,12 @@ def main() -> int:
         f"agent_p95={drops.get('agent_p95') if drops else None} "
         f"local_total={drops.get('local_total') if drops else None} "
         f"local_p95={drops.get('local_p95') if drops else None}"
+    )
+    cases = report.get("cases") if isinstance(report.get("cases"), dict) else {}
+    print(
+        "cases: "
+        f"sources={cases.get('source_counts') if cases else None} "
+        f"unavailable_count={cases.get('unavailable_count') if cases else None}"
     )
     latest = report.get("latest_run")
     if isinstance(latest, dict):
