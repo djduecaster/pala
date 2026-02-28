@@ -279,6 +279,54 @@ def normalize_reasoning_message(msg: Dict[str, Any]) -> Optional[ReasoningEvent]
             component=_pick_first([data.get("component"), data.get("module")], _as_optional_str) or "reasoning",
         )
 
+    if source in {"behavior_trace_log", "behavior_trace"}:
+        data = _as_dict(msg_payload.get("data"))
+        if not data:
+            data = msg_payload
+        if not data:
+            return None
+        decision = _as_dict(data.get("decision"))
+        mode_transition = _as_dict(data.get("mode_transition"))
+        signals = _as_dict(data.get("signals"))
+        current_action = _as_dict(data.get("current_action"))
+        committed = decision.get("committed")
+        if isinstance(committed, bool):
+            status = "committed" if committed else "no_commit"
+        else:
+            status = _pick_first([decision.get("status"), data.get("status")], _as_optional_str) or "trace"
+        phase = _pick_first([data.get("mode"), mode_transition.get("to"), data.get("phase")], _as_optional_str) or "behavior_trace"
+        reason = _pick_first([decision.get("reason"), mode_transition.get("reason")], _as_optional_str) or ""
+        snippet = reason
+        top_candidates = data.get("top_candidates")
+        if not snippet and isinstance(top_candidates, list) and top_candidates and isinstance(top_candidates[0], dict):
+            top0 = top_candidates[0]
+            top_primitive = _as_optional_str(top0.get("primitive"))
+            top_intent = _as_optional_str(top0.get("intent"))
+            top_utility = _as_optional_float(top0.get("utility"))
+            parts = [part for part in [top_primitive, top_intent] if part]
+            if top_utility is not None:
+                parts.append(f"utility={top_utility:.3f}")
+            snippet = " ".join(parts)
+        if not snippet:
+            snippet = _extract_snippet(data, decision, msg_payload)
+        return ReasoningEvent(
+            source=source,
+            ts_wall_s=ts_wall_s,
+            req_id=_pick_first([data.get("request_id"), data.get("req_id"), data.get("id")], _as_optional_int),
+            phase=phase,
+            status=status,
+            latency_ms=_pick_first([data.get("latency_ms"), data.get("duration_ms")], _as_optional_float),
+            primitive=_pick_first([current_action.get("primitive"), decision.get("source")], _as_optional_str),
+            confidence=_as_optional_float(current_action.get("confidence")),
+            target_zone=_pick_first([signals.get("zone_hint"), data.get("target_zone")], _as_optional_str),
+            model=None,
+            provider=None,
+            snippet=snippet,
+            severity=_classify_severity(phase, f"{status} {reason}"),
+            component="arbiter",
+            delta_score=_as_optional_float(signals.get("env_delta")),
+        )
+
     return None
 
 

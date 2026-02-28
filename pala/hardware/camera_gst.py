@@ -42,6 +42,9 @@ class GStreamerCamera:
         self._pipeline = Gst.parse_launch(pipeline)
         self._pipeline.set_state(Gst.State.PLAYING)
         self._appsink = self._pipeline.get_by_name("appsink")
+        if self._appsink is None:
+            self._pipeline.set_state(Gst.State.NULL)
+            raise RuntimeError("GStreamer pipeline missing appsink element named 'appsink'")
 
     def get_frame(self) -> Tuple[np.ndarray, Optional[int], int]:
         sample = self._appsink.emit("pull-sample")

@@ -60,6 +60,11 @@ body {
   gap: 14px;
 }
 
+.control-card > header {
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(44, 82, 94, 0.5);
+}
+
 header h1 {
   margin: 0 0 6px 0;
   font-size: 1.28rem;
@@ -77,6 +82,14 @@ header p {
   background: rgba(9, 20, 26, 0.6);
   border-radius: 10px;
   padding: 10px;
+}
+
+.group-title {
+  margin: 0 0 8px 0;
+  font-size: 0.84rem;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: #9cc9c2;
 }
 
 .group.disabled {
@@ -97,6 +110,8 @@ header p {
   padding-top: 8px;
   padding-bottom: 8px;
   background: linear-gradient(180deg, rgba(9, 20, 26, 0.95), rgba(9, 20, 26, 0.7));
+  border-top: 1px solid rgba(44, 82, 94, 0.35);
+  border-bottom: 1px solid rgba(44, 82, 94, 0.35);
 }
 
 button,
@@ -109,6 +124,31 @@ input[type="number"] {
   color: var(--text);
   padding: 7px 10px;
   font: inherit;
+}
+
+textarea {
+  border-radius: 8px;
+  border: 1px solid #2a5965;
+  background: #112832;
+  color: var(--text);
+  padding: 8px;
+  font: inherit;
+}
+
+kbd {
+  border: 1px solid #3b5a66;
+  border-radius: 5px;
+  padding: 1px 5px;
+  background: #142935;
+  font-size: 0.74rem;
+}
+
+code {
+  border: 1px solid #32505c;
+  border-radius: 5px;
+  padding: 1px 5px;
+  background: #132733;
+  font-size: 0.78rem;
 }
 
 .nav-btn {
@@ -132,6 +172,20 @@ button:hover,
   transform: translateY(-1px);
   border-color: var(--accent);
   box-shadow: 0 4px 14px rgba(255, 154, 61, 0.2);
+}
+
+#runSaveBtn {
+  border-color: #5c7f32;
+  background: linear-gradient(180deg, #1b3422 0%, #132a1b 100%);
+}
+
+.btn-primary {
+  border-color: #c77a2e;
+  background: linear-gradient(180deg, #2a3a1f 0%, #1d2b18 100%);
+}
+
+.btn-quiet {
+  opacity: 0.85;
 }
 
 .mode-group {
@@ -332,6 +386,10 @@ button:disabled {
   font-weight: 600;
 }
 
+#jointTable tbody tr:nth-child(2n) {
+  background: rgba(15, 30, 37, 0.35);
+}
+
 .norm {
   display: inline-block;
   min-width: 72px;
@@ -344,6 +402,40 @@ button:disabled {
 
 .norm.ok {
   color: var(--accent-2);
+}
+
+body.embedded-shell {
+  min-height: auto;
+}
+
+body.embedded-shell .layout {
+  min-height: auto;
+  height: auto;
+  padding: 8px;
+  gap: 10px;
+  grid-template-columns: 1fr;
+  grid-template-rows: minmax(240px, 42vh) minmax(0, 1fr);
+}
+
+body.embedded-shell .mode-group {
+  display: none;
+}
+
+body.embedded-shell .stage-card {
+  min-height: 0;
+}
+
+body.embedded-shell #simCanvas {
+  width: 100%;
+  height: 100%;
+  max-height: 42vh;
+}
+
+body.embedded-shell .control-card {
+  max-height: 56vh;
+  overflow: auto;
+  padding: 12px;
+  gap: 10px;
 }
 
 @media (max-width: 1220px) {

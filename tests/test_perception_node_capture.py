@@ -150,3 +150,42 @@ def test_perception_source_error_is_reported_without_crashing():
     assert st.debug.get("source_alive") is False
     assert "source_error" in st.debug
     assert "camera unavailable" in str(st.debug.get("source_error"))
+
+
+def test_perception_shutdown_calls_detector_and_source():
+    calls = {"source": 0, "detector": 0}
+
+    class _Source:
+        def shutdown(self) -> None:
+            calls["source"] += 1
+
+    class _Detector:
+        def detect(self, _frame):
+            return []
+
+        def shutdown(self) -> None:
+            calls["detector"] += 1
+
+    node = PerceptionNode(source=_Source(), detector=_Detector())
+    node.shutdown()
+    assert calls == {"source": 1, "detector": 1}
+
+
+def test_perception_shutdown_still_closes_source_if_detector_shutdown_fails():
+    calls = {"source": 0, "detector": 0}
+
+    class _Source:
+        def shutdown(self) -> None:
+            calls["source"] += 1
+
+    class _Detector:
+        def detect(self, _frame):
+            return []
+
+        def shutdown(self) -> None:
+            calls["detector"] += 1
+            raise RuntimeError("detector shutdown failure")
+
+    node = PerceptionNode(source=_Source(), detector=_Detector())
+    node.shutdown()
+    assert calls == {"source": 1, "detector": 1}

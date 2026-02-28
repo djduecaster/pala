@@ -139,7 +139,7 @@ def _canonicalize_env_payload(data: Any) -> Optional[Dict[str, Any]]:
         zone_hint = _infer_zone_hint_from_text(scene, events, summary_short, hypotheses)
 
     features = {
-        "person_present": bool(features_raw.get("person_present", False)),
+        "person_present": _coerce_bool(features_raw.get("person_present"), default=False),
         "zone_hint": zone_hint,
         "activity_level": clamp01(features_raw.get("activity_level", 0.0), default=0.0),
         "novelty": clamp01(features_raw.get("novelty", 0.0), default=0.0),
@@ -168,6 +168,21 @@ def _pick_text(data: Mapping[str, Any], *keys: str) -> Any:
 def _clean_text(value: Any, *, max_len: int) -> str:
     token = " ".join(str(value or "").split()).strip()
     return token[:max_len]
+
+
+def _coerce_bool(value: Any, *, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return bool(int(value))
+    token = str(value).strip().lower()
+    if token in {"true", "1", "yes", "y", "on"}:
+        return True
+    if token in {"false", "0", "no", "n", "off", ""}:
+        return False
+    return default
 
 
 def _short_text(value: Any, *, max_len: int) -> str:

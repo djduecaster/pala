@@ -11,7 +11,7 @@ from typing import Any, Callable, Dict, Mapping, Optional
 import numpy as np
 from PIL import Image
 
-from ..types import ActionPlan, HoldCommand, PerceptionState, PrimitiveKind
+from ..types import ActionPlan, HoldCommand, MoveToCommand, PerceptionState, PrimitiveKind
 from ..utils import maybe_logger
 from .action_compiler import ActionCompiler
 from .arbiter import Arbiter, ArbiterConfig
@@ -68,8 +68,8 @@ class BehaviorPolicyConfig:
     request_min_fresh_frames: int = 1
     planner_include_latest_frame: bool = True
 
-    env_max_tokens: int = 420
-    planner_max_tokens: int = 480
+    env_max_tokens: int = 1000
+    planner_max_tokens: int = 1000
 
     proposer_max_age_s: float = 12.0
     planner_max_proposals: int = 3
@@ -81,6 +81,18 @@ class BehaviorPolicyConfig:
 
     idle_after_s: float = 0.0
     idle_glance_after_s: float = 0.8
+    startup_wake_enabled: bool = False
+    startup_wake_left_s: float = 0.35
+    startup_wake_right_s: float = 0.35
+    startup_wake_loop_s: float = 0.45
+    startup_wake_settle_s: float = 0.70
+    startup_wake_rate_rad_s: float = 1.8
+    startup_wake_yaw_rad: float = 0.16
+    startup_wake_roll_rad: float = 0.10
+    startup_wake_pitch2_rad: float = 0.12
+    startup_observe_yaw_rad: float = 0.00
+    startup_observe_pitch2_rad: float = -0.18
+    startup_person_conf_fast_exit: float = 0.60
 
     mode_min_dwell_s: float = 1.0
     mode_engage_person_conf: float = 0.45
@@ -194,6 +206,12 @@ class BehaviorPolicy:
         self._last_valid_zone_hint: Optional[str] = None
         self._same_primitive_streak = 1
         self._idle_tick = 0
+        self._startup_enabled = bool(self._cfg.startup_wake_enabled)
+        self._startup_done = not self._startup_enabled
+        self._startup_started_s = self._clock()
+        self._startup_step_index: Optional[int] = None
+        self._startup_action: Optional[ActionPlan] = None
+        self._startup_fast_exit_latched = False
 
         self._env_log = maybe_logger(self._cfg.env_log_path) if self._cfg.env_log_path else None
         self._planner_log = maybe_logger(self._cfg.planner_log_path) if self._cfg.planner_log_path else None
@@ -234,6 +252,11 @@ class BehaviorPolicy:
             self._maybe_schedule_planner(st=st, now=now)
 
         self._update_perception_health(st=st)
+        startup_action = self._run_startup_sequence(st=st, now=now)
+        if startup_action is not None:
+            self._emit_startup_trace(now=now, action=startup_action)
+            return startup_action
+
         snap = self._world_state.snapshot()
         mode_signals = self._build_mode_signals(st=st, snapshot=snap)
         mode_decision = self._mode_manager.update(now_mono_s=now, signals=mode_signals)
@@ -243,7 +266,7 @@ class BehaviorPolicy:
         zone_hint = self._zone_hint(st=st, snapshot=snap)
 
         planner_context = self._context_builder.build_planner_context(
-            st=st,
+            st=None,
             world_snapshot=snap,
             current_action=self._current_action,
             planner_health=self._health.planner.as_dict(),
@@ -360,13 +383,11 @@ class BehaviorPolicy:
         return self._current_action
 
     def _build_mode_signals(self, *, st: Optional[PerceptionState], snapshot: Mapping[str, Any]) -> ModeSignals:
+        _ = st
         latest_env = snapshot.get("latest_env_snapshot") or {}
         features = latest_env.get("features") or {}
-        person_conf = 0.0
-        if st is not None and st.primary_person_conf is not None:
-            person_conf = max(0.0, min(1.0, float(st.primary_person_conf)))
-
-        person_present = bool(features.get("person_present", False) or person_conf >= 0.40)
+        person_present = bool(features.get("person_present", False))
+        person_conf = 1.0 if person_present else 0.0
         return ModeSignals(
             person_present=person_present,
             person_conf=person_conf,
@@ -776,7 +797,7 @@ class BehaviorPolicy:
 
         no_commit_s = max(0.0, now - self._last_action_commit_s)
         context = self._context_builder.build_planner_context(
-            st=st,
+            st=None,
             world_snapshot=snap,
             current_action=self._current_action,
             planner_health=self._health.planner.as_dict(),
@@ -819,6 +840,7 @@ class BehaviorPolicy:
         rationale: str,
         utility: float,
         now: float,
+        record_decision: bool = True,
     ) -> None:
         prev_primitive = self._current_action.primitive.value
 
@@ -833,14 +855,157 @@ class BehaviorPolicy:
         else:
             self._same_primitive_streak = 1
 
-        self._world_state.append_decision(
-            DecisionSnapshot(
-                primitive=action.primitive.value,
-                style=action.style,
-                confidence=action.confidence,
-                rationale_short=(rationale or action.explanation or "").strip()[:220],
+        if record_decision:
+            self._world_state.append_decision(
+                DecisionSnapshot(
+                    primitive=action.primitive.value,
+                    style=action.style,
+                    confidence=action.confidence,
+                    rationale_short=(rationale or action.explanation or "").strip()[:220],
+                )
             )
+
+    def _run_startup_sequence(self, *, st: Optional[PerceptionState], now: float) -> Optional[ActionPlan]:
+        if not self._startup_enabled or self._startup_done:
+            return None
+
+        elapsed = max(0.0, now - self._startup_started_s)
+        left_end = max(0.0, float(self._cfg.startup_wake_left_s))
+        right_end = left_end + max(0.0, float(self._cfg.startup_wake_right_s))
+        loop_end = right_end + max(0.0, float(self._cfg.startup_wake_loop_s))
+        settle_end = loop_end + max(0.0, float(self._cfg.startup_wake_settle_s))
+
+        startup_snapshot = self._world_state.snapshot()
+        startup_features = (startup_snapshot.get("latest_env_snapshot") or {}).get("features") or {}
+        person_conf = 1.0 if bool(startup_features.get("person_present", False)) else 0.0
+        fast_exit_conf = max(0.0, min(1.0, float(self._cfg.startup_person_conf_fast_exit)))
+        if person_conf >= fast_exit_conf and elapsed < loop_end:
+            self._startup_fast_exit_latched = True
+        if self._startup_fast_exit_latched and elapsed < loop_end:
+            elapsed = loop_end
+
+        if elapsed >= settle_end:
+            self._startup_done = True
+            self._startup_step_index = None
+            self._startup_action = None
+            self._startup_fast_exit_latched = False
+            return None
+
+        step_index = 0
+        if elapsed < left_end:
+            step_index = 0
+        elif elapsed < right_end:
+            step_index = 1
+        elif elapsed < loop_end:
+            step_index = 2
+        else:
+            step_index = 3
+
+        if self._startup_step_index == step_index and self._startup_action is not None:
+            return self._startup_action
+
+        action = self._build_startup_action(step_index)
+        self._startup_step_index = step_index
+        self._startup_action = action
+        self._set_current_action(
+            action,
+            rationale=action.explanation or "startup_awaken",
+            utility=0.08,
+            now=now,
+            record_decision=False,
         )
+        return action
+
+    def _build_startup_action(self, step_index: int) -> ActionPlan:
+        yaw = max(0.0, float(self._cfg.startup_wake_yaw_rad))
+        roll = max(0.0, float(self._cfg.startup_wake_roll_rad))
+        pitch = max(0.0, float(self._cfg.startup_wake_pitch2_rad))
+        observe_yaw = float(self._cfg.startup_observe_yaw_rad)
+        observe_pitch = float(self._cfg.startup_observe_pitch2_rad)
+        rate = max(0.2, float(self._cfg.startup_wake_rate_rad_s))
+
+        if step_index == 0:
+            target = [-yaw, 0.0, pitch, -roll, 0.0]
+            explanation = "startup_wake_left"
+            style = "curious"
+        elif step_index == 1:
+            target = [yaw, 0.0, pitch, roll, 0.0]
+            explanation = "startup_wake_right"
+            style = "curious"
+        elif step_index == 2:
+            target = [yaw, 0.0, -pitch, -roll, 0.0]
+            explanation = "startup_wake_loop"
+            style = "curious"
+        else:
+            target = [observe_yaw, 0.0, observe_pitch, 0.0, 0.0]
+            explanation = "startup_observe_settle"
+            style = "focused"
+
+        return ActionPlan(
+            primitive=PrimitiveKind.MOVE_TO,
+            command=MoveToCommand(target_rad=target, relative=False, rate_rad_s=rate, timeout_s=1.4),
+            confidence=0.85,
+            style=style,
+            cancel_current=False,
+            explanation=explanation,
+        )
+
+    def _emit_startup_trace(self, *, now: float, action: ActionPlan) -> None:
+        mode_snapshot = self._mode_manager.snapshot
+        elapsed = max(0.0, now - self._startup_started_s)
+        self._trace.emit(
+            {
+                "ts_wall_s": time.time(),
+                "mode": mode_snapshot.mode.value,
+                "mode_transition": {
+                    "transitioned": False,
+                    "from": mode_snapshot.mode.value,
+                    "to": mode_snapshot.mode.value,
+                    "reason": "startup_awaken",
+                },
+                "startup": {
+                    "active": True,
+                    "step": self._startup_step_name(),
+                    "elapsed_s": round(elapsed, 3),
+                },
+                "current_action": {
+                    "primitive": action.primitive.value,
+                    "style": action.style,
+                    "confidence": action.confidence,
+                },
+                "health": {
+                    "planner": self._health.planner.as_dict(),
+                    "env": self._health.env.as_dict(),
+                    "perception": self._health.perception.as_dict(),
+                },
+                "decision": {
+                    "committed": True,
+                    "reason": "startup_awaken",
+                    "source": "startup",
+                    "best_utility": 0.08,
+                    "threshold": 0.0,
+                    "effective_current": 0.0,
+                    "margin": 0.0,
+                },
+                "signals": {
+                    "no_commit_s": max(0.0, now - self._last_action_commit_s),
+                    "zone_hint": None,
+                    "env_delta": 0.0,
+                    "detector_alive": None,
+                    "source_alive": None,
+                },
+                "top_candidates": [],
+            }
+        )
+
+    def _startup_step_name(self) -> str:
+        lookup = {
+            0: "wake_left",
+            1: "wake_right",
+            2: "wake_loop",
+            3: "observe_settle",
+        }
+        return lookup.get(self._startup_step_index, "unknown")
 
     def _recent_switch_count(self, now: float) -> int:
         window_s = 8.0
@@ -849,11 +1014,7 @@ class BehaviorPolicy:
         return len(self._recent_commit_times)
 
     def _zone_hint(self, *, st: Optional[PerceptionState], snapshot: Mapping[str, Any]) -> Optional[str]:
-        if st is not None and st.debug:
-            zone = str(st.debug.get("zone_hint", "")).strip().lower()
-            if zone in {"left", "center", "right"}:
-                self._last_valid_zone_hint = zone
-                return zone
+        _ = st
         latest_env = snapshot.get("latest_env_snapshot") or {}
         features = latest_env.get("features") or {}
         zone = str(features.get("zone_hint", "")).strip().lower()

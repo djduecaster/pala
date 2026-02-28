@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pala.behavior.context_builder import ContextBuilder
-from pala.types import ActionPlan, HoldCommand, PerceptionState, PrimitiveKind
+from pala.types import ActionPlan, HoldCommand, PrimitiveKind
 
 
 def _hold_action() -> ActionPlan:
@@ -13,24 +13,19 @@ def _hold_action() -> ActionPlan:
     )
 
 
-def test_context_builder_prefers_perception_zone_hint_over_env_feature():
+def test_context_builder_uses_env_zone_hint_and_no_local_person_conf():
     builder = ContextBuilder()
-    st = PerceptionState(
-        timestamp_monotonic_s=1.0,
-        primary_person_conf=0.82,
-        debug={"zone_hint": " LEFT "},
-    )
     world = {
         "latest_env_snapshot": {
             "scene": "desk",
             "summary": "steady",
             "delta_score": 0.3,
-            "features": {"zone_hint": "right", "person_present": False},
+            "features": {"zone_hint": "right", "person_present": True},
         }
     }
 
     ctx = builder.build_planner_context(
-        st=st,
+        st=None,
         world_snapshot=world,
         current_action=_hold_action(),
         planner_health={"state": "HEALTHY"},
@@ -38,10 +33,9 @@ def test_context_builder_prefers_perception_zone_hint_over_env_feature():
         last_commit_mono_s=8.0,
         no_commit_s=2.0,
     )
-    assert ctx["signals"]["person_conf"] == 0.82
-    assert ctx["signals"]["zone_hint"] == "left"
-    assert "perception:zone:left" in ctx["evidence_index"]["available"]
-    assert "perception:zone:right" not in ctx["evidence_index"]["available"]
+    assert ctx["signals"]["person_conf"] is None
+    assert ctx["signals"]["zone_hint"] == "right"
+    assert "env:zone:right" in ctx["evidence_index"]["available"]
 
 
 def test_context_builder_handles_invalid_timestamps_and_format_helpers():

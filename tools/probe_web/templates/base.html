@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{% block title %}PALA Probe Web{% endblock %}</title>
+    <link rel="stylesheet" href="/probe-web-static/style.css" />
+    <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+    <script defer src="/probe-web-static/app.js"></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="topbar-main">
+        <div>
+          <h1>PALA Probe Web</h1>
+          <p>4-image packet simulator for runtime-aligned env and planner requests</p>
+        </div>
+        <button id="help-open" type="button" class="btn-secondary">Input/Output Help</button>
+      </div>
+    </header>
+    <aside id="help-overlay" class="overlay hidden" role="dialog" aria-modal="true" aria-label="Probe help">
+      <div class="overlay-card">
+        <div class="overlay-head">
+          <h2>Probe Help: Inputs and Outputs</h2>
+          <button id="help-close" type="button" class="btn-secondary">Close</button>
+        </div>
+
+        <h3>Env Processor (pala.env_summary.v1)</h3>
+        <p><strong>Primary inputs:</strong> 4 ordered images, system prompt, env contract, policy identity, context JSON, timeout, model/provider/base URL, sampling/token knobs.</p>
+        <p><strong>Derived packet fields:</strong> frame timeline from <code>inter_frame_ms</code>, multimodal messages (images + user text), response_format JSON schema.</p>
+        <p><strong>Expected output JSON keys:</strong> <code>schema_version, scene, events, hypotheses, summary_short, delta_score, features</code>.</p>
+        <p><strong>Features keys:</strong> <code>person_present, zone_hint, activity_level, novelty</code>.</p>
+
+        <h3>Intent Proposer / Planner (pala.intent_proposals.v2)</h3>
+        <p><strong>Primary inputs:</strong> env parsed output (unless disabled), planner context, policy identity/capabilities/safety/style, planner prompt, planner image selection, planner system prompt, response_format JSON schema.</p>
+        <p><strong>Adjustable planner packet controls:</strong> image indices, context override JSON, user-text override, full payload override JSON.</p>
+        <p><strong>Expected output JSON keys:</strong> <code>schema_version, proposals</code> (optional <code>notes_short</code>).</p>
+        <p><strong>Per-proposal required keys:</strong> <code>intent, primitive, command, style, score, confidence, urgency, risk, allow_interrupt, rationale_short, evidence</code>.</p>
+
+        <h3>Run Modes</h3>
+        <p><strong>Run Env, Preview Planner Inputs:</strong> runs env only, shows full planner request packet that would be sent.</p>
+        <p><strong>Run Planner From Prepared Env:</strong> uses a prepared env run ID and executes planner with current planner controls.</p>
+        <p><strong>Run Env + Planner:</strong> single-pass chain in one request cycle.</p>
+
+        <h3>Where to inspect full packets</h3>
+        <p>Use <code>Effective Inputs</code> sections and <code>Request Payload (Redacted)</code> blocks for full env/planner packets including schema, context, prompts, messages, and selected images.</p>
+      </div>
+    </aside>
+    <main class="page">{% block content %}{% endblock %}</main>
+  </body>
+</html>

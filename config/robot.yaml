@@ -111,13 +111,25 @@ cosmos:
   summarizer_hz: 0.2
   planner_event_delta_threshold: 0.65
   planner_event_cooldown_s: 0.7
-  planner_max_proposals: 3
+  planner_max_proposals: 2
   planner_use_env_context: true
   arbiter_min_dwell_s: 1.2
   arbiter_base_margin: 0.10
   arbiter_orient_cooldown_s: 1.2
   idle_after_s: 6.0
   idle_glance_after_s: 10.0
+  startup_wake_enabled: true
+  startup_wake_left_s: 0.35
+  startup_wake_right_s: 0.35
+  startup_wake_loop_s: 0.45
+  startup_wake_settle_s: 0.70
+  startup_wake_rate_rad_s: 1.8
+  startup_wake_yaw_rad: 0.16
+  startup_wake_roll_rad: 0.10
+  startup_wake_pitch2_rad: 0.12
+  startup_observe_yaw_rad: 0.0
+  startup_observe_pitch2_rad: -0.18
+  startup_person_conf_fast_exit: 0.60
   mode_min_dwell_s: 1.0
   mode_engage_person_conf: 0.45
   mode_disengage_person_conf: 0.20
@@ -135,8 +147,8 @@ cosmos:
   request_timeout_ms: 20000
   behavior_error_backoff_s: 1.5
   behavior_client_error_backoff_s: 5.0
-  env_max_tokens: 420
-  planner_max_tokens: 480
+  env_max_tokens: 1000
+  planner_max_tokens: 1000
   response_ttl_ms: 5000
   behavior_env_log_path: "logs/behavior_env.jsonl"
   behavior_planner_log_path: "logs/behavior_planner.jsonl"

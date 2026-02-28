@@ -93,3 +93,24 @@ def test_bookkeeping_records_parse_error():
     proposer.submit_or_replace({"tick": 1})
     assert proposer.complete_request("{bad json") is None
     assert (proposer.last_parse_error or "").startswith("json_decode:")
+
+
+def test_parser_accepts_schema_version_alias_v2():
+    raw = json.dumps(
+        {
+            "schema_version": "v2",
+            "proposals": [
+                _proposal(),
+                _proposal(
+                    primitive="glance",
+                    intent="scan_environment",
+                    command={"direction": "left", "amp_rad": 0.2, "duration_s": 0.4, "rate_rad_s": 1.2},
+                    style="curious",
+                    rationale_short="scan left",
+                ),
+            ],
+        }
+    )
+    parsed = parse_intent_proposer_response(raw)
+    assert parsed is not None
+    assert parsed.response.schema_version == "pala.intent_proposals.v2"

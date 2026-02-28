@@ -14,6 +14,20 @@ from .trace_join import build_reasoning_trace_rows
 from .trace_graph import TraceGraphBuilder, TraceRecord, load_trace_index, resolve_trace_index_path
 
 
+_SESSION_CONTRACT_REQUIRED_TABLES = {
+    "events",
+    "reasoning",
+    "traces",
+    "trace_events",
+    "reasoning_traces",
+    "cases",
+    "case_events",
+    "case_labels",
+    "case_reviews",
+    "meta",
+}
+
+
 def resolve_session_db_path(path: str) -> str:
     raw = str(path)
     if raw.endswith(".db"):
@@ -748,6 +762,8 @@ def build_session_db(
         conn.executemany("INSERT INTO meta (key, value) VALUES (?, ?)", meta_rows)
         conn.commit()
 
+    contract = ensure_session_db_contract(target_db)
+
     return {
         "db_path": target_db,
         "event_count": len(event_rows),
@@ -757,6 +773,7 @@ def build_session_db(
         "case_count": len(case_rows),
         "case_label_count": len(case_label_rows),
         "source_counts": source_counts,
+        "contract_ok": bool(contract.get("ok", False)),
     }
 
 
@@ -1250,10 +1267,36 @@ def query_case_detail_db(
             dict(row)
             for row in conn.execute(
                 """
-                SELECT row_id, event_index, source, component, phase, status, severity, ts_wall_s, latency_ms, snippet
-                FROM case_events
-                WHERE case_id = ?
-                ORDER BY row_id DESC
+                SELECT
+                    ce.row_id,
+                    ce.event_index,
+                    ce.source,
+                    ce.component,
+                    ce.phase,
+                    ce.status,
+                    ce.severity,
+                    ce.ts_wall_s,
+                    ce.latency_ms,
+                    ce.snippet,
+                    rt.input_preview,
+                    rt.output_preview,
+                    rt.primitive,
+                    rt.confidence,
+                    rt.target_zone,
+                    rt.model,
+                    rt.provider,
+                    rt.delta_score,
+                    rt.perception_person_conf,
+                    rt.perception_zone_hint,
+                    rt.perception_frame_id,
+                    rt.video_frame_id,
+                    rt.video_frame_ref,
+                    rt.video_frame_width,
+                    rt.video_frame_height
+                FROM case_events ce
+                LEFT JOIN reasoning_traces rt ON rt.row_id = ce.row_id
+                WHERE ce.case_id = ?
+                ORDER BY ce.row_id DESC
                 LIMIT ?
                 """,
                 (case_key, max(1, int(event_limit))),
@@ -1263,11 +1306,74 @@ def query_case_detail_db(
             "SELECT decision, note, reviewer, reviewed_at_wall_s FROM case_reviews WHERE case_id = ?",
             (case_key,),
         ).fetchone()
+    contexts: Dict[str, Any] = {
+        "env_context": {},
+        "planner_context": {},
+        "arbiter_context": {},
+        "perception_context": {},
+        "video_context": {"frames": []},
+    }
+    latest_by_component: Dict[str, Dict[str, Any]] = {}
+    seen_video: set[tuple[Any, Any, Any, Any]] = set()
+    for item in reversed(events):
+        if not isinstance(item, dict):
+            continue
+        component = str(item.get("component") or "").strip().lower()
+        if component and component not in latest_by_component:
+            latest_by_component[component] = {
+                "row_id": item.get("row_id"),
+                "event_index": item.get("event_index"),
+                "phase": item.get("phase"),
+                "status": item.get("status"),
+                "severity": item.get("severity"),
+                "latency_ms": item.get("latency_ms"),
+                "snippet": item.get("snippet"),
+                "input_preview": item.get("input_preview"),
+                "output_preview": item.get("output_preview"),
+                "primitive": item.get("primitive"),
+                "confidence": item.get("confidence"),
+                "target_zone": item.get("target_zone"),
+                "delta_score": item.get("delta_score"),
+                "model": item.get("model"),
+                "provider": item.get("provider"),
+            }
+
+        if not contexts["perception_context"]:
+            person_conf = item.get("perception_person_conf")
+            zone_hint = item.get("perception_zone_hint")
+            frame_id = item.get("perception_frame_id")
+            if person_conf is not None or zone_hint or frame_id is not None:
+                contexts["perception_context"] = {
+                    "person_conf": person_conf,
+                    "zone_hint": zone_hint,
+                    "frame_id": frame_id,
+                }
+
+        video_ref = str(item.get("video_frame_ref") or "")
+        video_id = item.get("video_frame_id")
+        if video_ref or video_id is not None:
+            key = (video_ref, video_id, item.get("video_frame_width"), item.get("video_frame_height"))
+            if key not in seen_video:
+                seen_video.add(key)
+                contexts["video_context"]["frames"].append(
+                    {
+                        "frame_ref": video_ref,
+                        "frame_id": video_id,
+                        "width": item.get("video_frame_width"),
+                        "height": item.get("video_frame_height"),
+                    }
+                )
+
+    contexts["env_context"] = latest_by_component.get("env_processor", {})
+    contexts["planner_context"] = latest_by_component.get("planner", {})
+    contexts["arbiter_context"] = latest_by_component.get("arbiter", {})
+
     return {
         "case": dict(case_row) if case_row is not None else None,
         "events": events,
         "labels": labels,
         "review": dict(review_row) if review_row is not None else None,
+        "contexts": contexts,
     }
 
 
@@ -1311,3 +1417,74 @@ def review_case(
         "reviewer": str(reviewer or "viewer"),
         "reviewed_at_wall_s": float(reviewed_at),
     }
+
+
+
+def validate_session_db_contract(path: str) -> Dict[str, Any]:
+    db_path = resolve_session_db_path(path)
+    errors: List[str] = []
+    warnings: List[str] = []
+    if not os.path.exists(db_path):
+        return {
+            "ok": False,
+            "db_path": db_path,
+            "errors": ["session_db_missing"],
+            "warnings": [],
+        }
+
+    table_names: set[str] = set()
+    case_count = 0
+    bad_case_sources: List[str] = []
+    meta_keys: set[str] = set()
+    try:
+        with sqlite3.connect(db_path) as conn:
+            table_names = {
+                str(row[0])
+                for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+                if row and isinstance(row[0], str)
+            }
+            missing_tables = sorted(_SESSION_CONTRACT_REQUIRED_TABLES - table_names)
+            if missing_tables:
+                errors.append("missing_tables=" + ",".join(missing_tables))
+
+            if "cases" in table_names:
+                case_count = int(conn.execute("SELECT COUNT(*) FROM cases").fetchone()[0])
+                bad_case_sources = [
+                    str(row[0])
+                    for row in conn.execute(
+                        "SELECT DISTINCT source FROM cases WHERE COALESCE(source, '') != 'sqlite.cases.v4'"
+                    ).fetchall()
+                    if row and row[0] is not None
+                ]
+                if bad_case_sources:
+                    errors.append("case_source_mismatch=" + ",".join(sorted(set(bad_case_sources))))
+
+            if "meta" in table_names:
+                meta_keys = {
+                    str(row[0])
+                    for row in conn.execute("SELECT key FROM meta").fetchall()
+                    if row and isinstance(row[0], str)
+                }
+    except Exception as exc:
+        errors.append(f"db_open_failed={exc!r}")
+
+    required_meta = {"event_count", "reasoning_count", "trace_count", "reasoning_trace_count", "case_count"}
+    missing_meta = sorted(required_meta - meta_keys)
+    if missing_meta:
+        warnings.append("missing_meta=" + ",".join(missing_meta))
+
+    return {
+        "ok": len(errors) == 0,
+        "db_path": db_path,
+        "errors": errors,
+        "warnings": warnings,
+        "case_count": int(case_count),
+    }
+
+
+def ensure_session_db_contract(path: str) -> Dict[str, Any]:
+    report = validate_session_db_contract(path)
+    if not bool(report.get("ok")):
+        details = "; ".join(str(item) for item in report.get("errors", []))
+        raise ValueError(f"session db contract failed: {details}")
+    return report

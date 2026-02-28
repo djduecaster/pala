@@ -3,7 +3,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+
+from .storage_sqlite import resolve_session_db_path
 
 
 VIEWER_SUMMARY_PATH = "viewer_summary.json"
@@ -127,7 +130,67 @@ def _safe_ratio(numer: int, denom: int) -> Optional[float]:
     return float(numer) / float(denom)
 
 
-def _build_alerts(rows: Sequence[Tuple[str, Dict[str, Any]]]) -> List[str]:
+def _event_count_total(run: Mapping[str, Any]) -> Optional[int]:
+    direct = run.get("event_count_total")
+    if isinstance(direct, (int, float)):
+        return max(0, int(direct))
+    counts = run.get("event_counts")
+    if isinstance(counts, Mapping):
+        total = 0
+        seen = False
+        for value in counts.values():
+            if isinstance(value, (int, float)):
+                total += int(value)
+                seen = True
+        if seen:
+            return max(0, int(total))
+    return None
+
+
+def _load_case_stats(session_dir: str) -> Optional[Dict[str, Any]]:
+    root = _expand_path(session_dir)
+    if not root:
+        return None
+    db_path = resolve_session_db_path(root)
+    if not os.path.exists(db_path):
+        return None
+    try:
+        with sqlite3.connect(db_path) as conn:
+            tables = {
+                str(row[0])
+                for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+                if row and isinstance(row[0], str)
+            }
+            if "cases" not in tables:
+                return None
+            total_cases = int(conn.execute("SELECT COUNT(*) FROM cases").fetchone()[0])
+            if "case_reviews" in tables:
+                reviewed_cases = int(conn.execute("SELECT COUNT(*) FROM case_reviews").fetchone()[0])
+                decision_counts = {
+                    str(row[0]): int(row[1])
+                    for row in conn.execute(
+                        "SELECT decision, COUNT(*) FROM case_reviews GROUP BY decision"
+                    ).fetchall()
+                    if row and row[0] is not None
+                }
+            else:
+                reviewed_cases = 0
+                decision_counts = {}
+    except Exception:
+        return None
+    return {
+        "db_path": db_path,
+        "total_cases": max(0, int(total_cases)),
+        "reviewed_cases": max(0, int(reviewed_cases)),
+        "decision_counts": decision_counts,
+    }
+
+
+def _build_alerts(
+    rows: Sequence[Tuple[str, Dict[str, Any]]],
+    *,
+    latest_case_stats: Optional[Mapping[str, Any]] = None,
+) -> List[str]:
     if not rows:
         return []
     latest = rows[-1][1]
@@ -149,6 +212,39 @@ def _build_alerts(rows: Sequence[Tuple[str, Dict[str, Any]]]) -> List[str]:
     if latest_case_source and latest_case_source != "sqlite.cases.v4":
         suffix = f":{latest_case_reason}" if latest_case_reason else ""
         alerts.append(f"latest_case_unavailable{suffix}")
+
+    if isinstance(latest_case_stats, Mapping):
+        total_cases = int(latest_case_stats.get("total_cases", 0) or 0)
+        reviewed_cases = int(latest_case_stats.get("reviewed_cases", 0) or 0)
+        if total_cases >= 10 and reviewed_cases == 0:
+            alerts.append("latest_case_reviews_empty")
+        elif total_cases >= 20:
+            coverage = float(reviewed_cases) / float(total_cases)
+            if coverage < 0.15:
+                alerts.append(f"latest_case_review_coverage_low:{coverage:.3f}")
+
+    latest_transport_peak = _as_float(latest.get("transport_queue_peak_utilization"))
+    if latest_transport_peak is not None and latest_transport_peak >= 0.85:
+        alerts.append(f"latest_transport_queue_pressure_high:{latest_transport_peak:.3f}")
+    latest_local_peak = _as_float(latest.get("local_queue_peak_utilization"))
+    if latest_local_peak is not None and latest_local_peak >= 0.85:
+        alerts.append(f"latest_local_queue_pressure_high:{latest_local_peak:.3f}")
+    latest_reconnect_total = _as_float(latest.get("reconnect_total"))
+    if latest_reconnect_total is not None and latest_reconnect_total >= 3.0:
+        alerts.append(f"latest_reconnect_churn:{int(round(latest_reconnect_total))}")
+    latest_reconnect_stale = _as_float(latest.get("reconnect_stale"))
+    if latest_reconnect_stale is not None and latest_reconnect_stale >= 1.0:
+        alerts.append(f"latest_stale_reconnects:{int(round(latest_reconnect_stale))}")
+
+    latest_mode = str(latest.get("mode") or "").strip().lower()
+    latest_duration_s = _as_float(latest.get("session_duration_s"))
+    latest_event_total = _event_count_total(latest)
+    latest_rx_peak = _as_float(latest.get("rx_rate_peak_5s"))
+    if latest_mode == "live" and latest_duration_s is not None and latest_duration_s >= 30.0:
+        if latest_event_total is not None and latest_event_total < 30:
+            alerts.append(f"latest_live_low_activity_events:{latest_event_total}/{int(latest_duration_s)}s")
+        if latest_rx_peak is not None and latest_rx_peak < 0.5:
+            alerts.append(f"latest_live_low_rx_peak:{latest_rx_peak:.3f}")
 
     if len(rows) < 2:
         return alerts
@@ -191,8 +287,12 @@ def build_run_report(
 ) -> Dict[str, Any]:
     rows: List[Tuple[str, Dict[str, Any]]] = []
     mode_filter_norm = str(mode_filter or "").strip().lower()
+    case_stats_by_session: Dict[str, Dict[str, Any]] = {}
 
     for session_dir in session_dirs:
+        case_stats = _load_case_stats(session_dir)
+        if isinstance(case_stats, dict):
+            case_stats_by_session[session_dir] = case_stats
         runs = _load_session_runs(session_dir)
         if not runs:
             continue
@@ -213,6 +313,14 @@ def build_run_report(
     quality_score_values: List[float] = []
     dropped_agent_values: List[float] = []
     dropped_local_values: List[float] = []
+    transport_queue_peak_values: List[float] = []
+    local_queue_peak_values: List[float] = []
+    reconnect_total_values: List[float] = []
+    reconnect_stale_values: List[float] = []
+    reconnect_disconnect_values: List[float] = []
+    reconnect_start_fail_values: List[float] = []
+    rx_rate_peak_values: List[float] = []
+    event_total_values: List[float] = []
     case_source_counts: Dict[str, int] = {}
     case_unavailable_count = 0
     exit_known = 0
@@ -243,6 +351,30 @@ def build_run_report(
         dropped_local = run.get("dropped_events_local")
         if isinstance(dropped_local, (int, float)):
             dropped_local_values.append(max(0.0, float(dropped_local)))
+        transport_q_peak = _as_float(run.get("transport_queue_peak_utilization"))
+        if transport_q_peak is not None:
+            transport_queue_peak_values.append(max(0.0, min(1.0, transport_q_peak)))
+        local_q_peak = _as_float(run.get("local_queue_peak_utilization"))
+        if local_q_peak is not None:
+            local_queue_peak_values.append(max(0.0, min(1.0, local_q_peak)))
+        reconnect_total = _as_float(run.get("reconnect_total"))
+        if reconnect_total is not None:
+            reconnect_total_values.append(max(0.0, reconnect_total))
+        reconnect_stale = _as_float(run.get("reconnect_stale"))
+        if reconnect_stale is not None:
+            reconnect_stale_values.append(max(0.0, reconnect_stale))
+        reconnect_disconnect = _as_float(run.get("reconnect_disconnect"))
+        if reconnect_disconnect is not None:
+            reconnect_disconnect_values.append(max(0.0, reconnect_disconnect))
+        reconnect_start_fail = _as_float(run.get("reconnect_start_fail"))
+        if reconnect_start_fail is not None:
+            reconnect_start_fail_values.append(max(0.0, reconnect_start_fail))
+        rx_rate_peak = _as_float(run.get("rx_rate_peak_5s"))
+        if rx_rate_peak is not None:
+            rx_rate_peak_values.append(max(0.0, rx_rate_peak))
+        event_total = _event_count_total(run)
+        if event_total is not None:
+            event_total_values.append(max(0.0, float(event_total)))
         case_source = str(run.get("case_source") or "").strip()
         if case_source:
             case_source_counts[case_source] = case_source_counts.get(case_source, 0) + 1
@@ -261,9 +393,23 @@ def build_run_report(
                 if ok:
                     curation_ok += 1
 
+    total_cases = 0
+    reviewed_cases = 0
+    case_decision_counts: Dict[str, int] = {}
+    for case_stats in case_stats_by_session.values():
+        total_cases += int(case_stats.get("total_cases", 0) or 0)
+        reviewed_cases += int(case_stats.get("reviewed_cases", 0) or 0)
+        decisions = case_stats.get("decision_counts")
+        if isinstance(decisions, dict):
+            for key, value in decisions.items():
+                label = str(key)
+                case_decision_counts[label] = case_decision_counts.get(label, 0) + int(value or 0)
+
     latest = None
+    latest_case_stats: Optional[Dict[str, Any]] = None
     if rows:
         latest_session, latest_run = rows[-1]
+        latest_case_stats = case_stats_by_session.get(latest_session)
         latest = {
             "session_dir": latest_session,
             "run_id": latest_run.get("run_id"),
@@ -274,9 +420,25 @@ def build_run_report(
             "quality_gate_passed": latest_run.get("quality_gate_passed"),
             "dropped_events_agent": latest_run.get("dropped_events_agent"),
             "dropped_events_local": latest_run.get("dropped_events_local"),
+            "transport_queue_peak_utilization": latest_run.get("transport_queue_peak_utilization"),
+            "local_queue_peak_utilization": latest_run.get("local_queue_peak_utilization"),
+            "rx_rate_peak_5s": latest_run.get("rx_rate_peak_5s"),
+            "reconnect_total": latest_run.get("reconnect_total"),
+            "reconnect_stale": latest_run.get("reconnect_stale"),
+            "reconnect_disconnect": latest_run.get("reconnect_disconnect"),
+            "reconnect_start_fail": latest_run.get("reconnect_start_fail"),
+            "event_count_total": _event_count_total(latest_run),
             "case_source": latest_run.get("case_source"),
             "case_unavailable_reason": latest_run.get("case_unavailable_reason"),
         }
+        if isinstance(latest_case_stats, dict):
+            latest_total = int(latest_case_stats.get("total_cases", 0) or 0)
+            latest_reviewed = int(latest_case_stats.get("reviewed_cases", 0) or 0)
+            latest["case_total"] = latest_total
+            latest["case_reviewed"] = latest_reviewed
+            latest["case_review_coverage"] = (
+                (float(latest_reviewed) / float(latest_total)) if latest_total > 0 else None
+            )
 
     avg_duration = None
     if duration_values:
@@ -284,10 +446,14 @@ def build_run_report(
     avg_quality = None
     if quality_score_values:
         avg_quality = sum(quality_score_values) / len(quality_score_values)
-    alerts = _build_alerts(rows)
+    alerts = _build_alerts(rows, latest_case_stats=latest_case_stats)
     quality_failed = max(0, quality_known - quality_passed)
     curation_failed = max(0, curation_known - curation_ok)
     sessions_without_runs = sorted(path for path in session_dirs if path not in sessions_with_runs)
+    if session_dirs and len(rows) <= 0:
+        alerts.append("no_run_artifacts")
+    elif sessions_without_runs:
+        alerts.append(f"sessions_missing_runs:{len(sessions_without_runs)}")
 
     return {
         "sessions_scanned": len(session_dirs),
@@ -321,9 +487,39 @@ def build_run_report(
             "local_total": sum(dropped_local_values) if dropped_local_values else 0.0,
             "local_p95": _percentile(dropped_local_values, 95.0),
         },
+        "stream_health": {
+            "transport_queue_peak_sample_count": len(transport_queue_peak_values),
+            "transport_queue_peak_p95": _percentile(transport_queue_peak_values, 95.0),
+            "transport_queue_peak_max": (max(transport_queue_peak_values) if transport_queue_peak_values else None),
+            "local_queue_peak_sample_count": len(local_queue_peak_values),
+            "local_queue_peak_p95": _percentile(local_queue_peak_values, 95.0),
+            "local_queue_peak_max": (max(local_queue_peak_values) if local_queue_peak_values else None),
+            "reconnect_total_sample_count": len(reconnect_total_values),
+            "reconnect_total_avg": (
+                (sum(reconnect_total_values) / len(reconnect_total_values)) if reconnect_total_values else None
+            ),
+            "reconnect_total_p95": _percentile(reconnect_total_values, 95.0),
+            "reconnect_stale_total": sum(reconnect_stale_values) if reconnect_stale_values else 0.0,
+            "reconnect_disconnect_total": (
+                sum(reconnect_disconnect_values) if reconnect_disconnect_values else 0.0
+            ),
+            "reconnect_start_fail_total": sum(reconnect_start_fail_values) if reconnect_start_fail_values else 0.0,
+            "rx_rate_peak_sample_count": len(rx_rate_peak_values),
+            "rx_rate_peak_p95": _percentile(rx_rate_peak_values, 95.0),
+            "rx_rate_peak_max": (max(rx_rate_peak_values) if rx_rate_peak_values else None),
+            "event_total_sample_count": len(event_total_values),
+            "event_total_avg": ((sum(event_total_values) / len(event_total_values)) if event_total_values else None),
+            "event_total_p50": _percentile(event_total_values, 50.0),
+            "event_total_p95": _percentile(event_total_values, 95.0),
+        },
         "cases": {
             "source_counts": case_source_counts,
             "unavailable_count": case_unavailable_count,
+            "sessions_with_case_db": len(case_stats_by_session),
+            "total_cases": int(total_cases),
+            "reviewed_cases": int(reviewed_cases),
+            "review_coverage": (float(reviewed_cases) / float(total_cases)) if total_cases > 0 else None,
+            "decision_counts": case_decision_counts,
         },
         "alerts": alerts,
         "alerts_count": len(alerts),
@@ -407,18 +603,31 @@ def main() -> int:
         f"local_total={drops.get('local_total') if drops else None} "
         f"local_p95={drops.get('local_p95') if drops else None}"
     )
+    stream_health = report.get("stream_health") if isinstance(report.get("stream_health"), dict) else {}
+    print(
+        "stream_health: "
+        f"agent_q_peak_max={stream_health.get('transport_queue_peak_max') if stream_health else None} "
+        f"viewer_q_peak_max={stream_health.get('local_queue_peak_max') if stream_health else None} "
+        f"reconnect_p95={stream_health.get('reconnect_total_p95') if stream_health else None} "
+        f"rx_rate_peak_max={stream_health.get('rx_rate_peak_max') if stream_health else None} "
+        f"event_p50={stream_health.get('event_total_p50') if stream_health else None}"
+    )
     cases = report.get("cases") if isinstance(report.get("cases"), dict) else {}
     print(
         "cases: "
         f"sources={cases.get('source_counts') if cases else None} "
-        f"unavailable_count={cases.get('unavailable_count') if cases else None}"
+        f"unavailable_count={cases.get('unavailable_count') if cases else None} "
+        f"total={cases.get('total_cases') if cases else None} "
+        f"reviewed={cases.get('reviewed_cases') if cases else None} "
+        f"coverage={cases.get('review_coverage') if cases else None}"
     )
     latest = report.get("latest_run")
     if isinstance(latest, dict):
         print(
             "latest: "
             f"session={latest.get('session_dir')} mode={latest.get('mode')} "
-            f"exit={latest.get('exit_code')} run_id={latest.get('run_id')}"
+            f"exit={latest.get('exit_code')} run_id={latest.get('run_id')} "
+            f"events={latest.get('event_count_total')} rx_peak={latest.get('rx_rate_peak_5s')}"
         )
     else:
         print("latest: n/a")

@@ -32,6 +32,7 @@ def test_build_planner_user_text_requires_ranked_proposals():
     )
 
     assert "Return JSON only matching schema `pala.intent_proposals.v2`" in text
+    assert "Return compact minified JSON on a single line." in text
     assert "Return exactly 3 proposals ranked best to worst." in text
     assert "The camera view is my view as the lamp." in text
     assert "Use the current mode in context_json to shape your proposal choices." in text

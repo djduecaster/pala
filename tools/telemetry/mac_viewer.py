@@ -38,7 +38,7 @@ from tools.telemetry.quality import evaluate_quality_gate, load_quality_report
 from tools.telemetry.reasoning import ReasoningEvent, format_reasoning_snippet, normalize_reasoning_message
 from tools.telemetry.replay import SessionReplayReader
 from tools.telemetry.schema_v3 import TELEMETRY_SCHEMA_VERSION_V3
-from tools.telemetry.storage_sqlite import query_cases_db, query_session_db, resolve_session_db_path, review_case
+from tools.telemetry.storage_sqlite import query_case_detail_db, query_cases_db, query_session_db, resolve_session_db_path, review_case
 from tools.telemetry.integrity import verify_integrity_report
 from tools.telemetry.trace_graph import TraceGraphBuilder, TraceRecord, resolve_trace_index_path, load_trace_index
 
@@ -135,6 +135,23 @@ class DashboardState:
     warnings: Deque[str] = field(default_factory=lambda: collections.deque(maxlen=8))
     dropped_events_reported: int = 0
     local_dropped_events: int = 0
+    local_queue_depth: int = 0
+    local_queue_capacity: int = 0
+    local_queue_utilization: float = 0.0
+    local_queue_utilization_peak: float = 0.0
+    local_queue_alerts: int = 0
+    transport_queue_depth: int = 0
+    transport_queue_capacity: int = 0
+    transport_queue_utilization: float = 0.0
+    transport_queue_utilization_peak: float = 0.0
+    transport_queue_alerts: int = 0
+    reconnect_total: int = 0
+    reconnect_stale: int = 0
+    reconnect_disconnect: int = 0
+    reconnect_start_fail: int = 0
+    rx_timestamps: Deque[float] = field(default_factory=lambda: collections.deque(maxlen=20_000))
+    rx_rate_5s: float = 0.0
+    rx_rate_peak_5s: float = 0.0
 
     video_frame_bytes: Optional[bytes] = None
     video_frame_meta: Optional[Dict[str, Any]] = None
@@ -164,6 +181,9 @@ class DashboardState:
     timeline_unavailable_reason: str = "timeline not initialized"
     timeline_total_rows: int = 0
     timeline_selected_row_id: Optional[int] = None
+    case_detail_case_id: str = ""
+    case_detail: Optional[Dict[str, Any]] = None
+    case_detail_note: str = ""
     integrity_report: Optional[Dict[str, Any]] = None
     annotations: Deque[Dict[str, Any]] = field(default_factory=lambda: collections.deque(maxlen=120))
     annotation_keys: set[str] = field(default_factory=set)
@@ -182,7 +202,9 @@ class DashboardState:
 
     def apply(self, msg: Dict[str, Any]) -> None:
         source = str(msg.get("source", "unknown"))
-        self.last_event_wall_s = time.time()
+        now_s = time.time()
+        self.last_event_wall_s = now_s
+        self._record_rx(now_s)
         self.event_counts[source] = self.event_counts.get(source, 0) + 1
 
         payload = msg.get("payload", {})
@@ -213,6 +235,17 @@ class DashboardState:
             dropped = payload.get("dropped_events")
             if isinstance(dropped, int):
                 self.dropped_events_reported = max(self.dropped_events_reported, dropped)
+            depth = payload.get("queue_depth")
+            capacity = payload.get("queue_capacity")
+            if isinstance(depth, (int, float)):
+                self.transport_queue_depth = max(0, int(depth))
+            if isinstance(capacity, (int, float)):
+                self.transport_queue_capacity = max(0, int(capacity))
+            if self.transport_queue_capacity > 0:
+                util = float(self.transport_queue_depth) / float(self.transport_queue_capacity)
+                util = max(0.0, min(1.0, util))
+                self.transport_queue_utilization = util
+                self.transport_queue_utilization_peak = max(self.transport_queue_utilization_peak, util)
             return
 
         if source == "capture_status":
@@ -281,6 +314,15 @@ class DashboardState:
 
         if "error" in payload:
             self.warnings.append(f"{source}: {payload['error']}")
+
+    def _record_rx(self, now_s: float) -> None:
+        self.rx_timestamps.append(float(now_s))
+        cutoff = float(now_s) - 5.0
+        while self.rx_timestamps and self.rx_timestamps[0] < cutoff:
+            self.rx_timestamps.popleft()
+        rate = float(len(self.rx_timestamps)) / 5.0
+        self.rx_rate_5s = rate
+        self.rx_rate_peak_5s = max(self.rx_rate_peak_5s, rate)
 
     def _ingest_reasoning_event(self, msg: Dict[str, Any]) -> None:
         event = normalize_reasoning_message(msg)
@@ -417,6 +459,17 @@ class DashboardState:
         else:
             self.timeline_selected_row_id = None
 
+        selected = self.selected_timeline_row()
+        selected_case_id = selected.case_id if selected is not None else ""
+        if not selected_case_id:
+            self.case_detail_case_id = ""
+            self.case_detail = None
+            self.case_detail_note = ""
+        elif self.case_detail_case_id and self.case_detail_case_id != selected_case_id:
+            self.case_detail_case_id = selected_case_id
+            self.case_detail = None
+            self.case_detail_note = ""
+
     def selected_timeline_row(self) -> Optional[TimelineRow]:
         if not self.timeline_rows:
             return None
@@ -510,7 +563,7 @@ MODE_CONFIGS: Dict[str, ModeConfig] = {
     "curate": ModeConfig(
         pack="behavior_v2_debug",
         panels=("summary", "trace_list", "trace_detail", "case_list", "case_detail", "query", "quality", "annotations"),
-        default_query="kind:joined severity:error|warning status:parse_fail|timeout sort:severity",
+        default_query="kind:joined severity:error|warning status:parse_fail|timeout|no_commit sort:severity",
         quality_gate="strict",
         index_mode="sqlite",
         no_video=True,
@@ -622,6 +675,8 @@ def _build_remote_agent_command(args: argparse.Namespace) -> str:
         str(args.behavior_planner_log),
         "--behavior-reasoning-log",
         str(args.behavior_reasoning_log),
+        "--behavior-trace-log",
+        str(args.behavior_trace_log),
         "--poll-ms",
         str(int(args.poll_ms)),
         "--heartbeat-s",
@@ -715,6 +770,7 @@ def _build_remote_agent_command(args: argparse.Namespace) -> str:
         'echo "telemetry_agent_error: jetson dir not found: $PALA_TELEMETRY_JETSON_DIR"; exit 1; fi',
         'cd "$PALA_TELEMETRY_JETSON_DIR"',
         'export PATH="$HOME/.local/bin:$PATH"',
+        'export PYTHONPATH="$PALA_TELEMETRY_JETSON_DIR${PYTHONPATH:+:$PYTHONPATH}"',
         'if [ -f "$HOME/.config/pala/env.sh" ]; then source "$HOME/.config/pala/env.sh"; fi',
         agent_cmd,
     ]
@@ -802,6 +858,7 @@ def _replay_loop(
     session_dir: str,
     speed: float,
     no_timing: bool,
+    local_drops: Optional[_Counter] = None,
 ) -> None:
     try:
         reader = SessionReplayReader(session_dir)
@@ -818,6 +875,8 @@ def _replay_loop(
                     }
                 )
             except queue.Full:
+                if local_drops is not None:
+                    local_drops.inc()
                 pass
         if isinstance(reader.integrity, dict):
             try:
@@ -835,6 +894,8 @@ def _replay_loop(
                     }
                 )
             except queue.Full:
+                if local_drops is not None:
+                    local_drops.inc()
                 pass
 
         scale = max(0.01, float(speed))
@@ -848,6 +909,8 @@ def _replay_loop(
             try:
                 out_q.put_nowait(msg)
             except queue.Full:
+                if local_drops is not None:
+                    local_drops.inc()
                 continue
         try:
             out_q.put_nowait(
@@ -858,6 +921,8 @@ def _replay_loop(
                 }
             )
         except queue.Full:
+            if local_drops is not None:
+                local_drops.inc()
             pass
     except Exception as exc:
         try:
@@ -869,6 +934,8 @@ def _replay_loop(
                 }
             )
         except queue.Full:
+            if local_drops is not None:
+                local_drops.inc()
             pass
 
 
@@ -1096,131 +1163,6 @@ def _focus_prefix(state: DashboardState, panel: str) -> str:
     if state.focus_panel == panel:
         return "> "
     return "  "
-
-
-def _query_text_match(query: str, text: str) -> bool:
-    raw_tokens = [tok for tok in str(query or "").strip().split() if tok]
-    if not raw_tokens:
-        return True
-    hay = str(text or "").lower()
-    groups: List[List[str]] = []
-    for raw in raw_tokens:
-        token = str(raw).strip()
-        low = token.lower()
-        if low.startswith("sort:") or low.startswith("order:") or low.startswith("kind:"):
-            continue
-        if (
-            low.startswith("latency_ms>")
-            or low.startswith("latency_ms<")
-            or low.startswith("duration_ms>")
-            or low.startswith("duration_ms<")
-            or low.startswith("ts:[")
-        ):
-            # Structured numeric/time filters do not map cleanly to text fallback.
-            continue
-        if ":" in token:
-            key, value = token.split(":", 1)
-            if key.strip().lower() in {"source", "severity", "status", "phase", "req", "trace", "component"}:
-                token = value.strip()
-        options = [part.strip().lower() for part in token.split("|") if part.strip()]
-        if options:
-            groups.append(options)
-    if not groups:
-        return True
-    return all(any(opt in hay for opt in group) for group in groups)
-
-
-def _build_in_memory_query_rows(state: DashboardState, *, limit: int) -> List[Dict[str, Any]]:
-    lim = max(1, int(limit))
-    candidates: List[tuple[float, Dict[str, Any]]] = []
-    for seq, event in reversed(state._iter_reasoning_with_seq()):
-        text = " ".join(
-            [
-                str(event.source or ""),
-                str(event.phase or ""),
-                str(event.status or ""),
-                str(event.severity or ""),
-                str(event.req_id if event.req_id is not None else ""),
-                str(event.snippet or ""),
-            ]
-        )
-        if not _query_text_match(state.query_text, text):
-            continue
-        candidates.append(
-            (
-                float(seq),
-                {
-                    "kind": "reasoning",
-                    "id": seq,
-                    "source": event.source,
-                    "req_id": event.req_id,
-                    "status": event.status,
-                    "severity": event.severity,
-                    "summary": format_reasoning_snippet(
-                        event.snippet,
-                        max_chars=120,
-                        redact=False,
-                    ),
-                },
-            )
-        )
-
-    trace_cap = max(lim * 10, 200)
-    trace_added = 0
-    for trace in reversed(state.trace_records):
-        for ref in reversed(trace.event_refs):
-            text = " ".join(
-                [
-                    str(trace.trace_id or ""),
-                    str(ref.source or ""),
-                    str(ref.phase or ""),
-                    str(ref.status or ""),
-                    str(ref.severity or ""),
-                    str(ref.req_id if ref.req_id is not None else ""),
-                    str(ref.summary or ""),
-                ]
-            )
-            if not _query_text_match(state.query_text, text):
-                continue
-            candidates.append(
-                (
-                    float(ref.event_index),
-                    {
-                        "kind": "event",
-                        "id": f"{trace.trace_id}:{ref.event_index}",
-                        "trace_id": trace.trace_id,
-                        "req_id": ref.req_id if ref.req_id is not None else trace.req_id,
-                        "source": ref.source,
-                        "status": ref.status,
-                        "severity": ref.severity,
-                        "summary": ref.summary,
-                    },
-                )
-            )
-            trace_added += 1
-            if trace_added >= trace_cap:
-                break
-        if trace_added >= trace_cap:
-            break
-    candidates.sort(key=lambda item: item[0], reverse=True)
-    rows: List[Dict[str, Any]] = []
-    seen: set[str] = set()
-    for _, row in candidates:
-        dedupe_key = "\x1f".join(
-            [
-                str(row.get("kind") or ""),
-                str(row.get("id") or ""),
-                str(row.get("trace_id") or ""),
-                str(row.get("source") or ""),
-            ]
-        )
-        if dedupe_key in seen:
-            continue
-        seen.add(dedupe_key)
-        rows.append(row)
-        if len(rows) >= lim:
-            break
-    return rows
 
 
 def _load_manifest_schema_version(session_dir: str) -> Optional[int]:
@@ -1547,7 +1489,7 @@ def _render_timeline_panel(lines: List[str], state: DashboardState, args: argpar
     lines.append("")
 
 
-def _render_timeline_detail_panel(lines: List[str], state: DashboardState) -> None:
+def _render_timeline_detail_panel(lines: List[str], state: DashboardState, args: argparse.Namespace) -> None:
     lines.append(f"{_focus_prefix(state, 'case_detail')}Case Detail")
     row = state.selected_timeline_row()
     if row is None:
@@ -1562,13 +1504,71 @@ def _render_timeline_detail_panel(lines: List[str], state: DashboardState) -> No
         f"  ts={row.ts_wall_s} comp={row.component or '-'} phase={row.phase or '-'} "
         f"status={row.status or '-'} sev={row.severity or '-'} lat={row.latency_ms} hard={row.confidence}"
     )
-    lines.append(
-        f"  labels={row.labels_csv or '-'} decision={row.decision or '-'}"
-    )
-    if row.snippet:
-        lines.append(f"  snippet={_shorten(row.snippet, 260)}")
-    lines.append("")
 
+    detail = state.case_detail if state.case_detail_case_id == (row.case_id or "") else None
+    if state.case_detail_note:
+        lines.append(f"  note={_shorten(state.case_detail_note, 220)}")
+    if not isinstance(detail, dict):
+        lines.append(f"  labels={row.labels_csv or '-'} decision={row.decision or '-'}")
+        if row.snippet:
+            lines.append(f"  snippet={_shorten(row.snippet, 260)}")
+        lines.append("")
+        return
+
+    case_obj = detail.get("case") if isinstance(detail.get("case"), dict) else {}
+    labels = detail.get("labels") if isinstance(detail.get("labels"), list) else []
+    events = detail.get("events") if isinstance(detail.get("events"), list) else []
+    review = detail.get("review") if isinstance(detail.get("review"), dict) else None
+
+    lines.append(
+        f"  duration_ms={case_obj.get('duration_ms')} events={case_obj.get('event_count', 0)} "
+        f"errors={case_obj.get('error_count', 0)} warnings={case_obj.get('warning_count', 0)} "
+        f"max_latency_ms={case_obj.get('max_latency_ms')}"
+    )
+    if labels:
+        label_parts = []
+        for item in labels[:6]:
+            if not isinstance(item, dict):
+                continue
+            label = str(item.get("label") or "").strip()
+            if not label:
+                continue
+            score = item.get("score")
+            if isinstance(score, (int, float)):
+                label_parts.append(f"{label}:{float(score):.2f}")
+            else:
+                label_parts.append(label)
+        if label_parts:
+            lines.append(f"  labels={_shorten(', '.join(label_parts), 220)}")
+    else:
+        lines.append(f"  labels={row.labels_csv or '-'}")
+
+    if review is not None:
+        lines.append(
+            f"  review={review.get('decision') or '-'} reviewer={review.get('reviewer') or '-'} "
+            f"at={review.get('reviewed_at_wall_s')} note={_shorten(str(review.get('note') or ''), 120)}"
+        )
+    else:
+        lines.append(f"  decision={row.decision or '-'}")
+
+    if row.snippet:
+        lines.append(f"  snippet={_shorten(row.snippet, 240)}")
+
+    max_rows = max(3, int(args.max_log_lines))
+    if events:
+        lines.append("  recent_events:")
+        for ev in events[:max_rows]:
+            if not isinstance(ev, dict):
+                continue
+            lines.append(
+                f"    row={ev.get('row_id')} src={ev.get('source') or '-'} comp={ev.get('component') or '-'} "
+                f"phase={ev.get('phase') or '-'} status={ev.get('status') or '-'} "
+                f"sev={ev.get('severity') or '-'} lat={ev.get('latency_ms')}"
+            )
+            snippet = str(ev.get("snippet") or "").strip()
+            if snippet:
+                lines.append(f"      {_shorten(snippet, 180)}")
+    lines.append("")
 
 def _render_annotations_panel(lines: List[str], state: DashboardState, args: argparse.Namespace) -> None:
     lines.append(f"{_focus_prefix(state, 'annotations')}Annotations")
@@ -1665,6 +1665,7 @@ def _build_viewer_summary(
     if case_source == "sqlite.cases.v4":
         case_reason = ""
     reviewed_count = sum(1 for row in state.timeline_rows if str(row.decision or "").strip())
+    event_total = sum(int(v) for v in state.event_counts.values()) if state.event_counts else 0
     if isinstance(state.quality_report, dict):
         quality_grade = state.quality_report.get("grade")
         quality_score = state.quality_report.get("score")
@@ -1688,10 +1689,20 @@ def _build_viewer_summary(
         "case_reviewed_visible": int(reviewed_count),
         "case_unavailable_reason": case_reason,
         "event_counts": dict(state.event_counts),
+        "event_count_total": int(event_total),
         "trace_count": len(state.trace_records),
         "reasoning_count": len(state.reasoning_events),
         "dropped_events_agent": int(state.dropped_events_reported),
         "dropped_events_local": int(state.local_dropped_events),
+        "transport_queue_peak_utilization": round(float(state.transport_queue_utilization_peak), 4),
+        "transport_queue_alert_count": int(state.transport_queue_alerts),
+        "local_queue_peak_utilization": round(float(state.local_queue_utilization_peak), 4),
+        "local_queue_alert_count": int(state.local_queue_alerts),
+        "rx_rate_peak_5s": round(float(state.rx_rate_peak_5s), 3),
+        "reconnect_total": int(state.reconnect_total),
+        "reconnect_stale": int(state.reconnect_stale),
+        "reconnect_disconnect": int(state.reconnect_disconnect),
+        "reconnect_start_fail": int(state.reconnect_start_fail),
         "warning_count": len(state.warnings),
         "curation_result": dict(curation_result) if isinstance(curation_result, dict) else None,
         "exit_code": int(exit_code),
@@ -1797,10 +1808,23 @@ def _render(state: DashboardState, *, now_wall_s: float, args: argparse.Namespac
             f"hb={_fmt_age(now_wall_s, state.last_agent_wall_s)} "
             f"drops=agent:{state.dropped_events_reported}/local:{state.local_dropped_events}"
         )
+        lines.append(
+            "Stream: "
+            f"rx_rate={state.rx_rate_5s:.1f}/s peak={state.rx_rate_peak_5s:.1f}/s "
+            f"agent_q={state.transport_queue_depth}/{state.transport_queue_capacity or 0} "
+            f"({state.transport_queue_utilization:.0%}, peak={state.transport_queue_utilization_peak:.0%}) "
+            f"viewer_q={state.local_queue_depth}/{state.local_queue_capacity or 0} "
+            f"({state.local_queue_utilization:.0%}, peak={state.local_queue_utilization_peak:.0%})"
+        )
         preset_text = state.active_preset or "-"
         lines.append(
             f"mode={preset_text} focus={state.focus_panel} "
             f"reasoning={state.reasoning_filter_mode} hotkeys={'on' if state.key_reader_enabled else 'off'}"
+        )
+        lines.append(
+            "Reconnects: "
+            f"total={state.reconnect_total} stale={state.reconnect_stale} "
+            f"disconnect={state.reconnect_disconnect} start_fail={state.reconnect_start_fail}"
         )
         selected_trace = state.selected_trace()
         lines.append(
@@ -1851,7 +1875,7 @@ def _render(state: DashboardState, *, now_wall_s: float, args: argparse.Namespac
         _render_timeline_panel(lines, state, args)
 
     if _panel_enabled(args, "case_detail"):
-        _render_timeline_detail_panel(lines, state)
+        _render_timeline_detail_panel(lines, state, args)
 
     if _panel_enabled(args, "annotations"):
         _render_annotations_panel(lines, state, args)
@@ -1934,6 +1958,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--behavior-env-log", default="logs/behavior_env.jsonl", help=hidden)
     parser.add_argument("--behavior-planner-log", default="logs/behavior_planner.jsonl", help=hidden)
     parser.add_argument("--behavior-reasoning-log", default="logs/behavior_reasoning.jsonl", help=hidden)
+    parser.add_argument("--behavior-trace-log", default="logs/behavior_trace.jsonl", help=hidden)
     parser.add_argument("--poll-ms", type=int, default=200, help=hidden)
     parser.add_argument("--heartbeat-s", type=float, default=1.0, help=hidden)
     parser.add_argument("--queue-size", type=int, default=1024, help=hidden)
@@ -2076,6 +2101,8 @@ def main() -> int:
     last_draw = 0.0
     last_query_refresh_s = 0.0
     last_timeline_refresh_s = 0.0
+    last_case_detail_refresh_s = 0.0
+    last_queue_warn_s = 0.0
     session_db_path = ""
     capture_writer: Optional[SessionCaptureWriter] = None
     save_session_dir, save_session_note = _resolve_live_save_session_dir(
@@ -2115,9 +2142,16 @@ def main() -> int:
             capture_writer = None
             state.warnings.append(f"local capture init failed: {exc!r}")
 
-    def _schedule_reconnect(reason: str) -> None:
+    def _schedule_reconnect(reason: str, *, category: str = "generic") -> None:
         nonlocal next_connect_time, reconnect_attempt
         reconnect_attempt += 1
+        state.reconnect_total += 1
+        if category == "stale":
+            state.reconnect_stale += 1
+        elif category == "disconnect":
+            state.reconnect_disconnect += 1
+        elif category == "start_fail":
+            state.reconnect_start_fail += 1
         delay = min(reconnect_max_s, reconnect_base_s * (reconnect_backoff ** (reconnect_attempt - 1)))
         next_connect_time = time.time() + delay
         state.connection_note = f"{reason}; retry in {delay:.1f}s"
@@ -2128,12 +2162,17 @@ def main() -> int:
         state.quality_gate_note = note
 
     def _resolve_lookup_root() -> str:
-        if session_db_path and os.path.exists(session_db_path):
-            return session_db_path
+        candidates: List[str] = []
+        if session_db_path:
+            candidates.append(session_db_path)
         if replay_mode and os.path.isdir(replay_dir):
-            return replay_dir
+            candidates.append(replay_dir)
         if save_session_dir and os.path.isdir(save_session_dir):
-            return save_session_dir
+            candidates.append(save_session_dir)
+        for item in candidates:
+            db_candidate = resolve_session_db_path(item)
+            if os.path.exists(db_candidate):
+                return item
         return ""
 
     def _resolve_timeline_session_root() -> str:
@@ -2178,8 +2217,8 @@ def main() -> int:
             state.warnings.append(f"trace_index_load_failed: {exc!r}")
         if state.query_text:
             if args.index_mode == "off":
-                state.query_note = "query index disabled (--index-mode off)"
-                state.query_rows = _build_in_memory_query_rows(state, limit=int(args.query_limit))
+                state.query_note = "query disabled: sqlite index required (--index-mode sqlite)"
+                state.query_rows = []
             else:
                 try:
                     query_out = query_session_db(
@@ -2220,7 +2259,7 @@ def main() -> int:
                     )
                 except Exception as exc:
                     state.query_note = f"sqlite query failed: {exc!r}"
-                    state.query_rows = _build_in_memory_query_rows(state, limit=int(args.query_limit))
+                    state.query_rows = []
         replay_thread = threading.Thread(
             target=_replay_loop,
             kwargs={
@@ -2229,6 +2268,7 @@ def main() -> int:
                 "session_dir": replay_dir,
                 "speed": max(0.01, float(args.replay_speed)),
                 "no_timing": bool(args.replay_no_timing),
+                "local_drops": reader_local_drops,
             },
             daemon=True,
         )
@@ -2284,6 +2324,10 @@ def main() -> int:
                                 note="",
                                 reviewer="viewer",
                             )
+                            state.case_detail_case_id = selected_case.case_id
+                            state.case_detail = None
+                            state.case_detail_note = ""
+                            last_case_detail_refresh_s = 0.0
                             state.logs.append(f"case review: {selected_case.case_id} -> {decision}")
                         except Exception as exc:
                             state.warnings.append(f"case review failed: {exc!r}")
@@ -2333,7 +2377,7 @@ def main() -> int:
                 proc = _start_ssh_agent(args)
             except OSError as exc:
                 state.connected = False
-                _schedule_reconnect(f"ssh start failed: {exc!r}")
+                _schedule_reconnect(f"ssh start failed: {exc!r}", category="start_fail")
             else:
                 state.connected = True
                 reconnect_attempt = 0
@@ -2383,11 +2427,10 @@ def main() -> int:
         if state.query_text and (now - last_query_refresh_s) >= 1.0:
             last_query_refresh_s = now
             if args.index_mode == "off":
-                state.query_rows = _build_in_memory_query_rows(state, limit=int(args.query_limit))
-                state.query_note = "memory query (reasoning + trace events; index disabled)"
+                state.query_rows = []
+                state.query_note = "query disabled: sqlite index required (--index-mode sqlite)"
             else:
                 lookup_root = _resolve_lookup_root()
-
                 if lookup_root:
                     try:
                         query_out = query_session_db(
@@ -2427,11 +2470,14 @@ def main() -> int:
                             f"joined={len(query_out.get('joined', []))}"
                         )
                     except Exception as exc:
-                        state.query_rows = _build_in_memory_query_rows(state, limit=int(args.query_limit))
-                        state.query_note = f"sqlite query fallback: {exc!r}"
+                        state.query_rows = []
+                        state.query_note = f"sqlite query failed: {exc!r}"
                 else:
-                    state.query_rows = _build_in_memory_query_rows(state, limit=int(args.query_limit))
-                    state.query_note = "memory query (reasoning + trace events; session db unavailable)"
+                    state.query_rows = []
+                    state.query_note = (
+                        "query unavailable: session.db missing "
+                        "(run: uv run python -m tools.telemetry.pipeline compile <session_dir>)"
+                    )
 
         if (now - last_timeline_refresh_s) >= 1.0:
             selected = state.selected_trace()
@@ -2455,6 +2501,63 @@ def main() -> int:
             )
             last_timeline_refresh_s = now
 
+        selected_case_row = state.selected_timeline_row()
+        selected_case_id = selected_case_row.case_id if selected_case_row is not None else ""
+        if not selected_case_id:
+            state.case_detail_case_id = ""
+            state.case_detail = None
+            state.case_detail_note = ""
+        elif (not session_db_path) or (not os.path.exists(session_db_path)):
+            state.case_detail_case_id = selected_case_id
+            state.case_detail = None
+            state.case_detail_note = "case detail unavailable: session.db missing"
+        elif (
+            state.case_detail_case_id != selected_case_id
+            or (state.case_detail is None and not state.case_detail_note)
+        ) and ((now - last_case_detail_refresh_s) >= 0.35):
+            try:
+                state.case_detail = query_case_detail_db(
+                    session_db_path,
+                    case_id=selected_case_id,
+                    event_limit=max(20, int(args.max_log_lines) * 6),
+                )
+                state.case_detail_case_id = selected_case_id
+                state.case_detail_note = ""
+            except Exception as exc:
+                state.case_detail_case_id = selected_case_id
+                state.case_detail = None
+                state.case_detail_note = f"case detail query failed: {exc!r}"
+            last_case_detail_refresh_s = now
+
+        state.local_queue_depth = int(in_q.qsize())
+        state.local_queue_capacity = int(in_q.maxsize)
+        if state.local_queue_capacity > 0:
+            local_util = float(state.local_queue_depth) / float(state.local_queue_capacity)
+            local_util = max(0.0, min(1.0, local_util))
+            state.local_queue_utilization = local_util
+            state.local_queue_utilization_peak = max(state.local_queue_utilization_peak, local_util)
+        warn_interval_s = max(1.0, float(args.warning_throttle_s))
+        if (now - last_queue_warn_s) >= warn_interval_s:
+            warned = False
+            if state.transport_queue_capacity > 0 and state.transport_queue_utilization >= 0.85:
+                state.transport_queue_alerts += 1
+                state.warnings.append(
+                    "transport queue pressure "
+                    f"{state.transport_queue_depth}/{state.transport_queue_capacity} "
+                    f"({state.transport_queue_utilization:.0%})"
+                )
+                warned = True
+            if state.local_queue_capacity > 0 and state.local_queue_utilization >= 0.85:
+                state.local_queue_alerts += 1
+                state.warnings.append(
+                    "viewer queue pressure "
+                    f"{state.local_queue_depth}/{state.local_queue_capacity} "
+                    f"({state.local_queue_utilization:.0%})"
+                )
+                warned = True
+            if warned:
+                last_queue_warn_s = now
+
         if (not replay_mode) and proc is not None and proc.poll() is None:
             stale_ref_s = state.last_rx_wall_s
             if stale_ref_s is None:
@@ -2473,7 +2576,7 @@ def main() -> int:
                 if reader_thread is not None:
                     reader_thread.join(timeout=1.0)
                     reader_thread = None
-                _schedule_reconnect("reconnecting after stale stream")
+                _schedule_reconnect("reconnecting after stale stream", category="stale")
 
         # Handle process exit / reconnect.
         if (not replay_mode) and proc is not None and proc.poll() is not None:
@@ -2484,7 +2587,7 @@ def main() -> int:
             if reader_thread is not None:
                 reader_thread.join(timeout=1.0)
                 reader_thread = None
-            _schedule_reconnect(f"disconnected (exit={exit_code})")
+            _schedule_reconnect(f"disconnected (exit={exit_code})", category="disconnect")
 
         if replay_mode and replay_thread is not None and not replay_thread.is_alive() and in_q.empty():
             stop.set()

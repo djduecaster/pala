@@ -6,7 +6,6 @@ from typing import Any, Dict, Mapping, Optional
 from jsonschema import ValidationError, validate
 
 from .json_parse import parse_json_flexible
-from .schemas import INTENT_PROPOSALS_SCHEMA
 from .types import IntentProposal, ProposerResponse, clamp01, clamp_float, clamp_int
 
 _ALLOWED_INTENTS = {
@@ -23,6 +22,23 @@ _ALLOWED_STYLES = {"calm", "curious", "focused"}
 _ALLOWED_RISKS = {"low", "medium", "high"}
 _ALLOWED_DIRECTIONS = {"left", "right", "up", "down"}
 _ALLOWED_ZONES = {"left", "center", "right"}
+_INTENT_PROPOSALS_ENVELOPE_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["schema_version", "proposals"],
+    "properties": {
+        "schema_version": {"type": "string", "const": "pala.intent_proposals.v2"},
+        "notes_short": {"type": "string", "maxLength": 280},
+        "proposals": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 5,
+            # Validate proposals individually below so one malformed entry
+            # does not drop the whole response.
+            "items": {},
+        },
+    },
+}
 
 
 @dataclass
@@ -98,7 +114,7 @@ def _parse_intent_proposer_response_with_error(
         return None, "proposals_missing_or_empty", stage
 
     try:
-        validate(instance=canonical, schema=INTENT_PROPOSALS_SCHEMA)
+        validate(instance=canonical, schema=_INTENT_PROPOSALS_ENVELOPE_SCHEMA)
     except ValidationError as exc:
         return None, f"schema:{_json_path(exc)}:{_short_text(exc.message, max_len=160)}", stage
 
@@ -292,5 +308,13 @@ def _canonicalize_payload(data: Any) -> Optional[Dict[str, Any]]:
     payload.pop("intent_proposals", None)
     if "schema_version" not in payload:
         payload["schema_version"] = "pala.intent_proposals.v2"
+    payload["schema_version"] = _normalize_schema_version(payload.get("schema_version"))
     payload.pop("pala.intent_proposals.v2", None)
     return payload
+
+
+def _normalize_schema_version(raw: Any) -> str:
+    token = str(raw or "").strip().lower()
+    if token in {"pala.intent_proposals.v2", "v2", "2", "2.0", "2.0.0"}:
+        return "pala.intent_proposals.v2"
+    return "pala.intent_proposals.v2"

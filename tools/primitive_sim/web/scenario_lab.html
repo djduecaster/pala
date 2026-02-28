@@ -25,16 +25,27 @@
 
         <section class="group mode-group">
           <div class="row mode-nav">
-            <a class="nav-btn" href="/tools/primitive_sim/web/index.html?studio=1">Studio</a>
-            <a class="nav-btn" href="/tools/primitive_sim/web/joint_checker.html">Joint Checker</a>
-            <a class="nav-btn" href="/tools/primitive_sim/web/state_machine.html">State Machine</a>
-            <a class="nav-btn" href="/tools/primitive_sim/web/scenario_lab.html">Scenario Lab</a>
-            <button id="runSuiteBtn" type="button">Run Suite Playback</button>
+            <a class="nav-btn" href="/tools/primitive_sim/web/lamp_sim.html?mode=studio">Studio</a>
+            <a class="nav-btn" href="/tools/primitive_sim/web/lamp_sim.html?mode=joint_checker">Joint Checker</a>
+            <a class="nav-btn" href="/tools/primitive_sim/web/lamp_sim.html?mode=state_machine">State Machine</a>
+            <a class="nav-btn" href="/tools/primitive_sim/web/lamp_sim.html?mode=scenario_lab">Scenario Lab</a>
+            <button id="runSuiteBtn" type="button">Run Suite Trace</button>
           </div>
           <p id="suiteStatus" class="muted">Suite: idle</p>
         </section>
 
         <section class="group">
+          <h2 class="group-title">Quick Run</h2>
+          <div class="row">
+            <button id="quickTemplateRunBtn" class="btn-primary" type="button">Template + Run</button>
+            <button id="quickAddRunBtn" type="button">Add Step + Run</button>
+            <button id="quickRunSaveBtn" type="button">Run + Save</button>
+          </div>
+          <p class="muted">Fast path for most tuning loops. Auto-uses generated name if experiment name is empty.</p>
+        </section>
+
+        <section class="group">
+          <h2 class="group-title">Step Builder</h2>
           <div class="row">
             <label class="inline stack" for="builderPrimitive">
               Primitive
@@ -56,22 +67,25 @@
           <label for="builderCommand">Step command JSON</label>
           <textarea id="builderCommand" rows="3">{}</textarea>
           <div class="row">
-            <button id="addStepBtn" type="button">Add Step</button>
+            <button id="addStepBtn" class="btn-primary" type="button">Add Step</button>
             <button id="loadTemplateBtn" type="button">Load Template</button>
-            <button id="clearScenarioBtn" type="button">Clear</button>
+            <button id="clearScenarioBtn" class="btn-quiet" type="button">Clear</button>
           </div>
         </section>
 
         <section class="group">
+          <h2 class="group-title">Scenario JSON</h2>
           <label for="scenarioJson">Scenario JSON</label>
           <textarea id="scenarioJson" rows="14"></textarea>
           <div class="row">
             <button id="validateBtn" type="button">Validate</button>
-            <button id="runBtn" type="button">Run Scenario</button>
+            <button id="runBtn" class="btn-primary" type="button">Run Scenario</button>
           </div>
+          <p class="muted">Shortcuts: <kbd>Cmd/Ctrl+Enter</kbd> run, <kbd>Shift+Cmd/Ctrl+Enter</kbd> run+save, <kbd>Cmd/Ctrl+Shift+V</kbd> validate, <kbd>Alt+Enter</kbd> add step, <kbd>Cmd/Ctrl+S</kbd> save experiment.</p>
         </section>
 
         <section class="group">
+          <h2 class="group-title">Experiment</h2>
           <div class="row">
             <label class="inline stack" for="experimentName">
               Experiment name
@@ -81,15 +95,17 @@
               Notes
               <input id="experimentNotes" type="text" placeholder="what changed?">
             </label>
-            <button id="saveExperimentBtn" type="button">Save Experiment</button>
+            <button id="saveExperimentBtn" class="btn-primary" type="button">Save Experiment</button>
           </div>
         </section>
 
         <section class="group">
+          <h2 class="group-title">Metrics</h2>
           <pre id="metricsBox">Metrics: pending</pre>
         </section>
 
         <section class="group">
+          <h2 class="group-title">History</h2>
           <table id="historyTable">
             <thead>
               <tr>
@@ -105,6 +121,7 @@
         </section>
 
         <section class="group">
+          <h2 class="group-title">Status</h2>
           <pre id="statusBox">Loading...</pre>
         </section>
       </aside>

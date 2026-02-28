@@ -19,6 +19,9 @@ Telemetry remains a sidecar under `tools/telemetry` and does not change the core
   - `--query '...'` + `--query-limit N`
   - `--quality-gate off|warn|strict`
   - Core panels: `case_list`, `case_detail`, `quality`, `query`, `annotations`
+- Stream-health diagnostics in viewer summary panel:
+  - RX rate (current + peak), agent transport queue pressure, local viewer queue pressure
+  - reconnect counters (`total`, `stale`, `disconnect`, `start_fail`)
 - Capture manifest defaults now ship as schema version `3`.
 - New V3.x robustness:
   - `integrity.json` artifact checksums + replay verification
@@ -87,10 +90,16 @@ uv run python -m tools.telemetry.pipeline export \
 uv run python -m tools.telemetry.pipeline report --root logs/telemetry
 ```
 Report output now includes session coverage (`sessions_with_runs` vs `sessions_without_runs`) to catch missing run artifacts early.
+It also aggregates stream-health indicators (queue pressure peaks, reconnect churn, RX throughput peaks, and event-volume percentiles).
 For CI-style gating, fail when the latest run looks unhealthy:
 ```bash
 uv run python -m tools.telemetry.run_report --root logs/telemetry --strict
 ```
+Pipeline wrapper also supports strict gating:
+```bash
+uv run python -m tools.telemetry.pipeline report --root logs/telemetry --strict
+```
+`pipeline report` scans only telemetry-like session directories (marker artifacts present) and prints a compact alert preview when issues are detected.
 
 ## Session Bundle Contents (V4)
 - `manifest.json`: session metadata, schema version, V3 artifact pointers
@@ -109,6 +118,8 @@ uv run python -m tools.telemetry.run_report --root logs/telemetry --strict
 - `dataset_manifest.json`: profile/run summary for dataset export
   - includes `inclusion_reason_counts` (`hard_case`, `annotation`, `weak_label`, `baseline`)
 - `viewer_summary.json`: viewer exit summary (`run_id`, mode, query, drops, event counts, quality gate, curation result)
+  - includes stream-health peaks (`transport_queue_peak_utilization`, `local_queue_peak_utilization`, `rx_rate_peak_5s`) and reconnect counters
+  - includes `event_count_total` for low-activity detection on long live runs
 - `viewer_runs.jsonl`: append-only history of viewer runs for the session bundle
   - includes case explorer diagnostics (`case_source`, `case_rows_total`, `case_rows_visible`, `case_reviewed_visible`, `case_unavailable_reason`)
 
@@ -158,6 +169,7 @@ Agent tails BehaviorV2 logs directly:
 - `--behavior-env-log` (default `logs/behavior_env.jsonl`)
 - `--behavior-planner-log` (default `logs/behavior_planner.jsonl`)
 - `--behavior-reasoning-log` (default `logs/behavior_reasoning.jsonl`)
+- `--behavior-trace-log` (default `logs/behavior_trace.jsonl`)
 
 ## Modes + Compact CLI
 Viewer now defaults to a compact mode-driven CLI surface.
@@ -176,6 +188,7 @@ Common mode workflow:
 - Enabled by default in viewer modes.
 - Canonical source is `sqlite.cases.v4` from `session.db`.
 - No memory fallback: if `session.db` is unavailable, viewer shows compile guidance.
+- Query panel is also sqlite-only; run `pipeline compile` before indexed search.
 - Use existing hotkeys:
   - `j/k`: move reasoning selection, or case selection when case panel is focused.
   - `o`: jump to case detail panel.

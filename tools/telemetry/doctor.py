@@ -4,6 +4,7 @@ import argparse
 from dataclasses import asdict, dataclass
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 from typing import List, Sequence
@@ -243,9 +244,67 @@ def _check_session_dir(session_dir: str) -> List[Check]:
         else:
             out.append(Check(name="session:case_explorer.source", status="warn", detail="missing"))
             out.append(Check(name="session:case_explorer.ready", status="warn", detail="no case metadata"))
+
+        queue_peak = latest_viewer_obj.get("transport_queue_peak_utilization")
+        queue_peak_f = None
+        if isinstance(queue_peak, (int, float)):
+            queue_peak_f = float(queue_peak)
+        if queue_peak_f is None:
+            out.append(Check(name="session:stream.queue_peak", status="warn", detail="missing"))
+        elif queue_peak_f >= 0.90:
+            out.append(Check(name="session:stream.queue_peak", status="warn", detail=f"{queue_peak_f:.3f}"))
+        else:
+            out.append(Check(name="session:stream.queue_peak", status="pass", detail=f"{queue_peak_f:.3f}"))
+
+        reconnect_total = latest_viewer_obj.get("reconnect_total")
+        reconnect_total_f = None
+        if isinstance(reconnect_total, (int, float)):
+            reconnect_total_f = float(reconnect_total)
+        if reconnect_total_f is None:
+            out.append(Check(name="session:stream.reconnects", status="warn", detail="missing"))
+        elif reconnect_total_f >= 3.0:
+            out.append(Check(name="session:stream.reconnects", status="warn", detail=str(int(reconnect_total_f))))
+        else:
+            out.append(Check(name="session:stream.reconnects", status="pass", detail=str(int(reconnect_total_f))))
     elif os.path.exists(summary_path) or os.path.exists(runs_path):
         out.append(Check(name="session:case_explorer.source", status="warn", detail="unavailable"))
         out.append(Check(name="session:case_explorer.ready", status="warn", detail="no viewer run rows"))
+
+    db_path = os.path.join(root, SESSION_DB_PATH)
+    if os.path.exists(db_path):
+        try:
+            with sqlite3.connect(db_path) as conn:
+                tables = {
+                    str(row[0])
+                    for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+                    if row and isinstance(row[0], str)
+                }
+                if "cases" in tables:
+                    total_cases = int(conn.execute("SELECT COUNT(*) FROM cases").fetchone()[0])
+                    reviewed_cases = 0
+                    if "case_reviews" in tables:
+                        reviewed_cases = int(conn.execute("SELECT COUNT(*) FROM case_reviews").fetchone()[0])
+                    coverage = (float(reviewed_cases) / float(total_cases)) if total_cases > 0 else None
+                    if total_cases <= 0:
+                        out.append(Check(name="session:case_reviews.coverage", status="warn", detail="0/0 (no cases)"))
+                    elif reviewed_cases <= 0:
+                        out.append(
+                            Check(
+                                name="session:case_reviews.coverage",
+                                status="warn",
+                                detail=f"{reviewed_cases}/{total_cases} ({coverage:.3f})",
+                            )
+                        )
+                    else:
+                        out.append(
+                            Check(
+                                name="session:case_reviews.coverage",
+                                status="pass",
+                                detail=f"{reviewed_cases}/{total_cases} ({coverage:.3f})",
+                            )
+                        )
+        except Exception as exc:
+            out.append(Check(name="session:case_reviews.coverage", status="warn", detail=repr(exc)))
     if os.path.exists(summary_path) or os.path.exists(runs_path):
         try:
             run_health = build_run_report(session_dirs=[root], limit=25)
@@ -265,6 +324,9 @@ def _check_session_dir(session_dir: str) -> List[Check]:
                 if len(alerts) > 3:
                     preview = f"{preview},..."
                 out.append(Check(name="session:viewer_runs.alerts", status="warn", detail=preview))
+                live_activity = [str(item) for item in alerts if str(item).startswith("latest_live_low_activity_events:")]
+                if live_activity:
+                    out.append(Check(name="session:viewer_runs.live_activity", status="warn", detail=live_activity[0]))
         except Exception as exc:
             out.append(Check(name="session:viewer_runs.health", status="warn", detail=repr(exc)))
 

@@ -11,6 +11,7 @@ from pala.behavior.mode_manager import ModeManagerConfig
 from pala.control.primitives import BreathCommand, PrimitiveKind
 from tools.primitive_sim.run import (
     _append_experiment_record,
+    _expand_sweep_grid,
     _default_joint_angles,
     _default_baseline,
     _extract_numeric_dh_params,
@@ -19,8 +20,10 @@ from tools.primitive_sim.run import (
     _load_viewer_geometry_from_config,
     _normalize_baseline,
     _primitive_specs,
+    _score_trace_metrics,
     _scenario_segments_from_payload,
     _save_baseline,
+    _target_step_index,
     _trace_metrics,
 )
 from tools.primitive_sim.simulate import (
@@ -416,3 +419,51 @@ def test_state_machine_commit_resets_no_commit_timer():
     assert out1["no_commit_s"] > 0.0
     out2 = sim.step(dt_s=0.5, signals={}, commit=True)
     assert out2["no_commit_s"] == 0.0
+
+
+def test_expand_sweep_grid_cartesian_product():
+    grid = _expand_sweep_grid({"amp_rad": [0.05, 0.1], "period_s": [4.0, 6.0]})
+    assert len(grid) == 4
+    assert {"amp_rad": 0.05, "period_s": 4.0} in grid
+    assert {"amp_rad": 0.1, "period_s": 6.0} in grid
+
+
+def test_expand_sweep_grid_rejects_invalid_values():
+    with pytest.raises(ValueError, match="param_grid must be a non-empty object"):
+        _expand_sweep_grid({})
+    with pytest.raises(ValueError, match="must be a non-empty array"):
+        _expand_sweep_grid({"amp_rad": []})
+    with pytest.raises(ValueError, match=r"param_grid\[amp_rad\]\[0\] must be numeric"):
+        _expand_sweep_grid({"amp_rad": ["oops", 0.1]})
+
+
+def test_target_step_index_by_index_or_name():
+    steps = [
+        {"name": "home_step"},
+        {"name": "breath_step"},
+        {"name": "glance_step"},
+    ]
+    assert _target_step_index(steps, None) == 2
+    assert _target_step_index(steps, 1) == 1
+    assert _target_step_index(steps, -1) == 2
+    assert _target_step_index(steps, "breath_step") == 1
+    with pytest.raises(ValueError, match="target_step not found"):
+        _target_step_index(steps, "missing_step")
+
+
+def test_score_trace_metrics_applies_weights():
+    metrics = {
+        "min_limit_margin_rad": 0.2,
+        "limit_violation_count": 1,
+        "peak_joint_vel_rad_s": 0.5,
+    }
+    score = _score_trace_metrics(
+        metrics,
+        {
+            "min_limit_margin_rad": 4.0,
+            "limit_violation_count": -12.0,
+            "peak_joint_vel_rad_s": -0.35,
+        },
+    )
+    expected = 4.0 * 0.2 + (-12.0 * 1.0) + (-0.35 * 0.5)
+    assert score == pytest.approx(expected, rel=1e-9, abs=1e-9)

@@ -1,5 +1,17 @@
 const canvas = document.getElementById("simCanvas");
 const ctx = canvas.getContext("2d");
+const pageParams = new URLSearchParams(window.location.search);
+if (pageParams.get("shell") === "1") {
+  document.body.classList.add("embedded-shell");
+  document.addEventListener("click", (ev) => {
+    const link = ev.target?.closest?.("a.nav-btn[href*='/tools/primitive_sim/web/lamp_sim.html']");
+    if (!link || !(window.top && window.top !== window)) {
+      return;
+    }
+    ev.preventDefault();
+    window.top.location.href = link.href;
+  });
+}
 const configPathEl = document.getElementById("configPath");
 const statusBox = document.getElementById("statusBox");
 const jointSliders = document.getElementById("jointSliders");
@@ -10,6 +22,23 @@ const midBtn = document.getElementById("midBtn");
 const copyBtn = document.getElementById("copyBtn");
 const runSuiteBtn = document.getElementById("runSuiteBtn");
 const suiteStatus = document.getElementById("suiteStatus");
+
+function inEmbeddedShell() {
+  return pageParams.get("shell") === "1" && window.top && window.top !== window;
+}
+
+function navigateViewerUrl(url) {
+  const target = String(url || "").trim();
+  if (!target) {
+    return false;
+  }
+  if (inEmbeddedShell()) {
+    window.top.location.href = target;
+    return true;
+  }
+  window.location.href = target;
+  return true;
+}
 
 const DEG = 180 / Math.PI;
 const RAD = Math.PI / 180;
@@ -61,6 +90,37 @@ const state = {
   cameraDistance: 3.75,
   drag: { active: false, lastX: 0 },
 };
+
+function isEditableTarget(target) {
+  if (!(target instanceof Element)) {
+    return false;
+  }
+  if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) {
+    return true;
+  }
+  return Boolean(target.closest("[contenteditable='true']"));
+}
+
+function notifyShell(kind, message, details = "") {
+  if (window.parent === window) {
+    return;
+  }
+  try {
+    window.parent.postMessage(
+      {
+        source: "lamp-mode",
+        type: "status",
+        mode: "joint_checker",
+        kind: String(kind || "ok"),
+        message: String(message || ""),
+        details: String(details || ""),
+      },
+      window.location.origin,
+    );
+  } catch (_err) {
+    // ignore postMessage failures
+  }
+}
 
 function clamp(v, lo, hi) {
   return Math.max(lo, Math.min(hi, v));
@@ -676,8 +736,10 @@ async function copyAnglesVector() {
   try {
     await navigator.clipboard.writeText(payload);
     statusBox.textContent += "\nCopied current angle vector to clipboard.";
+    notifyShell("ok", "Joint vector copied");
   } catch (_err) {
     statusBox.textContent += "\nCopy failed. Clipboard permission blocked.";
+    notifyShell("bad", "Joint vector copy failed");
   }
 }
 
@@ -688,17 +750,44 @@ async function runSuitePlayback() {
     const res = await apiPost("/api/suite", { style: "calm" });
     const viewerUrl = String(res?.viewer_url || "");
     setSuiteStatus(`Suite: ready (${Number(res?.sample_count || 0)} samples). opening...`);
-    if (viewerUrl) {
-      window.location.href = viewerUrl;
+    if (navigateViewerUrl(viewerUrl)) {
       return;
     }
     setSuiteStatus("Suite complete, but no viewer URL returned.", true);
   } catch (err) {
     setSuiteStatus(`Suite failed: ${err}`, true);
+    notifyShell("bad", "Joint mode suite run failed", String(err));
   } finally {
     runSuiteBtn.disabled = false;
   }
 }
+
+window.addEventListener("message", (event) => {
+  if (event.origin !== window.location.origin) {
+    return;
+  }
+  const msg = event.data;
+  if (!msg || typeof msg !== "object") {
+    return;
+  }
+  if (msg.source !== "lamp-shell" || msg.type !== "command") {
+    return;
+  }
+  const cmd = String(msg.command || "");
+  if (cmd === "joint.zero") {
+    setAllAngles(defaultZeroAngles());
+    notifyShell("ok", "Joint checker: zero pose");
+    return;
+  }
+  if (cmd === "joint.mid") {
+    setAllAngles(midpointAngles());
+    notifyShell("ok", "Joint checker: mid limits");
+    return;
+  }
+  if (cmd === "joint.copy") {
+    copyAnglesVector();
+  }
+});
 
 function bindUi() {
   zeroBtn.addEventListener("click", () => {
@@ -745,6 +834,29 @@ function bindUi() {
     state.cameraDistance = clamp(next, 2.2, 6.0);
     drawScene();
   }, { passive: false });
+
+  window.addEventListener("keydown", (ev) => {
+    if (isEditableTarget(ev.target)) {
+      return;
+    }
+    const key = String(ev.key || "").toLowerCase();
+    if (!ev.metaKey && !ev.ctrlKey && !ev.altKey && key === "z") {
+      ev.preventDefault();
+      setAllAngles(defaultZeroAngles());
+      notifyShell("ok", "Joint checker: zero pose");
+      return;
+    }
+    if (!ev.metaKey && !ev.ctrlKey && !ev.altKey && key === "m") {
+      ev.preventDefault();
+      setAllAngles(midpointAngles());
+      notifyShell("ok", "Joint checker: mid limits");
+      return;
+    }
+    if (!ev.metaKey && !ev.ctrlKey && !ev.altKey && key === "c") {
+      ev.preventDefault();
+      copyAnglesVector();
+    }
+  });
 
   window.addEventListener("resize", () => drawScene());
 }

@@ -35,6 +35,24 @@
   padding-right: 12px;
 }
 
+.state-machine-page.embedded-shell {
+  overflow: auto;
+}
+
+.state-machine-page.embedded-shell .layout {
+  height: auto;
+  min-height: auto;
+  padding: 8px;
+}
+
+.state-machine-page.embedded-shell #fsmGraph {
+  max-height: 50vh;
+}
+
+.state-machine-page.embedded-shell .control-card {
+  max-height: 50vh;
+}
+
 .signal-grid {
   display: grid;
   grid-template-columns: 1fr;

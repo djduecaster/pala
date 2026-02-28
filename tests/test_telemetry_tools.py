@@ -23,7 +23,6 @@ from tools.telemetry.mac_viewer import (
     _apply_mode_defaults,
     _append_viewer_run,
     _build_viewer_summary,
-    _build_in_memory_query_rows,
     load_timeline_rows,
     DashboardState,
     _build_parser,
@@ -135,6 +134,7 @@ def test_remote_command_expands_tilde_dir():
     assert "--video-source" in cmd
     assert "--video-tap-jpeg" in cmd
     assert "--video-tap-meta" in cmd
+    assert "--behavior-trace-log" in cmd
 
 
 def test_mode_defaults_apply_live_baseline():
@@ -173,6 +173,45 @@ def test_pipeline_parser_capture_requires_save_session():
     args = parser.parse_args(["capture", "--save-session", "logs/telemetry/session_v4"])
     assert args.cmd == "capture"
     assert args.save_session == "logs/telemetry/session_v4"
+
+
+def test_pipeline_parser_report_supports_strict():
+    parser = _build_pipeline_parser()
+    args = parser.parse_args(["report", "--root", "logs/telemetry", "--strict"])
+    assert args.cmd == "report"
+    assert args.strict is True
+
+
+def test_pipeline_report_strict_exit_when_alerts(tmp_path):
+    session_ok = tmp_path / "session_ok"
+    session_empty = tmp_path / "session_empty"
+    session_ok.mkdir(parents=True, exist_ok=True)
+    session_empty.mkdir(parents=True, exist_ok=True)
+    (session_ok / "viewer_summary.json").write_text(
+        json.dumps({"run_id": "ok-1", "mode": "live", "exit_code": 0}),
+        encoding="utf-8",
+    )
+    (session_empty / "manifest.json").write_text(json.dumps({"schema_version": 3}), encoding="utf-8")
+
+    import subprocess
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "tools.telemetry.pipeline",
+            "report",
+            "--root",
+            str(tmp_path),
+            "--strict",
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 2
+    assert "sessions_missing_runs:1" in proc.stdout
 
 
 def test_remote_command_forwards_pack_and_trace_limits():
@@ -411,6 +450,7 @@ def test_case_query_and_review_roundtrip(tmp_path):
     assert detail["case"] is not None
     assert detail["review"] is not None
     assert detail["review"]["decision"] == "accept"
+    assert isinstance(detail.get("contexts"), dict)
 
 
 def test_dataset_export_from_weak_labels(tmp_path):
@@ -708,6 +748,29 @@ def test_reasoning_normalization_timeline_event():
     assert out.severity == "error"
 
 
+def test_reasoning_normalization_behavior_trace_event():
+    msg = {
+        "source": "behavior_trace_log",
+        "ts_wall_s": 123.9,
+        "payload": {
+            "mode": "engage",
+            "decision": {"committed": False, "reason": "planner_timeout"},
+            "signals": {"zone_hint": "left", "env_delta": 0.72},
+            "current_action": {"primitive": "hold", "confidence": 0.61},
+            "top_candidates": [{"primitive": "glance", "intent": "scan", "utility": 0.44}],
+        },
+    }
+    out = normalize_reasoning_message(msg)
+    assert out is not None
+    assert out.source == "behavior_trace_log"
+    assert out.phase == "engage"
+    assert out.status == "no_commit"
+    assert out.component == "arbiter"
+    assert out.target_zone == "left"
+    assert out.delta_score == 0.72
+    assert out.primitive == "hold"
+
+
 def test_reasoning_redaction_and_snippet():
     raw = "authorization=Bearer abc.def.ghi token=secretvalue1234567890"
     redacted = redact_reasoning_text(raw)
@@ -829,6 +892,27 @@ def test_trace_graph_temporal_fallback_without_req_id():
     traces = b.traces()
     assert len(traces) == 1
     assert len(traces[0].event_refs) == 2
+
+
+def test_trace_graph_ingests_behavior_trace_events():
+    b = TraceGraphBuilder(match_window_s=2.0, max_events=100)
+    b.ingest(
+        {
+            "seq": 1,
+            "source": "behavior_trace_log",
+            "ts_wall_s": 30.0,
+            "payload": {
+                "mode": "engage",
+                "decision": {"committed": True, "reason": "commit_remote"},
+                "top_candidates": [{"primitive": "move_to", "intent": "orient", "utility": 0.88}],
+            },
+        }
+    )
+    traces = b.traces()
+    assert traces
+    ref = traces[0].event_refs[0]
+    assert ref.source == "behavior_trace_log"
+    assert ref.status == "committed"
 
 
 def test_trace_graph_splits_far_events():
@@ -968,63 +1052,19 @@ def test_dashboard_state_drops_monotonic_from_transport_and_agent():
     assert state.dropped_events_reported == 11
 
 
-def test_build_in_memory_query_rows_includes_trace_event_rows():
+def test_dashboard_state_tracks_transport_queue_metrics():
     state = DashboardState(host="jetson")
-    state.query_text = "timeout"
-    state.set_traces(
-        [
-            TraceRecord(
-                trace_id="req:42",
-                req_id=42,
-                start_ts_wall_s=1.0,
-                end_ts_wall_s=1.2,
-                duration_ms=200.0,
-                status="timeout",
-                severity="error",
-                summary="timeout",
-                event_refs=(
-                    TraceEventRef(
-                        event_index=9,
-                        source="journal",
-                        ts_wall_s=1.1,
-                        req_id=42,
-                        phase="journal",
-                        status="timeout",
-                        latency_ms=None,
-                        severity="error",
-                        summary="planner timeout while waiting",
-                    ),
-                ),
-            )
-        ]
-    )
-    rows = _build_in_memory_query_rows(state, limit=10)
-    assert rows
-    assert any(row.get("kind") == "event" and row.get("trace_id") == "req:42" for row in rows)
-
-
-def test_build_in_memory_query_rows_supports_keyed_tokens():
-    state = DashboardState(host="jetson")
-    state.apply(
-        {
-            "source": "timeline_log",
-            "ts_wall_s": 1.0,
-            "payload": {
-                "data": {
-                    "type": "req_end",
-                    "payload": {
-                        "request_id": 5,
-                        "status": "parse_fail",
-                        "reasoning": "planner parse_fail while decoding",
-                    },
-                }
-            },
-        }
-    )
-    state.query_text = "status:parse_fail source:timeline_log sort:severity"
-    rows = _build_in_memory_query_rows(state, limit=10)
-    assert rows
-    assert rows[0]["source"] == "timeline_log"
+    state.apply({"source": "transport_stats", "payload": {"queue_depth": 90, "queue_capacity": 100, "dropped_events": 4}})
+    assert state.transport_queue_depth == 90
+    assert state.transport_queue_capacity == 100
+    assert state.transport_queue_utilization == 0.9
+    assert state.transport_queue_utilization_peak == 0.9
+    assert state.dropped_events_reported == 4
+    state.apply({"source": "transport_stats", "payload": {"queue_depth": 20, "queue_capacity": 100, "dropped_events": 2}})
+    assert state.transport_queue_utilization == 0.2
+    assert state.transport_queue_utilization_peak == 0.9
+    assert state.dropped_events_reported == 4
+    assert state.rx_rate_5s > 0.0
 
 
 def test_load_timeline_rows_requires_v3_schema(tmp_path):
@@ -1114,12 +1154,18 @@ def test_dataset_export_profiles_emit_manifest(tmp_path):
         }
     )
     writer.close()
+
+    queried = query_cases_db(str(session_dir), query="", limit=10)
+    case_id = str(queried["cases"][0].get("case_id") or "")
+    review_case(str(session_dir), case_id=case_id, decision="accept", reviewer="pytest")
+
     out = export_dataset_rows(str(session_dir), profile="strict")
     assert out["row_count"] >= 1
     manifest_path = pathlib.Path(out["manifest_path"])
     assert manifest_path.exists()
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert manifest["profile"] == "strict"
+    assert manifest["row_granularity"] == "case"
 
 
 def test_dataset_export_includes_annotation_linked_rows(tmp_path):
@@ -1149,6 +1195,10 @@ def test_dataset_export_includes_annotation_linked_rows(tmp_path):
     row_lines = (session_dir / "dataset_rows.jsonl").read_text(encoding="utf-8").strip().splitlines()
     row = json.loads(row_lines[0])
     assert row["trace_id"] == "req:55"
+    assert row["case_id"].startswith("case:")
+    assert row["source"] == "sqlite.cases.v4"
+    assert isinstance(row["provenance_refs"].get("event_indices"), list)
+    assert isinstance(row["reasoning_context"], list)
     assert row["annotations"]
     assert row["annotations"][0]["tag"] == "bookmark"
     assert "annotation" in row["inclusion_reasons"]
@@ -1161,7 +1211,7 @@ def test_dataset_export_includes_annotation_linked_rows(tmp_path):
     assert manifest["inclusion_reason_counts"].get("annotation") == 1
 
 
-def test_dataset_export_strict_keeps_annotation_curated_rows(tmp_path):
+def test_dataset_export_strict_requires_review_even_with_annotation(tmp_path):
     session_dir = tmp_path / "session"
     writer = SessionCaptureWriter(CaptureConfig(directory=str(session_dir), frames_mode="off", max_seconds=0.0))
     writer.write(
@@ -1182,12 +1232,22 @@ def test_dataset_export_strict_keeps_annotation_curated_rows(tmp_path):
             "note": "include this in strict curation",
         },
     )
+
     out = export_dataset_rows(str(session_dir), profile="strict", include_unlabeled=False)
-    assert out["row_count"] == 1
+    assert out["row_count"] == 0
+
+    queried = query_cases_db(str(session_dir), query="", limit=10)
+    case_id = str(queried["cases"][0].get("case_id") or "")
+    review_case(str(session_dir), case_id=case_id, decision="accept", reviewer="pytest")
+
+    out_reviewed = export_dataset_rows(str(session_dir), profile="strict", include_unlabeled=False)
+    assert out_reviewed["row_count"] == 1
     row = json.loads((session_dir / "dataset_rows.jsonl").read_text(encoding="utf-8").strip().splitlines()[0])
+    assert row["review_decision"] == "accept"
     assert "annotation" in row["inclusion_reasons"]
     manifest = json.loads((session_dir / "dataset_manifest.json").read_text(encoding="utf-8"))
     assert manifest["annotated_row_count"] == 1
+    assert manifest["reviewed_row_count"] == 1
 
 
 def test_run_curation_export_helper(tmp_path):
@@ -1219,7 +1279,7 @@ def test_run_curation_export_helper_zero_rows_fails(tmp_path):
     session_dir.mkdir(parents=True, exist_ok=True)
     out = _run_curation_export(session_dir=str(session_dir), profile="hard_cases")
     assert out["ok"] is False
-    assert "zero rows" in str(out["error"])
+    assert "session db missing" in str(out["error"])
 
 
 def test_build_and_write_viewer_summary(tmp_path):
@@ -1228,6 +1288,15 @@ def test_build_and_write_viewer_summary(tmp_path):
     state.event_counts["timeline_log"] = 3
     state.dropped_events_reported = 2
     state.local_dropped_events = 1
+    state.transport_queue_utilization_peak = 0.82
+    state.transport_queue_alerts = 3
+    state.local_queue_utilization_peak = 0.33
+    state.local_queue_alerts = 1
+    state.rx_rate_peak_5s = 17.25
+    state.reconnect_total = 4
+    state.reconnect_stale = 2
+    state.reconnect_disconnect = 1
+    state.reconnect_start_fail = 1
     state.quality_report = {"grade": "pass", "score": 91.5}
     state.quality_gate_passed = True
     state.quality_gate_note = "strict pass"
@@ -1249,9 +1318,19 @@ def test_build_and_write_viewer_summary(tmp_path):
     assert loaded["schema_version"] == 3
     assert loaded["run_id"]
     assert loaded["event_counts"]["timeline_log"] == 3
+    assert loaded["event_count_total"] == 3
     assert loaded["session_duration_s"] >= 1.0
     assert loaded["dropped_events_agent"] == 2
     assert loaded["dropped_events_local"] == 1
+    assert loaded["transport_queue_peak_utilization"] == 0.82
+    assert loaded["transport_queue_alert_count"] == 3
+    assert loaded["local_queue_peak_utilization"] == 0.33
+    assert loaded["local_queue_alert_count"] == 1
+    assert loaded["rx_rate_peak_5s"] == 17.25
+    assert loaded["reconnect_total"] == 4
+    assert loaded["reconnect_stale"] == 2
+    assert loaded["reconnect_disconnect"] == 1
+    assert loaded["reconnect_start_fail"] == 1
     assert loaded["quality_grade"] == "pass"
     assert loaded["quality_score"] == 91.5
     assert loaded["case_source"] == "sqlite.cases.v4"
@@ -1369,6 +1448,31 @@ def test_doctor_session_dir_viewer_latest_mismatch_warns(tmp_path):
     assert summary["session:case_explorer.source"].status == "warn"
     assert summary["session:case_explorer.ready"].status == "warn"
     assert summary["session:viewer_runs.health"].status == "pass"
+
+
+def test_doctor_session_dir_stream_checks_warn_on_pressure(tmp_path):
+    session_dir = tmp_path / "session"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / "events.jsonl").write_text("{}", encoding="utf-8")
+    (session_dir / "manifest.json").write_text(json.dumps({"schema_version": 3}), encoding="utf-8")
+    (session_dir / "viewer_runs.jsonl").write_text(
+        json.dumps(
+            {
+                "run_id": "run-1",
+                "mode": "live",
+                "exit_code": 0,
+                "case_source": "sqlite.cases.v4",
+                "transport_queue_peak_utilization": 0.95,
+                "reconnect_total": 4,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    checks = _check_session_dir(str(session_dir))
+    summary = {check.name: check for check in checks}
+    assert summary["session:stream.queue_peak"].status == "warn"
+    assert summary["session:stream.reconnects"].status == "warn"
 
 
 def test_doctor_session_dir_case_explorer_passes_with_sqlite_source(tmp_path):
@@ -1490,6 +1594,103 @@ def test_build_run_report_aggregates_runs_and_summary_fallback(tmp_path):
     assert curate_only["quality_gate_fail_rate"] == 1.0
 
 
+def test_build_run_report_alerts_stream_health_latest(tmp_path):
+    session_dir = tmp_path / "session"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    rows = [
+        {
+            "run_id": "run-ok",
+            "mode": "live",
+            "exit_code": 0,
+            "ended_at_wall_s": 1.0,
+            "quality_score": 90.0,
+            "quality_gate_passed": True,
+            "dropped_events_agent": 0,
+            "dropped_events_local": 0,
+            "case_source": "sqlite.cases.v4",
+            "transport_queue_peak_utilization": 0.2,
+            "local_queue_peak_utilization": 0.1,
+            "reconnect_total": 0,
+            "reconnect_stale": 0,
+            "rx_rate_peak_5s": 7.0,
+        },
+        {
+            "run_id": "run-hot",
+            "mode": "live",
+            "exit_code": 0,
+            "ended_at_wall_s": 2.0,
+            "quality_score": 89.0,
+            "quality_gate_passed": True,
+            "dropped_events_agent": 1,
+            "dropped_events_local": 1,
+            "case_source": "sqlite.cases.v4",
+            "transport_queue_peak_utilization": 0.92,
+            "local_queue_peak_utilization": 0.87,
+            "reconnect_total": 4,
+            "reconnect_stale": 1,
+            "reconnect_disconnect": 2,
+            "reconnect_start_fail": 1,
+            "rx_rate_peak_5s": 33.0,
+        },
+    ]
+    (session_dir / "viewer_runs.jsonl").write_text(
+        "\n".join(json.dumps(row) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+    report = build_run_report(session_dirs=[str(session_dir)])
+    alerts = report["alerts"]
+    assert any(text.startswith("latest_transport_queue_pressure_high:") for text in alerts)
+    assert any(text.startswith("latest_local_queue_pressure_high:") for text in alerts)
+    assert "latest_reconnect_churn:4" in alerts
+    assert "latest_stale_reconnects:1" in alerts
+    assert report["stream_health"]["transport_queue_peak_max"] == 0.92
+    assert report["stream_health"]["local_queue_peak_max"] == 0.87
+    assert report["stream_health"]["reconnect_total_p95"] == 4.0
+    assert report["stream_health"]["rx_rate_peak_max"] == 33.0
+
+
+def test_build_run_report_alerts_live_low_activity(tmp_path):
+    session_dir = tmp_path / "session"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    rows = [
+        {
+            "run_id": "run-0",
+            "mode": "live",
+            "exit_code": 0,
+            "ended_at_wall_s": 1.0,
+            "session_duration_s": 10.0,
+            "quality_score": 90.0,
+            "quality_gate_passed": True,
+            "case_source": "sqlite.cases.v4",
+            "event_count_total": 200,
+            "rx_rate_peak_5s": 5.0,
+        },
+        {
+            "run_id": "run-low",
+            "mode": "live",
+            "exit_code": 0,
+            "ended_at_wall_s": 2.0,
+            "session_duration_s": 60.0,
+            "quality_score": 90.0,
+            "quality_gate_passed": True,
+            "case_source": "sqlite.cases.v4",
+            "event_count_total": 8,
+            "rx_rate_peak_5s": 0.2,
+        },
+    ]
+    (session_dir / "viewer_runs.jsonl").write_text(
+        "\n".join(json.dumps(row) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+    report = build_run_report(session_dirs=[str(session_dir)])
+    alerts = report["alerts"]
+    assert any(text.startswith("latest_live_low_activity_events:") for text in alerts)
+    assert any(text.startswith("latest_live_low_rx_peak:") for text in alerts)
+    latest = report.get("latest_run")
+    assert isinstance(latest, dict)
+    assert latest.get("event_count_total") == 8
+
+
 def test_build_run_report_detects_latest_regressions(tmp_path):
     session_dir = tmp_path / "session"
     session_dir.mkdir(parents=True, exist_ok=True)
@@ -1540,6 +1741,34 @@ def test_build_run_report_detects_latest_regressions(tmp_path):
     assert report["quality_gate_fail_rate"] == (1.0 / 5.0)
 
 
+def test_build_run_report_alerts_no_run_artifacts(tmp_path):
+    session_dir = tmp_path / "session"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / "manifest.json").write_text(json.dumps({"schema_version": 3}), encoding="utf-8")
+    report = build_run_report(session_dirs=[str(session_dir)])
+    assert report["runs_total"] == 0
+    assert report["alerts"] == ["no_run_artifacts"]
+    assert report["alerts_count"] == 1
+    assert report["health"] == "warn"
+
+
+def test_build_run_report_alerts_sessions_missing_runs(tmp_path):
+    session_ok = tmp_path / "session_ok"
+    session_empty = tmp_path / "session_empty"
+    session_ok.mkdir(parents=True, exist_ok=True)
+    session_empty.mkdir(parents=True, exist_ok=True)
+    (session_ok / "viewer_summary.json").write_text(
+        json.dumps({"run_id": "ok-1", "mode": "live", "exit_code": 0}),
+        encoding="utf-8",
+    )
+    (session_empty / "manifest.json").write_text(json.dumps({"schema_version": 3}), encoding="utf-8")
+    report = build_run_report(session_dirs=[str(session_ok), str(session_empty)])
+    assert report["runs_total"] == 1
+    assert report["sessions_without_runs_count"] == 1
+    assert "sessions_missing_runs:1" in report["alerts"]
+    assert report["health"] == "warn"
+
+
 def test_build_run_report_tracks_sessions_without_runs(tmp_path):
     session_ok = tmp_path / "session_ok"
     session_empty = tmp_path / "session_empty"
@@ -1555,6 +1784,90 @@ def test_build_run_report_tracks_sessions_without_runs(tmp_path):
     assert report["sessions_without_runs_count"] == 1
     assert len(report["sessions_without_runs"]) == 1
     assert report["sessions_without_runs"][0] == str(session_empty)
+    assert "sessions_missing_runs:1" in report["alerts"]
+
+
+def test_build_run_report_includes_case_review_coverage_from_db(tmp_path):
+    session_dir = tmp_path / "session"
+    writer = SessionCaptureWriter(CaptureConfig(directory=str(session_dir), frames_mode="off", max_seconds=0.0))
+    writer.write(
+        {
+            "type": "event",
+            "source": "timeline_log",
+            "ts_wall_s": 1.0,
+            "payload": {
+                "data": {
+                    "type": "req_end",
+                    "payload": {
+                        "request_id": 42,
+                        "status": "parse_fail",
+                        "latency_ms": 1200,
+                        "reasoning": "planner parse_fail",
+                    },
+                }
+            },
+        }
+    )
+    writer.close()
+
+    queried = query_cases_db(str(session_dir), query="", limit=10)
+    assert queried["cases"]
+    case_id = str(queried["cases"][0].get("case_id") or "")
+    assert case_id
+    review_case(str(session_dir), case_id=case_id, decision="accept", reviewer="pytest")
+
+    (session_dir / "viewer_summary.json").write_text(
+        json.dumps(
+            {
+                "run_id": "run-1",
+                "mode": "curate",
+                "exit_code": 0,
+                "ended_at_wall_s": 10.0,
+                "quality_score": 90.0,
+                "quality_gate_passed": True,
+                "case_source": "sqlite.cases.v4",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = build_run_report(session_dirs=[str(session_dir)])
+    assert report["cases"]["total_cases"] >= 1
+    assert report["cases"]["reviewed_cases"] >= 1
+    assert report["cases"]["decision_counts"].get("accept", 0) >= 1
+    assert report["cases"]["review_coverage"] is not None
+    assert report["latest_run"]["case_review_coverage"] is not None
+
+
+def test_doctor_session_dir_case_review_coverage_passes(tmp_path):
+    session_dir = tmp_path / "session"
+    writer = SessionCaptureWriter(CaptureConfig(directory=str(session_dir), frames_mode="off", max_seconds=0.0))
+    writer.write(
+        {
+            "type": "event",
+            "source": "timeline_log",
+            "ts_wall_s": 1.0,
+            "payload": {
+                "data": {
+                    "type": "req_end",
+                    "payload": {
+                        "request_id": 99,
+                        "status": "parse_fail",
+                        "latency_ms": 900,
+                    },
+                }
+            },
+        }
+    )
+    writer.close()
+
+    queried = query_cases_db(str(session_dir), query="", limit=10)
+    case_id = str(queried["cases"][0].get("case_id") or "")
+    review_case(str(session_dir), case_id=case_id, decision="accept", reviewer="pytest")
+
+    checks = _check_session_dir(str(session_dir))
+    summary = {item.name: item for item in checks}
+    assert summary["session:case_reviews.coverage"].status == "pass"
 
 
 def test_doctor_session_dir_run_report_alerts_warn(tmp_path):
@@ -1597,6 +1910,47 @@ def test_doctor_session_dir_run_report_alerts_warn(tmp_path):
     assert summary["session:case_explorer.ready"].status == "warn"
     assert summary["session:viewer_runs.health"].status == "warn"
     assert summary["session:viewer_runs.alerts"].status == "warn"
+
+
+def test_doctor_session_dir_live_activity_alerts_warn(tmp_path):
+    session_dir = tmp_path / "session"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / "events.jsonl").write_text("{}", encoding="utf-8")
+    (session_dir / "manifest.json").write_text(json.dumps({"schema_version": 3}), encoding="utf-8")
+    rows = [
+        {
+            "run_id": "run-ok",
+            "mode": "live",
+            "exit_code": 0,
+            "ended_at_wall_s": 1.0,
+            "session_duration_s": 10.0,
+            "quality_score": 92.0,
+            "quality_gate_passed": True,
+            "case_source": "sqlite.cases.v4",
+            "event_count_total": 120,
+            "rx_rate_peak_5s": 4.0,
+        },
+        {
+            "run_id": "run-low",
+            "mode": "live",
+            "exit_code": 0,
+            "ended_at_wall_s": 2.0,
+            "session_duration_s": 80.0,
+            "quality_score": 90.0,
+            "quality_gate_passed": True,
+            "case_source": "sqlite.cases.v4",
+            "event_count_total": 5,
+            "rx_rate_peak_5s": 0.2,
+        },
+    ]
+    (session_dir / "viewer_runs.jsonl").write_text(
+        "\n".join(json.dumps(row) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+    checks = _check_session_dir(str(session_dir))
+    summary = {item.name: item for item in checks}
+    assert summary["session:viewer_runs.health"].status == "warn"
+    assert summary["session:viewer_runs.live_activity"].status == "warn"
 
 
 def test_viewer_help_surface_is_compact():

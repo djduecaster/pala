@@ -1,0 +1,19 @@
+{% if recent_runs %}
+  <ul class="recent-list">
+    {% for run in recent_runs %}
+      <li>
+        <a href="/runs/{{ run.run_id }}">{{ run.run_id }}</a>
+        <span>mode={{ run.mode or "env" }}</span>
+        {% if run.chain_status %}<span>chain={{ run.chain_status }}</span>{% endif %}
+        <span>model={{ run.model }}</span>
+        <span>http={{ run.http_status }}</span>
+        <span>parse={% if run.parse_ok %}ok{% else %}fail{% endif %}</span>
+        {% if run.planner_executed is not none %}<span>planner={% if run.planner_executed %}yes{% else %}no{% endif %}</span>{% endif %}
+        {% if run.planner_parse_ok is not none %}<span>planner_parse={% if run.planner_parse_ok %}ok{% else %}fail{% endif %}</span>{% endif %}
+        <span>latency={{ run.latency_ms }}ms</span>
+      </li>
+    {% endfor %}
+  </ul>
+{% else %}
+  <p class="muted">No prior runs.</p>
+{% endif %}

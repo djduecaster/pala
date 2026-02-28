@@ -19,7 +19,7 @@ from .model_clients import (
     post_chat_json,
 )
 from .policy import BehaviorPolicy, BehaviorPolicyConfig
-from .prompts import SYSTEM_PROMPT, build_env_user_text, build_messages, build_planner_user_text
+from .prompts import SYSTEM_PROMPT, build_env_user_text, build_messages, build_planner_user_text, env_contract_lines
 from .schemas import ENV_SUMMARY_SCHEMA, INTENT_PROPOSALS_SCHEMA
 from .trace_bus import TraceBus
 from .types import EnvSummary, GovernedCandidate, IntentProposal, ProposalCandidate, ProposerResponse
@@ -70,6 +70,7 @@ __all__ = [
     "build_messages",
     "build_model_client",
     "build_planner_user_text",
+    "env_contract_lines",
     "extract_message_content",
     "normalize_chat_url",
     "parse_env_summary_response",

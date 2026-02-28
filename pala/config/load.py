@@ -85,6 +85,18 @@ class CosmosConfig:
     arbiter_base_margin: float = 0.10
     idle_after_s: float = 6.0
     idle_glance_after_s: float = 10.0
+    startup_wake_enabled: bool = True
+    startup_wake_left_s: float = 0.35
+    startup_wake_right_s: float = 0.35
+    startup_wake_loop_s: float = 0.45
+    startup_wake_settle_s: float = 0.70
+    startup_wake_rate_rad_s: float = 1.8
+    startup_wake_yaw_rad: float = 0.16
+    startup_wake_roll_rad: float = 0.10
+    startup_wake_pitch2_rad: float = 0.12
+    startup_observe_yaw_rad: float = 0.0
+    startup_observe_pitch2_rad: float = -0.18
+    startup_person_conf_fast_exit: float = 0.60
     mode_min_dwell_s: float = 1.0
     mode_engage_person_conf: float = 0.45
     mode_disengage_person_conf: float = 0.20
@@ -103,8 +115,8 @@ class CosmosConfig:
     request_timeout_ms: int = 20000
     behavior_error_backoff_s: float = 1.5
     behavior_client_error_backoff_s: float = 5.0
-    env_max_tokens: int = 600
-    planner_max_tokens: int = 360
+    env_max_tokens: int = 1000
+    planner_max_tokens: int = 1000
     response_ttl_ms: int = 12000
     # Behavior V3 logs.
     behavior_env_log_path: str = "logs/behavior_env.jsonl"
@@ -348,6 +360,54 @@ def load_config(path: str) -> RobotConfig:
             cosmos_raw.get("idle_glance_after_s", 10.0),
             "cosmos.idle_glance_after_s",
         ),
+        startup_wake_enabled=_as_bool(
+            cosmos_raw.get("startup_wake_enabled", True),
+            "cosmos.startup_wake_enabled",
+        ),
+        startup_wake_left_s=_as_float(
+            cosmos_raw.get("startup_wake_left_s", 0.35),
+            "cosmos.startup_wake_left_s",
+        ),
+        startup_wake_right_s=_as_float(
+            cosmos_raw.get("startup_wake_right_s", 0.35),
+            "cosmos.startup_wake_right_s",
+        ),
+        startup_wake_loop_s=_as_float(
+            cosmos_raw.get("startup_wake_loop_s", 0.45),
+            "cosmos.startup_wake_loop_s",
+        ),
+        startup_wake_settle_s=_as_float(
+            cosmos_raw.get("startup_wake_settle_s", 0.70),
+            "cosmos.startup_wake_settle_s",
+        ),
+        startup_wake_rate_rad_s=_as_float(
+            cosmos_raw.get("startup_wake_rate_rad_s", 1.8),
+            "cosmos.startup_wake_rate_rad_s",
+        ),
+        startup_wake_yaw_rad=_as_float(
+            cosmos_raw.get("startup_wake_yaw_rad", 0.16),
+            "cosmos.startup_wake_yaw_rad",
+        ),
+        startup_wake_roll_rad=_as_float(
+            cosmos_raw.get("startup_wake_roll_rad", 0.10),
+            "cosmos.startup_wake_roll_rad",
+        ),
+        startup_wake_pitch2_rad=_as_float(
+            cosmos_raw.get("startup_wake_pitch2_rad", 0.12),
+            "cosmos.startup_wake_pitch2_rad",
+        ),
+        startup_observe_yaw_rad=_as_float(
+            cosmos_raw.get("startup_observe_yaw_rad", 0.0),
+            "cosmos.startup_observe_yaw_rad",
+        ),
+        startup_observe_pitch2_rad=_as_float(
+            cosmos_raw.get("startup_observe_pitch2_rad", -0.18),
+            "cosmos.startup_observe_pitch2_rad",
+        ),
+        startup_person_conf_fast_exit=_as_float(
+            cosmos_raw.get("startup_person_conf_fast_exit", 0.60),
+            "cosmos.startup_person_conf_fast_exit",
+        ),
         mode_min_dwell_s=_as_float(cosmos_raw.get("mode_min_dwell_s", 1.0), "cosmos.mode_min_dwell_s"),
         mode_engage_person_conf=_as_float(
             cosmos_raw.get("mode_engage_person_conf", 0.45),
@@ -394,8 +454,8 @@ def load_config(path: str) -> RobotConfig:
             cosmos_raw.get("behavior_client_error_backoff_s", 5.0),
             "cosmos.behavior_client_error_backoff_s",
         ),
-        env_max_tokens=_as_int(cosmos_raw.get("env_max_tokens", 600), "cosmos.env_max_tokens"),
-        planner_max_tokens=_as_int(cosmos_raw.get("planner_max_tokens", 360), "cosmos.planner_max_tokens"),
+        env_max_tokens=_as_int(cosmos_raw.get("env_max_tokens", 1000), "cosmos.env_max_tokens"),
+        planner_max_tokens=_as_int(cosmos_raw.get("planner_max_tokens", 1000), "cosmos.planner_max_tokens"),
         response_ttl_ms=_as_int(cosmos_raw.get("response_ttl_ms", 12000), "cosmos.response_ttl_ms"),
         behavior_env_log_path=str(cosmos_raw.get("behavior_env_log_path", "logs/behavior_env.jsonl")),
         behavior_planner_log_path=str(

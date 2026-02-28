@@ -22,18 +22,21 @@
 
         <section class="group mode-group">
           <div class="row mode-nav">
-            <a class="nav-btn" href="/tools/primitive_sim/web/index.html?studio=1">Studio</a>
-            <a class="nav-btn" href="/tools/primitive_sim/web/joint_checker.html">Joint Checker</a>
-            <a class="nav-btn" href="/tools/primitive_sim/web/state_machine.html">State Machine</a>
-            <a class="nav-btn" href="/tools/primitive_sim/web/scenario_lab.html">Scenario Lab</a>
-            <button id="runSuiteBtn" type="button">Run Suite Playback</button>
+            <a class="nav-btn" href="/tools/primitive_sim/web/lamp_sim.html?mode=studio">Studio</a>
+            <a class="nav-btn" href="/tools/primitive_sim/web/lamp_sim.html?mode=joint_checker">Joint Checker</a>
+            <a class="nav-btn" href="/tools/primitive_sim/web/lamp_sim.html?mode=state_machine">State Machine</a>
+            <a class="nav-btn" href="/tools/primitive_sim/web/lamp_sim.html?mode=scenario_lab">Scenario Lab</a>
+            <button id="runSuiteBtn" type="button">Run Suite Trace</button>
           </div>
           <p id="suiteStatus" class="muted">Suite: idle</p>
         </section>
 
         <section class="group">
+          <h2 class="group-title">FSM Controls</h2>
           <div class="row">
-            <button id="stepBtn" type="button">Step</button>
+            <button id="stepBtn" class="btn-primary" type="button">Step</button>
+            <button id="stepCommitBtn" type="button">Step + Commit</button>
+            <button id="step5Btn" type="button">Step x5</button>
             <button id="autoBtn" type="button">Auto Run</button>
             <button id="resetBtn" type="button">Reset FSM</button>
             <label class="inline stack" for="dtInput">
@@ -56,9 +59,18 @@
               </select>
             </label>
           </div>
+          <p class="muted">Shortcuts: <kbd>s</kbd> step, <kbd>c</kbd> step+commit, <kbd>5</kbd> step x5, <kbd>a</kbd> auto run/stop, <kbd>x</kbd> reset.</p>
         </section>
 
         <section class="group">
+          <h2 class="group-title">Signals</h2>
+          <div class="row">
+            <button id="presetIdleBtn" class="btn-primary" type="button">Preset: Idle</button>
+            <button id="presetPresenceBtn" type="button">Presence</button>
+            <button id="presetEngageBtn" type="button">Engage</button>
+            <button id="presetRecoverBtn" type="button">Recover</button>
+            <button id="presetFaultBtn" type="button">Fault</button>
+          </div>
           <div class="signal-grid">
             <label class="inline" for="personPresentInput">
               <input id="personPresentInput" type="checkbox">
@@ -101,11 +113,13 @@
         </section>
 
         <section class="group">
+          <h2 class="group-title">Decision</h2>
           <p id="transitionText">Transition: n/a</p>
           <p id="allowedText">Allowed primitives: n/a</p>
         </section>
 
         <section class="group">
+          <h2 class="group-title">Proposals</h2>
           <table id="proposalTable">
             <thead>
               <tr>
@@ -122,6 +136,7 @@
         </section>
 
         <section class="group">
+          <h2 class="group-title">Status</h2>
           <pre id="statusBox">Loading...</pre>
         </section>
       </aside>

@@ -5,12 +5,16 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.10.12,<3.13"
 dependencies = [
+    "fastapi>=0.134.0",
+    "jinja2>=3.1.6",
     "jsonschema>=4.23.0",
     "numpy>=1.26.4,<2",
     "openai>=1.50.0",
     "pillow>=12.1.0",
+    "python-multipart>=0.0.22",
     "pyyaml>=6.0.1",
     "smbus2>=0.6.0",
+    "uvicorn>=0.30.0",
 ]
 
 [dependency-groups]
@@ -21,7 +25,7 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-include = ["pala*"]
+include = ["pala*", "tools*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

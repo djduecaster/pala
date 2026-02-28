@@ -800,6 +800,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--behavior-env-log", default="logs/behavior_env.jsonl")
     parser.add_argument("--behavior-planner-log", default="logs/behavior_planner.jsonl")
     parser.add_argument("--behavior-reasoning-log", default="logs/behavior_reasoning.jsonl")
+    parser.add_argument("--behavior-trace-log", default="logs/behavior_trace.jsonl")
     parser.add_argument("--poll-ms", type=int, default=200)
     parser.add_argument("--from-start", action="store_true", help="Read logs from beginning instead of tailing.")
     parser.add_argument("--no-tegrastats", action="store_true")
@@ -1063,6 +1064,22 @@ def main() -> int:
             },
         )
         if _source_enabled("behavior_reasoning_log", enabled_sources)
+        else None,
+        _make_worker_thread(
+            name="behavior_trace_log",
+            target=_tail_jsonl_file,
+            kwargs={
+                "stop": stop,
+                "out_q": out_q,
+                "drops": drops,
+                "source": "behavior_trace_log",
+                "path": args.behavior_trace_log,
+                "poll_s": poll_s,
+                "start_at_end": start_at_end,
+                "warning_interval_s": max(0.2, float(args.warning_throttle_s)),
+            },
+        )
+        if _source_enabled("behavior_trace_log", enabled_sources)
         else None,
         _make_worker_thread(
             name="heartbeat",

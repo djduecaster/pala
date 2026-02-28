@@ -21,16 +21,17 @@
 
         <section class="group mode-group">
           <div class="row mode-nav">
-            <a class="nav-btn" href="/tools/primitive_sim/web/index.html?studio=1">Studio</a>
-            <a class="nav-btn" href="/tools/primitive_sim/web/joint_checker.html">Joint Checker</a>
-            <a class="nav-btn" href="/tools/primitive_sim/web/state_machine.html">State Machine</a>
-            <a class="nav-btn" href="/tools/primitive_sim/web/scenario_lab.html">Scenario Lab</a>
-            <button id="runSuiteBtn" type="button">Run Suite Playback</button>
+            <a class="nav-btn" href="/tools/primitive_sim/web/lamp_sim.html?mode=studio">Studio</a>
+            <a class="nav-btn" href="/tools/primitive_sim/web/lamp_sim.html?mode=joint_checker">Joint Checker</a>
+            <a class="nav-btn" href="/tools/primitive_sim/web/lamp_sim.html?mode=state_machine">State Machine</a>
+            <a class="nav-btn" href="/tools/primitive_sim/web/lamp_sim.html?mode=scenario_lab">Scenario Lab</a>
+            <button id="runSuiteBtn" type="button">Run Suite Trace</button>
           </div>
           <p id="suiteStatus" class="muted">Suite: idle</p>
         </section>
 
         <section id="studioGroup" class="group">
+          <h2 class="group-title">Primitive Tuning</h2>
           <div class="row">
             <label class="inline stack" for="primitiveSelect">
               Primitive
@@ -72,16 +73,20 @@
           <div id="paramForm" class="param-form"></div>
 
           <div class="row action-row">
-            <button id="runBtn" type="button">Run Preview</button>
-            <button id="resetBaselineBtn" type="button">Reset To Baseline</button>
+            <button id="runBtn" class="btn-primary" type="button">Generate Preview</button>
+            <button id="runSaveBtn" class="btn-primary" type="button">Generate + Save</button>
+            <button id="resetBaselineBtn" class="btn-quiet" type="button">Reset To Baseline</button>
             <button id="saveBaselineBtn" type="button">Save Baseline</button>
-            <button id="saveAllBaselineBtn" type="button">Save All</button>
+            <button id="saveAllBaselineBtn" class="btn-quiet" type="button">Save All</button>
           </div>
 
+          <p class="muted"><code>Generate Preview</code> creates the trace shown below. Timeline controls scrub that same preview trace.</p>
+          <p class="muted">Shortcuts: <kbd>Cmd/Ctrl+Enter</kbd> run, <kbd>Cmd/Ctrl+S</kbd> save, <kbd>Shift+Cmd/Ctrl+S</kbd> save all, <kbd>r</kbd> reset.</p>
           <p id="baselineStatus">Baseline: pending...</p>
         </section>
 
         <section class="group">
+          <h2 class="group-title">Preview Timeline</h2>
           <div class="row">
             <button id="playPauseBtn" type="button">Play</button>
             <button id="resetBtn" type="button">Reset</button>
@@ -104,15 +109,18 @@
         </section>
 
         <section class="group">
+          <h2 class="group-title">Import Trace</h2>
           <label for="fileInput">Load trace JSON from disk</label>
           <input id="fileInput" type="file" accept="application/json,.json">
         </section>
 
         <section class="group">
+          <h2 class="group-title">Status</h2>
           <pre id="statusBox">No trace loaded.</pre>
         </section>
 
         <section class="group">
+          <h2 class="group-title">Joint Readout</h2>
           <table id="jointTable">
             <thead>
               <tr>

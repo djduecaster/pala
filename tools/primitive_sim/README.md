@@ -4,6 +4,30 @@ Lamp Sim is a sidecar workflow for quickly understanding primitives, joint geome
 
 It keeps runtime behavior math aligned by reusing `TrajectoryExecutor` from `pala/control/executor.py`.
 
+## Unified shell (recommended)
+
+Run any Lamp Sim scenario server:
+
+```bash
+uv run python tools/primitive_sim/run.py --scenario studio --port 8766
+```
+
+Then open the unified shell:
+
+```text
+http://127.0.0.1:8766/tools/primitive_sim/web/lamp_sim.html
+```
+
+The shell provides one persistent navigation/workflow UI for Studio, Scenario Lab, State Machine, and Joint Checker.
+
+Shell UX features:
+- One persistent mode navigation + workflow checklist
+- Mode-aware primary action button in top bar
+- Global command palette (`Cmd/Ctrl+K`) for fast mode/action switching
+- Global toast/status feedback from active mode actions
+- Keyboard mode shortcuts (`1..4`) and suite playback shortcut (`r`)
+- Cross-mode handoff: send FSM recommended primitive into Scenario builder/steps
+
 ## Primitive Studio mode (recommended)
 
 Run the interactive tuning tool:
@@ -12,7 +36,7 @@ Run the interactive tuning tool:
 uv run python tools/primitive_sim/run.py --scenario studio --port 8766
 ```
 
-Then open:
+Raw mode URL:
 
 ```text
 http://127.0.0.1:8766/tools/primitive_sim/web/index.html?studio=1
@@ -40,7 +64,7 @@ Run the dedicated joint slider page:
 uv run python tools/primitive_sim/run.py --scenario joint_checker --port 8766
 ```
 
-Then open:
+Raw mode URL:
 
 ```text
 http://127.0.0.1:8766/tools/primitive_sim/web/joint_checker.html
@@ -63,7 +87,7 @@ Run the behavior mode simulator:
 uv run python tools/primitive_sim/run.py --scenario state_machine --port 8766
 ```
 
-Then open:
+Raw mode URL:
 
 ```text
 http://127.0.0.1:8766/tools/primitive_sim/web/state_machine.html
@@ -85,7 +109,7 @@ Run scenario composition + evaluation:
 uv run python tools/primitive_sim/run.py --scenario scenario_lab --port 8766
 ```
 
-Then open:
+Raw mode URL:
 
 ```text
 http://127.0.0.1:8766/tools/primitive_sim/web/scenario_lab.html
@@ -96,6 +120,10 @@ Scenario Lab features:
 - Validate scenarios before execution (`dry_run` compile path)
 - Run scenarios and auto-open embedded playback preview
 - Scenario metrics (`duration`, `path_length`, `peak/mean velocity`, `limit margin/violations`, `switch count`)
+- Run parameter sweeps on one step command (grid search + weighted score ranking)
+- Generate sweep templates from the selected target step primitive
+- Apply best sweep patch back into scenario JSON
+- Promote best sweep candidate directly to primitive baseline params
 - Save experiment records to JSONL history and reload trace previews from history
 
 Default experiments path:
@@ -118,10 +146,10 @@ Phase 1 (implemented):
 - State Machine simulator
 - Scenario Lab (compose + run + evaluate + save history)
 
-Phase 2 (next):
-- Parameter sweep / optimizer for primitive defaults
-- Batch A/B eval runner (baseline vs candidate) with scorecards
-- Servo/hardware emulation layer (latency, deadband, quantization)
+Phase 2 (in progress):
+- Parameter sweep / optimizer for scenario step params (implemented in Scenario Lab native shell)
+- Batch A/B eval runner (baseline vs candidate) with scorecards (next)
+- Servo/hardware emulation layer (latency, deadband, quantization) (next)
 
 Phase 3 (next):
 - Fault-injection scenarios for breaker/perception dropouts

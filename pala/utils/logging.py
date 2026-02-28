@@ -27,7 +27,9 @@ class JsonlLogger:
     def __init__(self, path: str):
         self._path = path
         self._lock = threading.Lock()
-        os.makedirs(os.path.dirname(path), exist_ok=True)
+        directory = os.path.dirname(path)
+        if directory:
+            os.makedirs(directory, exist_ok=True)
         self._fh = open(path, "a", encoding="utf-8")
 
     def write(self, obj) -> None:

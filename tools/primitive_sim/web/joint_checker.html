@@ -22,33 +22,38 @@
 
         <section class="group mode-group">
           <div class="row mode-nav">
-            <a class="nav-btn" href="/tools/primitive_sim/web/index.html?studio=1">Studio</a>
-            <a class="nav-btn" href="/tools/primitive_sim/web/joint_checker.html">Joint Checker</a>
-            <a class="nav-btn" href="/tools/primitive_sim/web/state_machine.html">State Machine</a>
-            <a class="nav-btn" href="/tools/primitive_sim/web/scenario_lab.html">Scenario Lab</a>
+            <a class="nav-btn" href="/tools/primitive_sim/web/lamp_sim.html?mode=studio">Studio</a>
+            <a class="nav-btn" href="/tools/primitive_sim/web/lamp_sim.html?mode=joint_checker">Joint Checker</a>
+            <a class="nav-btn" href="/tools/primitive_sim/web/lamp_sim.html?mode=state_machine">State Machine</a>
+            <a class="nav-btn" href="/tools/primitive_sim/web/lamp_sim.html?mode=scenario_lab">Scenario Lab</a>
             <button id="runSuiteBtn" type="button">Run Suite Playback</button>
           </div>
           <p id="suiteStatus" class="muted">Suite: idle</p>
         </section>
 
         <section class="group">
+          <h2 class="group-title">Quick Controls</h2>
           <div class="row">
-            <button id="zeroBtn" type="button">Zero Pose</button>
+            <button id="zeroBtn" class="btn-primary" type="button">Zero Pose</button>
             <button id="midBtn" type="button">Mid Limits</button>
             <button id="copyBtn" type="button">Copy Vector</button>
           </div>
           <p class="muted">Use sliders to set control angles directly (radians). Viewer applies DH-derived zero offsets.</p>
+          <p class="muted">Shortcuts: <kbd>z</kbd> zero pose, <kbd>m</kbd> mid limits, <kbd>c</kbd> copy vector.</p>
         </section>
 
         <section class="group">
+          <h2 class="group-title">Joint Sliders</h2>
           <div id="jointSliders" class="joint-slider-list"></div>
         </section>
 
         <section class="group">
+          <h2 class="group-title">Status</h2>
           <pre id="statusBox">Loading...</pre>
         </section>
 
         <section class="group">
+          <h2 class="group-title">Angle Table</h2>
           <table id="jointTable">
             <thead>
               <tr>
@@ -63,6 +68,7 @@
         </section>
 
         <section class="group">
+          <h2 class="group-title">DH Parameters</h2>
           <table id="dhTable">
             <thead>
               <tr>

@@ -1,0 +1,5 @@
+{% include "partials/result_content.html" %}
+<div id="recent-runs" hx-swap-oob="innerHTML">{% include "partials/recent_runs.html" %}</div>
+<input id="run-action" name="run_action" type="hidden" value="{{ form_values.run_action }}" hx-swap-oob="true" />
+<input id="prepared-env-run-id" name="prepared_env_run_id" type="hidden" value="{{ form_values.prepared_env_run_id }}" hx-swap-oob="true" />
+<code id="prepared-env-run-label" hx-swap-oob="true">{{ form_values.prepared_env_run_id or "none" }}</code>

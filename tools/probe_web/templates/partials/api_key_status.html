@@ -1,0 +1,5 @@
+<div class="notice">
+  API key source: <code>{{ defaults.api_key_source }}</code>
+  {% if defaults.has_api_key %}<span class="ok">(detected)</span>{% else %}<span class="warn">(not found)</span>{% endif %}
+  <div class="muted small">If environment variables changed outside this process, restart the app.</div>
+</div>

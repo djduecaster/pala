@@ -277,6 +277,40 @@ def _make_event_ref(msg: Dict[str, Any], event_index: int) -> Optional[TraceEven
             or _as_optional_str(data.get("message"))
             or ""
         )
+    elif source in {"behavior_trace_log", "behavior_trace"}:
+        data = _as_dict(payload.get("data"))
+        if not data:
+            data = payload
+        if not data:
+            return None
+        decision = _as_dict(data.get("decision"))
+        mode_transition = _as_dict(data.get("mode_transition"))
+        req_id = _as_optional_int(data.get("request_id"))
+        if req_id is None:
+            req_id = _as_optional_int(data.get("req_id"))
+        if req_id is None:
+            req_id = _as_optional_int(data.get("id"))
+        phase = _as_optional_str(data.get("mode")) or _as_optional_str(mode_transition.get("to")) or "behavior_trace"
+        committed = decision.get("committed")
+        if isinstance(committed, bool):
+            status = "committed" if committed else "no_commit"
+        else:
+            status = _as_optional_str(decision.get("status")) or _as_optional_str(data.get("status")) or "trace"
+        latency_ms = _as_optional_float(data.get("latency_ms")) or _as_optional_float(data.get("duration_ms"))
+        summary = _as_optional_str(decision.get("reason")) or _as_optional_str(mode_transition.get("reason")) or ""
+        if not summary:
+            top = data.get("top_candidates")
+            if isinstance(top, list) and top and isinstance(top[0], dict):
+                top0 = top[0]
+                primitive = _as_optional_str(top0.get("primitive"))
+                intent = _as_optional_str(top0.get("intent"))
+                utility = _as_optional_float(top0.get("utility"))
+                parts = [part for part in [primitive, intent] if part]
+                if utility is not None:
+                    parts.append(f"utility={utility:.3f}")
+                summary = " ".join(parts)
+        if not summary:
+            summary = _as_optional_str(data.get("mode")) or "behavior_trace"
     else:
         return None
 

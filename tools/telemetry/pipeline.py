@@ -9,8 +9,8 @@ from typing import Sequence
 
 from .dataset_export import export_dataset_rows
 from .integrity import build_integrity_report, write_integrity_report
-from .run_report import build_run_report
-from .storage_sqlite import build_session_db, resolve_session_db_path
+from .run_report import _iter_session_dirs, build_run_report
+from .storage_sqlite import build_session_db, ensure_session_db_contract, resolve_session_db_path
 
 
 def _run_python_module(module: str, args: Sequence[str]) -> int:
@@ -44,6 +44,7 @@ def _compile_cmd(args: argparse.Namespace) -> int:
     if not session_dir or (not os.path.isdir(session_dir)):
         raise SystemExit(f"session directory not found: {session_dir}")
     summary = build_session_db(session_dir, replace=not bool(args.no_replace))
+    contract = ensure_session_db_contract(str(summary.get("db_path") or session_dir))
     try:
         integrity = build_integrity_report(session_dir)
         write_integrity_report(session_dir, integrity)
@@ -54,6 +55,11 @@ def _compile_cmd(args: argparse.Namespace) -> int:
         f"db={summary.get('db_path')} events={summary.get('event_count')} "
         f"reasoning={summary.get('reasoning_count')} traces={summary.get('trace_count')} "
         f"cases={summary.get('case_count')} labels={summary.get('case_label_count')}"
+    )
+    print(
+        "contract: "
+        f"ok={contract.get('ok')} errors={len(contract.get('errors') or [])} "
+        f"warnings={len(contract.get('warnings') or [])}"
     )
     return 0
 
@@ -104,14 +110,10 @@ def _expand(path: str) -> str:
 
 
 def _report_cmd(args: argparse.Namespace) -> int:
-    session_dirs = [_expand(p) for p in args.paths if _expand(p)]
-    if not session_dirs:
-        root = _expand(str(args.root or "logs/telemetry"))
-        if os.path.isdir(root):
-            for name in sorted(os.listdir(root)):
-                path = os.path.join(root, name)
-                if os.path.isdir(path):
-                    session_dirs.append(path)
+    session_dirs = _iter_session_dirs(
+        paths=[_expand(p) for p in args.paths if _expand(p)],
+        root=_expand(str(args.root or "logs/telemetry")),
+    )
     report = build_run_report(
         session_dirs=session_dirs,
         limit=max(0, int(args.limit)),
@@ -122,16 +124,41 @@ def _report_cmd(args: argparse.Namespace) -> int:
     else:
         print(
             "report: "
-            f"runs={report.get('run_count')} sessions={report.get('session_count')} "
+            f"runs={report.get('runs_total')} sessions={report.get('sessions_with_runs')} "
+            f"missing_runs={report.get('sessions_without_runs_count')} "
             f"alerts={report.get('alerts_count')} health={report.get('health')}"
         )
-        latest = report.get("latest")
+        cases = report.get("cases") if isinstance(report.get("cases"), dict) else {}
+        print(
+            "cases: "
+            f"total={cases.get('total_cases')} reviewed={cases.get('reviewed_cases')} "
+            f"coverage={cases.get('review_coverage')}"
+        )
+        stream_health = report.get("stream_health") if isinstance(report.get("stream_health"), dict) else {}
+        print(
+            "stream: "
+            f"agent_q_peak={stream_health.get('transport_queue_peak_max')} "
+            f"viewer_q_peak={stream_health.get('local_queue_peak_max')} "
+            f"reconnect_p95={stream_health.get('reconnect_total_p95')} "
+            f"rx_peak={stream_health.get('rx_rate_peak_max')}"
+        )
+        latest = report.get("latest_run")
         if isinstance(latest, dict):
             print(
                 "latest: "
                 f"mode={latest.get('mode')} exit={latest.get('exit_code')} "
-                f"quality={latest.get('quality_score')} case_source={latest.get('case_source')}"
+                f"quality={latest.get('quality_score')} case_source={latest.get('case_source')} "
+                f"case_coverage={latest.get('case_review_coverage')} "
+                f"events={latest.get('event_count_total')} rx_peak={latest.get('rx_rate_peak_5s')}"
             )
+        alerts = report.get("alerts") if isinstance(report.get("alerts"), list) else []
+        if alerts:
+            preview = ",".join(str(item) for item in alerts[:5])
+            if len(alerts) > 5:
+                preview = f"{preview},..."
+            print(f"alerts: {preview}")
+    if bool(args.strict) and int(report.get("alerts_count", 0) or 0) > 0:
+        return 2
     return 0
 
 
@@ -172,6 +199,7 @@ def _build_parser() -> argparse.ArgumentParser:
     report.add_argument("--limit", type=int, default=0)
     report.add_argument("--mode", choices=["", "live", "replay", "curate"], default="")
     report.add_argument("--json", action="store_true")
+    report.add_argument("--strict", action="store_true", help="Exit non-zero when report alerts are present.")
     report.set_defaults(func=_report_cmd)
 
     return parser

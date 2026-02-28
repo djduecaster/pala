@@ -1,5 +1,17 @@
 const canvas = document.getElementById("simCanvas");
 const ctx = canvas.getContext("2d");
+const pageParams = new URLSearchParams(window.location.search);
+if (pageParams.get("shell") === "1") {
+  document.body.classList.add("embedded-shell");
+  document.addEventListener("click", (ev) => {
+    const link = ev.target?.closest?.("a.nav-btn[href*='/tools/primitive_sim/web/lamp_sim.html']");
+    if (!link || !(window.top && window.top !== window)) {
+      return;
+    }
+    ev.preventDefault();
+    window.top.location.href = link.href;
+  });
+}
 
 const playPauseBtn = document.getElementById("playPauseBtn");
 const resetBtn = document.getElementById("resetBtn");
@@ -18,6 +30,7 @@ const durationInput = document.getElementById("durationInput");
 const paramForm = document.getElementById("paramForm");
 const baselineStatus = document.getElementById("baselineStatus");
 const runBtn = document.getElementById("runBtn");
+const runSaveBtn = document.getElementById("runSaveBtn");
 const resetBaselineBtn = document.getElementById("resetBaselineBtn");
 const saveBaselineBtn = document.getElementById("saveBaselineBtn");
 const saveAllBaselineBtn = document.getElementById("saveAllBaselineBtn");
@@ -76,6 +89,7 @@ const state = {
 };
 
 const RAD_TO_DEG = 180 / Math.PI;
+const STUDIO_PREFS_KEY = "lamp_sim_studio_prefs_v1";
 
 const LAMP_GEOM = Object.freeze({
   baseRadius: 0.18,
@@ -153,6 +167,44 @@ const LAMP_THEME_BASELINE = Object.freeze({
   marker4: "rgba(118, 215, 211, 0.88)",
 });
 
+function inEmbeddedShell() {
+  return pageParams.get("shell") === "1" && window.top && window.top !== window;
+}
+
+function navigateViewerUrl(url) {
+  const target = String(url || "").trim();
+  if (!target) {
+    return false;
+  }
+  if (inEmbeddedShell()) {
+    window.top.location.href = target;
+    return true;
+  }
+  window.location.href = target;
+  return true;
+}
+
+function notifyShell(kind, message, details = "") {
+  if (window.parent === window) {
+    return;
+  }
+  try {
+    window.parent.postMessage(
+      {
+        source: "lamp-mode",
+        type: "status",
+        mode: "studio",
+        kind: String(kind || "ok"),
+        message: String(message || ""),
+        details: String(details || ""),
+      },
+      window.location.origin,
+    );
+  } catch (_err) {
+    // ignore postMessage failures
+  }
+}
+
 function deepClone(v) {
   return JSON.parse(JSON.stringify(v));
 }
@@ -163,6 +215,153 @@ function stableJson(value) {
 
 function clamp(v, lo, hi) {
   return Math.max(lo, Math.min(hi, v));
+}
+
+function safeBool(value, fallback = false) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "number") {
+    return value !== 0;
+  }
+  if (typeof value === "string") {
+    const token = value.trim().toLowerCase();
+    if (token === "true" || token === "1" || token === "yes" || token === "on") {
+      return true;
+    }
+    if (token === "false" || token === "0" || token === "no" || token === "off") {
+      return false;
+    }
+  }
+  return fallback;
+}
+
+function loadStudioPrefs() {
+  try {
+    const raw = window.localStorage.getItem(STUDIO_PREFS_KEY);
+    if (!raw) {
+      return {};
+    }
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return {};
+    }
+    return parsed;
+  } catch (_err) {
+    return {};
+  }
+}
+
+function saveStudioPrefs() {
+  if (!state.studio.enabled) {
+    return;
+  }
+  const payload = {
+    primitive: String(state.studio.selectedPrimitive || ""),
+    style: String(styleSelect.value || ""),
+    duration_s: Number(durationInput.value),
+    auto_run_enabled: Boolean(state.studio.autoRunEnabled),
+    auto_run_debounce_ms: Number(state.studio.autoRunDebounceMs),
+    compare_enabled: Boolean(state.studio.compareEnabled),
+    compare_mode: String(state.studio.compareMode || "overlay"),
+    speed: Number(state.speed || 1),
+  };
+  try {
+    window.localStorage.setItem(STUDIO_PREFS_KEY, JSON.stringify(payload));
+  } catch (_err) {
+    // ignore storage errors
+  }
+}
+
+function applyStudioPrefs(meta) {
+  const prefs = loadStudioPrefs();
+  const styles = Array.isArray(meta?.styles) ? meta.styles.map((v) => String(v)) : [];
+  const primitives = Array.isArray(meta?.primitives) ? meta.primitives.map((v) => String(v.id || "")) : [];
+  const preferredPrimitive = String(prefs.primitive || "");
+  const selectedPrimitive = primitives.includes(preferredPrimitive) ? preferredPrimitive : String(meta.default_primitive);
+
+  const preferredStyle = String(prefs.style || "");
+  const selectedStyle = styles.includes(preferredStyle)
+    ? preferredStyle
+    : (styles.includes("calm") ? "calm" : styles[0]);
+  styleSelect.value = selectedStyle;
+
+  const preferredDuration = Number(prefs.duration_s);
+  const validPreferredDuration = Number.isFinite(preferredDuration) && preferredDuration > 0
+    ? preferredDuration
+    : null;
+
+  state.studio.autoRunEnabled = safeBool(prefs.auto_run_enabled, Boolean(autoRunToggle.checked));
+  state.studio.autoRunDebounceMs = clamp(
+    Math.round(Number.isFinite(Number(prefs.auto_run_debounce_ms)) ? Number(prefs.auto_run_debounce_ms) : Number(autoRunMsInput.value)),
+    50,
+    1000,
+  );
+  autoRunToggle.checked = state.studio.autoRunEnabled;
+  autoRunMsInput.value = String(state.studio.autoRunDebounceMs);
+
+  state.studio.compareEnabled = safeBool(prefs.compare_enabled, Boolean(compareToggle.checked));
+  state.studio.compareMode = String(prefs.compare_mode || compareModeSelect.value || "overlay");
+  if (!["overlay", "split"].includes(state.studio.compareMode)) {
+    state.studio.compareMode = "overlay";
+  }
+  compareToggle.checked = state.studio.compareEnabled;
+  compareModeSelect.value = state.studio.compareMode;
+
+  const speed = Number(prefs.speed);
+  state.speed = Number.isFinite(speed) && speed > 0 ? speed : Number(speedSelect.value || 1);
+  const speedOpt = Array.from(speedSelect.options).find((opt) => Number(opt.value) === state.speed);
+  speedSelect.value = speedOpt ? speedOpt.value : "1";
+  state.speed = Number(speedSelect.value || 1);
+
+  return {
+    primitive: selectedPrimitive,
+    durationS: validPreferredDuration,
+  };
+}
+
+function stepScaleFromEvent(ev) {
+  if (ev.altKey) {
+    return 0.2;
+  }
+  if (ev.shiftKey) {
+    return 5.0;
+  }
+  return 1.0;
+}
+
+function scaledStep(baseStep, ev) {
+  const base = Number.isFinite(Number(baseStep)) ? Math.abs(Number(baseStep)) : 0.01;
+  return base * stepScaleFromEvent(ev);
+}
+
+function bindNumericNudge(input, { getValue, setValue, baseStep }) {
+  if (!input) {
+    return;
+  }
+  input.addEventListener("wheel", (ev) => {
+    if (document.activeElement !== input) {
+      return;
+    }
+    const current = Number(getValue());
+    if (!Number.isFinite(current)) {
+      return;
+    }
+    const delta = scaledStep(baseStep, ev);
+    const sign = ev.deltaY < 0 ? 1 : -1;
+    setValue(current + sign * delta);
+    ev.preventDefault();
+  }, { passive: false });
+}
+
+function isEditableTarget(target) {
+  if (!(target instanceof Element)) {
+    return false;
+  }
+  if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) {
+    return true;
+  }
+  return Boolean(target.closest("[contenteditable='true']"));
 }
 
 function vecAdd(a, b) {
@@ -1131,19 +1330,24 @@ function renderParamForm() {
         });
 
         const stepValue = Number.isFinite(Number(vectorSpec.step)) ? Number(vectorSpec.step) : 0.01;
-        minus.addEventListener("click", () => {
-          const baseValue = Number(input.value);
-          if (!Number.isFinite(baseValue)) {
-            return;
-          }
-          applyValue(baseValue - stepValue);
+        bindNumericNudge(input, {
+          getValue: () => input.value,
+          setValue: (next) => applyValue(next),
+          baseStep: stepValue,
         });
-        plus.addEventListener("click", () => {
+        minus.addEventListener("click", (ev) => {
           const baseValue = Number(input.value);
           if (!Number.isFinite(baseValue)) {
             return;
           }
-          applyValue(baseValue + stepValue);
+          applyValue(baseValue - scaledStep(stepValue, ev));
+        });
+        plus.addEventListener("click", (ev) => {
+          const baseValue = Number(input.value);
+          if (!Number.isFinite(baseValue)) {
+            return;
+          }
+          applyValue(baseValue + scaledStep(stepValue, ev));
         });
 
         control.appendChild(minus);
@@ -1197,19 +1401,24 @@ function renderParamForm() {
     });
 
     const stepValue = Number.isFinite(Number(paramSpec.step)) ? Number(paramSpec.step) : type === "int" ? 1 : 0.01;
-    minus.addEventListener("click", () => {
-      const baseValue = Number(numericInput.value);
-      if (!Number.isFinite(baseValue)) {
-        return;
-      }
-      applyValue(baseValue - stepValue);
+    bindNumericNudge(numericInput, {
+      getValue: () => numericInput.value,
+      setValue: (next) => applyValue(next),
+      baseStep: stepValue,
     });
-    plus.addEventListener("click", () => {
+    minus.addEventListener("click", (ev) => {
       const baseValue = Number(numericInput.value);
       if (!Number.isFinite(baseValue)) {
         return;
       }
-      applyValue(baseValue + stepValue);
+      applyValue(baseValue - scaledStep(stepValue, ev));
+    });
+    plus.addEventListener("click", (ev) => {
+      const baseValue = Number(numericInput.value);
+      if (!Number.isFinite(baseValue)) {
+        return;
+      }
+      applyValue(baseValue + scaledStep(stepValue, ev));
     });
 
     controlRow.appendChild(minus);
@@ -1245,23 +1454,26 @@ function setStudioPrimitive(nextPrimitive, { resetDuration = true, schedule = tr
   }
   renderParamForm();
   markDirty(false, { schedule, reason: "primitive" });
+  saveStudioPrefs();
 }
 
 async function runStudioPreview({ manual = false, reason = "manual" } = {}) {
   if (!state.studio.enabled) {
-    return;
+    return false;
   }
   clearAutoRunTimer();
   if (state.studio.runInFlight) {
     state.studio.rerunQueued = true;
-    return;
+    return false;
   }
 
+  let ok = false;
   state.studio.runInFlight = true;
   const token = ++state.studio.requestToken;
   runBtn.disabled = true;
   setRunState("running", manual ? "Running" : "Auto-running");
   statusBox.textContent = `Studio run: ${reason}`;
+  notifyShell("ok", `Studio run started (${reason})`);
 
   try {
     const primitive = state.studio.selectedPrimitive;
@@ -1294,9 +1506,12 @@ async function runStudioPreview({ manual = false, reason = "manual" } = {}) {
     loadTrace(draftTrace, `studio:${primitive}`);
     syncDirtyFromBaseline();
     setRunState("synced", state.studio.dirty ? "Preview (unsaved)" : "Preview synced");
+    notifyShell("ok", `Studio preview synced (${primitive})`);
+    ok = true;
   } catch (err) {
     setRunState("error", "Run Error");
     statusBox.textContent = `Studio run failed: ${err}`;
+    notifyShell("bad", "Studio preview failed", String(err));
   } finally {
     state.studio.runInFlight = false;
     runBtn.disabled = false;
@@ -1305,6 +1520,7 @@ async function runStudioPreview({ manual = false, reason = "manual" } = {}) {
       runStudioPreview({ manual: false, reason: "queued" });
     }
   }
+  return ok;
 }
 
 async function saveBaseline() {
@@ -1324,12 +1540,14 @@ async function saveBaseline() {
     const stamp = String(updated?.updated_at_utc || new Date().toISOString());
     setBaselineStatus(`Baseline saved: ${state.studio.selectedPrimitive} at ${stamp}`);
     setRunState("synced", "Baseline saved");
+    notifyShell("ok", `Baseline saved (${state.studio.selectedPrimitive})`);
     if (state.studio.compareEnabled) {
       runStudioPreview({ manual: false, reason: "baseline_saved" });
     }
   } catch (err) {
     setBaselineStatus(`Save failed: ${err}`, true);
     setRunState("error", "Save Error");
+    notifyShell("bad", "Baseline save failed", String(err));
   } finally {
     saveBaselineBtn.disabled = false;
   }
@@ -1351,21 +1569,36 @@ async function saveAllBaselines() {
     const stamp = String(updated?.updated_at_utc || new Date().toISOString());
     setBaselineStatus(`Baseline saved (all): ${stamp}`);
     setRunState("synced", "Baseline saved");
+    notifyShell("ok", "All baselines saved");
     if (state.studio.compareEnabled) {
       runStudioPreview({ manual: false, reason: "baseline_save_all" });
     }
   } catch (err) {
     setBaselineStatus(`Save all failed: ${err}`, true);
     setRunState("error", "Save Error");
+    notifyShell("bad", "Save all baselines failed", String(err));
   } finally {
     saveAllBaselineBtn.disabled = false;
   }
 }
 
-async function runSuitePlayback() {
-  if (!runSuiteBtn) {
+async function runAndSaveBaseline() {
+  if (!state.studio.enabled) {
     return;
   }
+  runSaveBtn.disabled = true;
+  try {
+    const ok = await runStudioPreview({ manual: true, reason: "run_and_save" });
+    if (!ok) {
+      return;
+    }
+    await saveBaseline();
+  } finally {
+    runSaveBtn.disabled = false;
+  }
+}
+
+async function runSuitePlayback() {
   runSuiteBtn.disabled = true;
   const style = state.studio.enabled ? String(styleSelect.value || "calm") : "calm";
   setSuiteStatus(`Suite: generating (${style})...`);
@@ -1373,8 +1606,7 @@ async function runSuitePlayback() {
     const res = await apiPost("/api/suite", { style });
     const viewerUrl = String(res?.viewer_url || "");
     setSuiteStatus(`Suite: ready (${Number(res?.sample_count || 0)} samples). opening...`);
-    if (viewerUrl) {
-      window.location.href = viewerUrl;
+    if (navigateViewerUrl(viewerUrl)) {
       return;
     }
     setSuiteStatus("Suite complete, but no viewer URL returned.", true);
@@ -1392,6 +1624,7 @@ function resetToBaseline() {
   state.studio.commandDraft = baselineCommandFor(state.studio.selectedPrimitive);
   renderParamForm();
   markDirty(false, { reason: "reset_to_baseline" });
+  notifyShell("ok", `Reset to baseline (${state.studio.selectedPrimitive})`);
 }
 
 async function initStudioMode() {
@@ -1430,19 +1663,15 @@ async function initStudioMode() {
     option.textContent = style;
     styleSelect.appendChild(option);
   });
-  styleSelect.value = state.studio.styles.includes("calm") ? "calm" : state.studio.styles[0];
-
-  state.studio.autoRunEnabled = autoRunToggle.checked;
-  state.studio.autoRunDebounceMs = clamp(Math.round(Number(autoRunMsInput.value)), 50, 1000);
-  state.studio.compareEnabled = compareToggle.checked;
-  state.studio.compareMode = String(compareModeSelect.value || "overlay");
-
-  const defaultPrimitive = String(meta.default_primitive);
-
-  setStudioPrimitive(defaultPrimitive, { schedule: false });
+  const prefs = applyStudioPrefs(meta);
+  setStudioPrimitive(String(prefs.primitive || meta.default_primitive), { schedule: false });
+  if (Number.isFinite(Number(prefs.durationS)) && Number(prefs.durationS) > 0) {
+    durationInput.value = String(Number(prefs.durationS));
+  }
   setMode("studio");
   syncDirtyFromBaseline();
   setRunState("idle");
+  saveStudioPrefs();
   await runStudioPreview({ manual: true, reason: "init" });
 }
 
@@ -1451,6 +1680,7 @@ resetBtn.addEventListener("click", resetPlayback);
 
 speedSelect.addEventListener("change", () => {
   state.speed = Number(speedSelect.value || 1);
+  saveStudioPrefs();
 });
 
 timeline.addEventListener("input", () => {
@@ -1466,6 +1696,10 @@ primitiveSelect.addEventListener("change", () => {
 
 runBtn.addEventListener("click", () => {
   runStudioPreview({ manual: true, reason: "manual_click" });
+});
+
+runSaveBtn.addEventListener("click", () => {
+  runAndSaveBaseline();
 });
 
 saveBaselineBtn.addEventListener("click", () => {
@@ -1488,6 +1722,7 @@ styleSelect.addEventListener("change", () => {
   if (!state.studio.enabled) {
     return;
   }
+  saveStudioPrefs();
   scheduleStudioRun("style");
 });
 
@@ -1499,11 +1734,13 @@ durationInput.addEventListener("input", () => {
   if (!Number.isFinite(n) || n <= 0) {
     durationInput.value = String(defaultDurationForPrimitive(state.studio.selectedPrimitive));
   }
+  saveStudioPrefs();
   scheduleStudioRun("duration");
 });
 
 autoRunToggle.addEventListener("change", () => {
   state.studio.autoRunEnabled = autoRunToggle.checked;
+  saveStudioPrefs();
   if (state.studio.autoRunEnabled && state.studio.dirty) {
     scheduleStudioRun("auto_run_enabled");
   }
@@ -1513,15 +1750,18 @@ autoRunMsInput.addEventListener("input", () => {
   const parsed = Number(autoRunMsInput.value);
   state.studio.autoRunDebounceMs = clamp(Math.round(Number.isFinite(parsed) ? parsed : 200), 50, 1000);
   autoRunMsInput.value = String(state.studio.autoRunDebounceMs);
+  saveStudioPrefs();
 });
 
 compareToggle.addEventListener("change", () => {
   state.studio.compareEnabled = compareToggle.checked;
+  saveStudioPrefs();
   scheduleStudioRun("compare_toggle");
 });
 
 compareModeSelect.addEventListener("change", () => {
   state.studio.compareMode = String(compareModeSelect.value || "overlay");
+  saveStudioPrefs();
   if (state.samples.length) {
     drawScene(state.samples[state.idx]);
   }
@@ -1566,10 +1806,79 @@ window.addEventListener("resize", () => {
   }
 });
 
+window.addEventListener("keydown", (ev) => {
+  const key = String(ev.key || "").toLowerCase();
+  const mod = ev.metaKey || ev.ctrlKey;
+  const editable = isEditableTarget(ev.target);
+
+  if (mod && key === "enter") {
+    ev.preventDefault();
+    if (ev.shiftKey) {
+      runAndSaveBaseline();
+    } else {
+      runStudioPreview({ manual: true, reason: "kbd_run_preview" });
+    }
+    return;
+  }
+
+  if (mod && key === "s") {
+    ev.preventDefault();
+    if (ev.shiftKey) {
+      saveAllBaselines();
+    } else {
+      saveBaseline();
+    }
+    return;
+  }
+
+  if (editable) {
+    return;
+  }
+
+  if (!mod && !ev.altKey && key === "r" && state.studio.enabled) {
+    ev.preventDefault();
+    resetToBaseline();
+    return;
+  }
+
+  if (!mod && !ev.altKey && key === " ") {
+    ev.preventDefault();
+    playPause();
+  }
+});
+
+window.addEventListener("message", (event) => {
+  if (event.origin !== window.location.origin) {
+    return;
+  }
+  const msg = event.data;
+  if (!msg || typeof msg !== "object") {
+    return;
+  }
+  if (msg.source !== "lamp-shell" || msg.type !== "command") {
+    return;
+  }
+  const cmd = String(msg.command || "");
+  if (cmd === "studio.run_preview") {
+    runStudioPreview({ manual: true, reason: "shell_command" });
+    return;
+  }
+  if (cmd === "studio.save_baseline") {
+    saveBaseline();
+    return;
+  }
+  if (cmd === "studio.save_all") {
+    saveAllBaselines();
+    return;
+  }
+  if (cmd === "studio.reset_baseline") {
+    resetToBaseline();
+  }
+});
+
 (async function bootstrap() {
-  const params = new URLSearchParams(window.location.search);
-  const tracePath = params.get("trace") || "";
-  const preferStudio = params.get("studio") !== "0";
+  const tracePath = pageParams.get("trace") || "";
+  const preferStudio = pageParams.get("studio") !== "0";
 
   try {
     if (preferStudio) {

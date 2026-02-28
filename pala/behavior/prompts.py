@@ -12,8 +12,8 @@ SYSTEM_PROMPT = (
 )
 
 
-def build_env_user_text(*, context: Dict[str, Any], policy_identity: str) -> str:
-    contract = [
+def env_contract_lines() -> List[str]:
+    return [
         "You are the PALA environment summarizer.",
         "The camera view is my view as the lamp.",
         "Use egocentric framing (left/center/right relative to me).",
@@ -27,8 +27,15 @@ def build_env_user_text(*, context: Dict[str, Any], policy_identity: str) -> str
         "Keep string fields concise and factual.",
         "Do not include recommendations or action proposals.",
     ]
+
+
+def build_env_user_text(*, context: Dict[str, Any], policy_identity: str, contract_override: str | None = None) -> str:
+    if isinstance(contract_override, str) and contract_override.strip():
+        contract_text = contract_override.strip()
+    else:
+        contract_text = "\n".join(env_contract_lines())
     ctx_json = json.dumps(context, separators=(",", ":"), ensure_ascii=True)
-    return "\n".join(contract) + f"\nidentity_scope={policy_identity}\ncontext_json={ctx_json}"
+    return contract_text + f"\nidentity_scope={policy_identity}\ncontext_json={ctx_json}"
 
 
 def build_planner_user_text(
@@ -46,6 +53,7 @@ def build_planner_user_text(
         "You are the PALA intent proposer.",
         "The camera view is my view as the lamp.",
         "Return JSON only matching schema `pala.intent_proposals.v2`.",
+        "Return compact minified JSON on a single line.",
         f"Return exactly {proposal_count} proposals ranked best to worst.",
         "Every proposal must include all required fields from the schema.",
         "Do not duplicate primitive values across all proposals unless no safe alternative exists.",

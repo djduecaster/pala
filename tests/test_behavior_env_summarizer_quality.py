@@ -35,6 +35,26 @@ def test_canonicalize_env_payload_uses_scene_dict_when_features_invalid():
     assert payload["summary_short"] == "person in front of me"
 
 
+def test_canonicalize_env_payload_coerces_person_present_string_false():
+    payload = env_mod._canonicalize_env_payload(  # noqa: SLF001
+        {
+            "scene": "desk scene",
+            "events": "minimal movement",
+            "hypotheses": "no person visible",
+            "summary_short": "empty desk",
+            "delta_score": 0.1,
+            "features": {
+                "person_present": "false",
+                "zone_hint": "unknown",
+                "activity_level": 0.1,
+                "novelty": 0.1,
+            },
+        }
+    )
+    assert payload is not None
+    assert payload["features"]["person_present"] is False
+
+
 def test_env_summarizer_helper_functions_cover_path_and_truncation():
     assert env_mod._infer_zone_hint_from_text("", None) == "unknown"  # noqa: SLF001
     assert env_mod._infer_zone_hint_from_text("user on my left then right") == "left"  # noqa: SLF001

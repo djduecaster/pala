@@ -246,18 +246,40 @@ def main(argv: Optional[list[str]] = None) -> int:
             time.sleep(0.1)
     finally:
         stop.set()
-        perception.shutdown()
-        if hasattr(behavior, "shutdown"):
-            behavior.shutdown()
-        servo.shutdown()
-        preview_tap.close()
-        if perception_log:
-            perception_log.close()
-        if action_log:
-            action_log.close()
+        for t in threads:
+            t.join(timeout=1.0)
 
-    for t in threads:
-        t.join(timeout=1.0)
+        alive = [t.name or f"thread_{idx}" for idx, t in enumerate(threads) if t.is_alive()]
+        if alive:
+            logger.warning("shutdown proceeding with live threads=%s", ",".join(alive))
+
+        try:
+            perception.shutdown()
+        except Exception:  # noqa: BLE001 - shutdown should not crash process exit
+            logger.exception("perception shutdown failed")
+        if hasattr(behavior, "shutdown"):
+            try:
+                behavior.shutdown()
+            except Exception:  # noqa: BLE001 - shutdown should not crash process exit
+                logger.exception("behavior shutdown failed")
+        try:
+            servo.shutdown()
+        except Exception:  # noqa: BLE001 - shutdown should not crash process exit
+            logger.exception("servo shutdown failed")
+        try:
+            preview_tap.close()
+        except Exception:  # noqa: BLE001 - shutdown should not crash process exit
+            logger.exception("preview tap close failed")
+        if perception_log:
+            try:
+                perception_log.close()
+            except Exception:  # noqa: BLE001 - shutdown should not crash process exit
+                logger.exception("perception log close failed")
+        if action_log:
+            try:
+                action_log.close()
+            except Exception:  # noqa: BLE001 - shutdown should not crash process exit
+                logger.exception("action log close failed")
 
     with thread_failure_lock:
         failed = dict(thread_failure)
@@ -556,8 +578,8 @@ def _build_behavior_config(cfg, *, run_log_dir: Optional[str] = None) -> Behavio
         frame_jpeg_quality=int(getattr(cosmos, "summary_jpeg_quality", 55)),
         request_min_fresh_frames=int(getattr(cosmos, "request_min_fresh_frames", 1)),
         planner_include_latest_frame=bool(getattr(cosmos, "planner_include_latest_frame", True)),
-        env_max_tokens=int(getattr(cosmos, "env_max_tokens", 600)),
-        planner_max_tokens=int(getattr(cosmos, "planner_max_tokens", 480)),
+        env_max_tokens=int(getattr(cosmos, "env_max_tokens", 1000)),
+        planner_max_tokens=int(getattr(cosmos, "planner_max_tokens", 1000)),
         proposer_max_age_s=max(base_ttl_s, min_ttl_s),
         planner_max_proposals=int(getattr(cosmos, "planner_max_proposals", 3)),
         planner_use_env_context=bool(getattr(cosmos, "planner_use_env_context", True)),
@@ -566,6 +588,18 @@ def _build_behavior_config(cfg, *, run_log_dir: Optional[str] = None) -> Behavio
         arbiter_orient_cooldown_s=float(getattr(cosmos, "arbiter_orient_cooldown_s", 1.2)),
         idle_after_s=idle_after_cfg,
         idle_glance_after_s=idle_glance_after_cfg,
+        startup_wake_enabled=bool(getattr(cosmos, "startup_wake_enabled", True)),
+        startup_wake_left_s=float(getattr(cosmos, "startup_wake_left_s", 0.35)),
+        startup_wake_right_s=float(getattr(cosmos, "startup_wake_right_s", 0.35)),
+        startup_wake_loop_s=float(getattr(cosmos, "startup_wake_loop_s", 0.45)),
+        startup_wake_settle_s=float(getattr(cosmos, "startup_wake_settle_s", 0.70)),
+        startup_wake_rate_rad_s=float(getattr(cosmos, "startup_wake_rate_rad_s", 1.8)),
+        startup_wake_yaw_rad=float(getattr(cosmos, "startup_wake_yaw_rad", 0.16)),
+        startup_wake_roll_rad=float(getattr(cosmos, "startup_wake_roll_rad", 0.10)),
+        startup_wake_pitch2_rad=float(getattr(cosmos, "startup_wake_pitch2_rad", 0.12)),
+        startup_observe_yaw_rad=float(getattr(cosmos, "startup_observe_yaw_rad", 0.0)),
+        startup_observe_pitch2_rad=float(getattr(cosmos, "startup_observe_pitch2_rad", -0.18)),
+        startup_person_conf_fast_exit=float(getattr(cosmos, "startup_person_conf_fast_exit", 0.60)),
         mode_min_dwell_s=float(getattr(cosmos, "mode_min_dwell_s", 1.0)),
         mode_engage_person_conf=float(getattr(cosmos, "mode_engage_person_conf", 0.45)),
         mode_disengage_person_conf=float(getattr(cosmos, "mode_disengage_person_conf", 0.20)),

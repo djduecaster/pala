@@ -1,4 +1,16 @@
 const SVG_NS = "http://www.w3.org/2000/svg";
+const pageParams = new URLSearchParams(window.location.search);
+if (pageParams.get("shell") === "1") {
+  document.body.classList.add("embedded-shell");
+  document.addEventListener("click", (ev) => {
+    const link = ev.target?.closest?.("a.nav-btn[href*='/tools/primitive_sim/web/lamp_sim.html']");
+    if (!link || !(window.top && window.top !== window)) {
+      return;
+    }
+    ev.preventDefault();
+    window.top.location.href = link.href;
+  });
+}
 
 const fsmGraph = document.getElementById("fsmGraph");
 const configPathEl = document.getElementById("configPath");
@@ -9,6 +21,8 @@ const allowedText = document.getElementById("allowedText");
 const proposalTableBody = document.querySelector("#proposalTable tbody");
 
 const stepBtn = document.getElementById("stepBtn");
+const stepCommitBtn = document.getElementById("stepCommitBtn");
+const step5Btn = document.getElementById("step5Btn");
 const autoBtn = document.getElementById("autoBtn");
 const resetBtn = document.getElementById("resetBtn");
 const dtInput = document.getElementById("dtInput");
@@ -29,6 +43,28 @@ const perceptionDegradedInput = document.getElementById("perceptionDegradedInput
 
 const runSuiteBtn = document.getElementById("runSuiteBtn");
 const suiteStatus = document.getElementById("suiteStatus");
+const presetIdleBtn = document.getElementById("presetIdleBtn");
+const presetPresenceBtn = document.getElementById("presetPresenceBtn");
+const presetEngageBtn = document.getElementById("presetEngageBtn");
+const presetRecoverBtn = document.getElementById("presetRecoverBtn");
+const presetFaultBtn = document.getElementById("presetFaultBtn");
+
+function inEmbeddedShell() {
+  return pageParams.get("shell") === "1" && window.top && window.top !== window;
+}
+
+function navigateViewerUrl(url) {
+  const target = String(url || "").trim();
+  if (!target) {
+    return false;
+  }
+  if (inEmbeddedShell()) {
+    window.top.location.href = target;
+    return true;
+  }
+  window.location.href = target;
+  return true;
+}
 
 const NODE_LAYOUT = Object.freeze({
   idle_presence: { x: 190, y: 300 },
@@ -46,6 +82,37 @@ const state = {
   autoTimer: null,
   inFlight: false,
 };
+
+function isEditableTarget(target) {
+  if (!(target instanceof Element)) {
+    return false;
+  }
+  if (target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target instanceof HTMLSelectElement) {
+    return true;
+  }
+  return Boolean(target.closest("[contenteditable='true']"));
+}
+
+function notifyShell(kind, message, details = "") {
+  if (window.parent === window) {
+    return;
+  }
+  try {
+    window.parent.postMessage(
+      {
+        source: "lamp-mode",
+        type: "status",
+        mode: "state_machine",
+        kind: String(kind || "ok"),
+        message: String(message || ""),
+        details: String(details || ""),
+      },
+      window.location.origin,
+    );
+  } catch (_err) {
+    // ignore postMessage failures
+  }
+}
 
 function clamp(v, lo, hi) {
   return Math.max(lo, Math.min(hi, v));
@@ -136,6 +203,67 @@ function applySignals(signals) {
 
   plannerBreakerInput.checked = Boolean(signals.planner_open_breaker);
   perceptionDegradedInput.checked = Boolean(signals.perception_degraded);
+}
+
+function applySignalPreset(name) {
+  const preset = String(name || "").toLowerCase();
+  if (preset === "idle") {
+    applySignals({
+      person_present: false,
+      person_conf: 0.0,
+      activity_level: 0.08,
+      novelty: 0.06,
+      env_delta: 0.05,
+      planner_open_breaker: false,
+      perception_degraded: false,
+    });
+    zoneHintSelect.value = "";
+  } else if (preset === "presence") {
+    applySignals({
+      person_present: true,
+      person_conf: 0.72,
+      activity_level: 0.34,
+      novelty: 0.2,
+      env_delta: 0.14,
+      planner_open_breaker: false,
+      perception_degraded: false,
+    });
+    zoneHintSelect.value = "center";
+  } else if (preset === "engage") {
+    applySignals({
+      person_present: true,
+      person_conf: 0.94,
+      activity_level: 0.72,
+      novelty: 0.55,
+      env_delta: 0.32,
+      planner_open_breaker: false,
+      perception_degraded: false,
+    });
+    zoneHintSelect.value = "center";
+  } else if (preset === "recover") {
+    applySignals({
+      person_present: false,
+      person_conf: 0.0,
+      activity_level: 0.12,
+      novelty: 0.12,
+      env_delta: 0.86,
+      planner_open_breaker: false,
+      perception_degraded: false,
+    });
+    zoneHintSelect.value = "";
+  } else if (preset === "fault") {
+    applySignals({
+      person_present: false,
+      person_conf: 0.0,
+      activity_level: 0.05,
+      novelty: 0.05,
+      env_delta: 0.2,
+      planner_open_breaker: true,
+      perception_degraded: true,
+    });
+    zoneHintSelect.value = "";
+  }
+  statusBox.textContent = `preset applied: ${preset}`;
 }
 
 function edgeId(edge) {
@@ -379,12 +507,34 @@ async function stepOnce() {
     };
     const result = await apiPost("/api/state_machine/step", payload);
     renderStepResult(result);
+    notifyShell("ok", "FSM step complete", `${result.mode_decision?.from || "?"} -> ${result.mode_decision?.to || "?"}`);
   } catch (err) {
     statusBox.textContent = `step failed: ${err}`;
     stopAutoRun();
+    notifyShell("bad", "FSM step failed", String(err));
   } finally {
     state.inFlight = false;
     stepBtn.disabled = false;
+  }
+}
+
+async function stepOnceWithCommit() {
+  const prev = commitToggle.checked;
+  commitToggle.checked = true;
+  try {
+    await stepOnce();
+  } finally {
+    commitToggle.checked = prev;
+  }
+}
+
+async function stepMany(count) {
+  const n = Math.max(1, Math.floor(Number(count) || 1));
+  for (let i = 0; i < n; i += 1) {
+    if (state.autoRunning) {
+      break;
+    }
+    await stepOnce();
   }
 }
 
@@ -411,6 +561,7 @@ async function resetStateMachine() {
   state.meta = meta;
   drawGraph(meta.graph || {});
   renderSnapshot(snapshot);
+  notifyShell("ok", "FSM reset");
 }
 
 async function runSuitePlayback() {
@@ -420,17 +571,41 @@ async function runSuitePlayback() {
     const res = await apiPost("/api/suite", { style: "calm" });
     const viewerUrl = String(res?.viewer_url || "");
     setSuiteStatus(`Suite: ready (${Number(res?.sample_count || 0)} samples). opening...`);
-    if (viewerUrl) {
-      window.location.href = viewerUrl;
+    if (navigateViewerUrl(viewerUrl)) {
       return;
     }
     setSuiteStatus("Suite complete, but no viewer URL returned.", true);
   } catch (err) {
     setSuiteStatus(`Suite failed: ${err}`, true);
+    notifyShell("bad", "FSM suite run failed", String(err));
   } finally {
     runSuiteBtn.disabled = false;
   }
 }
+
+window.addEventListener("message", (event) => {
+  if (event.origin !== window.location.origin) {
+    return;
+  }
+  const msg = event.data;
+  if (!msg || typeof msg !== "object") {
+    return;
+  }
+  if (msg.source !== "lamp-shell" || msg.type !== "command") {
+    return;
+  }
+  const cmd = String(msg.command || "");
+  if (cmd === "fsm.step") {
+    stepOnce();
+    return;
+  }
+  if (cmd === "fsm.reset") {
+    resetStateMachine().catch((err) => {
+      statusBox.textContent = `reset failed: ${err}`;
+      notifyShell("bad", "FSM reset failed", String(err));
+    });
+  }
+});
 
 function bindUi() {
   linkRangeAndInput(personConfRange, personConfInput);
@@ -441,6 +616,18 @@ function bindUi() {
   stepBtn.addEventListener("click", () => {
     stepOnce();
   });
+
+  if (stepCommitBtn) {
+    stepCommitBtn.addEventListener("click", () => {
+      stepOnceWithCommit();
+    });
+  }
+
+  if (step5Btn) {
+    step5Btn.addEventListener("click", () => {
+      stepMany(5);
+    });
+  }
 
   autoBtn.addEventListener("click", () => {
     if (state.autoRunning) {
@@ -460,6 +647,61 @@ function bindUi() {
 
   runSuiteBtn.addEventListener("click", () => {
     runSuitePlayback();
+  });
+
+  if (presetIdleBtn) {
+    presetIdleBtn.addEventListener("click", () => applySignalPreset("idle"));
+  }
+  if (presetPresenceBtn) {
+    presetPresenceBtn.addEventListener("click", () => applySignalPreset("presence"));
+  }
+  if (presetEngageBtn) {
+    presetEngageBtn.addEventListener("click", () => applySignalPreset("engage"));
+  }
+  if (presetRecoverBtn) {
+    presetRecoverBtn.addEventListener("click", () => applySignalPreset("recover"));
+  }
+  if (presetFaultBtn) {
+    presetFaultBtn.addEventListener("click", () => applySignalPreset("fault"));
+  }
+
+  window.addEventListener("keydown", (ev) => {
+    if (isEditableTarget(ev.target)) {
+      return;
+    }
+    const key = String(ev.key || "").toLowerCase();
+    if (!ev.metaKey && !ev.ctrlKey && !ev.altKey && key === "s") {
+      ev.preventDefault();
+      stepOnce();
+      return;
+    }
+    if (!ev.metaKey && !ev.ctrlKey && !ev.altKey && key === "c") {
+      ev.preventDefault();
+      stepOnceWithCommit();
+      return;
+    }
+    if (!ev.metaKey && !ev.ctrlKey && !ev.altKey && key === "5") {
+      ev.preventDefault();
+      stepMany(5);
+      return;
+    }
+    if (!ev.metaKey && !ev.ctrlKey && !ev.altKey && key === "a") {
+      ev.preventDefault();
+      if (state.autoRunning) {
+        stopAutoRun();
+        return;
+      }
+      state.autoRunning = true;
+      autoBtn.textContent = "Stop Auto";
+      scheduleAutoRun();
+      return;
+    }
+    if (!ev.metaKey && !ev.ctrlKey && !ev.altKey && key === "x") {
+      ev.preventDefault();
+      resetStateMachine().catch((err) => {
+        statusBox.textContent = `reset failed: ${err}`;
+      });
+    }
   });
 }
 

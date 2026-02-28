@@ -120,7 +120,16 @@ class PerceptionNode:
         )
 
     def shutdown(self) -> None:
-        self.source.shutdown()
+        detector_shutdown = getattr(self.detector, "shutdown", None)
+        if callable(detector_shutdown):
+            try:
+                detector_shutdown()
+            except Exception as exc:  # noqa: BLE001 - best effort on teardown
+                logger.warning("detector shutdown failed: %r", exc)
+        try:
+            self.source.shutdown()
+        except Exception as exc:  # noqa: BLE001 - best effort on teardown
+            logger.warning("frame source shutdown failed: %r", exc)
 
     def latest_packet(self) -> Optional[FramePacket]:
         return self._last_packet

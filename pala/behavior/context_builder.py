@@ -53,21 +53,14 @@ class ContextBuilder:
         features = latest_env.get("features") or {}
 
         zone_hint: Optional[str] = None
+        zone_candidate = str(features.get("zone_hint") or "").strip().lower()
+        if zone_candidate in {"left", "center", "right"}:
+            zone_hint = zone_candidate
         person_conf = None
-        if st is not None:
-            person_conf = st.primary_person_conf
-            if st.debug:
-                zone_candidate = str(st.debug.get("zone_hint") or "").strip().lower()
-                if zone_candidate in {"left", "center", "right"}:
-                    zone_hint = zone_candidate
-        if zone_hint is None:
-            zone_candidate = str(features.get("zone_hint") or "").strip().lower()
-            if zone_candidate in {"left", "center", "right"}:
-                zone_hint = zone_candidate
 
         evidence_ids = ["frame:latest", "env:latest"]
         if zone_hint is not None:
-            evidence_ids.append(f"perception:zone:{zone_hint}")
+            evidence_ids.append(f"env:zone:{zone_hint}")
 
         signals: Dict[str, Any] = {
             "person_conf": person_conf,

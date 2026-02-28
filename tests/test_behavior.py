@@ -169,3 +169,109 @@ def test_behavior_policy_commits_only_on_actual_action_change(tmp_path):
     clock.set(2.6)
     policy.step(st)
     assert len(store.snapshot()["decision_tail"]) == 1
+
+
+def test_behavior_policy_startup_awaken_sequence_then_handoff(tmp_path):
+    clock = _FakeClock()
+    store = WorldStateStore(
+        WorldStateStoreConfig(
+            identity_path=str(tmp_path / "identity.md"),
+            world_state_path=str(tmp_path / "world_state.md"),
+            session_digest_path=str(tmp_path / "session_digest.md"),
+        )
+    )
+    cfg = BehaviorPolicyConfig(
+        remote_enabled=False,
+        startup_wake_enabled=True,
+        startup_wake_left_s=0.2,
+        startup_wake_right_s=0.2,
+        startup_wake_loop_s=0.2,
+        startup_wake_settle_s=0.2,
+        idle_after_s=0.0,
+        idle_glance_after_s=2.0,
+        arbiter_base_margin=0.02,
+        env_log_path=None,
+        planner_log_path=None,
+        reasoning_log_path=None,
+        trace_log_path=None,
+    )
+    policy = BehaviorPolicy(world_state=store, config=cfg, clock=clock)
+
+    a0 = policy.step(st=None)
+    assert a0.primitive.value == "move_to"
+    assert a0.explanation == "startup_wake_left"
+    assert store.snapshot()["decision_tail"] == []
+
+    clock.set(0.25)
+    a1 = policy.step(st=None)
+    assert a1.primitive.value == "move_to"
+    assert a1.explanation == "startup_wake_right"
+
+    clock.set(0.50)
+    a2 = policy.step(st=None)
+    assert a2.primitive.value == "move_to"
+    assert a2.explanation == "startup_wake_loop"
+
+    clock.set(0.75)
+    a3 = policy.step(st=None)
+    assert a3.primitive.value == "move_to"
+    assert a3.explanation == "startup_observe_settle"
+
+    clock.set(1.10)
+    a4 = policy.step(st=None)
+    assert policy._startup_done is True  # noqa: SLF001
+    assert a4.primitive.value in {"hold", "breath", "glance"}
+
+
+def test_behavior_policy_startup_fast_exit_is_latched(tmp_path):
+    clock = _FakeClock()
+    store = WorldStateStore(
+        WorldStateStoreConfig(
+            identity_path=str(tmp_path / "identity.md"),
+            world_state_path=str(tmp_path / "world_state.md"),
+            session_digest_path=str(tmp_path / "session_digest.md"),
+        )
+    )
+    cfg = BehaviorPolicyConfig(
+        remote_enabled=False,
+        startup_wake_enabled=True,
+        startup_wake_left_s=0.2,
+        startup_wake_right_s=0.2,
+        startup_wake_loop_s=0.2,
+        startup_wake_settle_s=0.2,
+        startup_person_conf_fast_exit=0.6,
+        idle_after_s=0.0,
+        idle_glance_after_s=2.0,
+        env_log_path=None,
+        planner_log_path=None,
+        reasoning_log_path=None,
+        trace_log_path=None,
+    )
+    policy = BehaviorPolicy(world_state=store, config=cfg, clock=clock)
+
+    store.update_environment(
+        EnvironmentSnapshot(
+            scene="person appears",
+            events="person entered frame",
+            hypotheses="possible interaction",
+            summary="person present",
+            delta_score=0.7,
+            features={"person_present": True, "zone_hint": "center", "activity_level": 0.4, "novelty": 0.6},
+        )
+    )
+    action0 = policy.step(st=None)
+    assert action0.explanation == "startup_observe_settle"
+
+    store.update_environment(
+        EnvironmentSnapshot(
+            scene="person no longer visible",
+            events="person moved out of frame",
+            hypotheses="no immediate interaction",
+            summary="person absent",
+            delta_score=0.2,
+            features={"person_present": False, "zone_hint": "unknown", "activity_level": 0.1, "novelty": 0.1},
+        )
+    )
+    clock.set(0.1)
+    action1 = policy.step(st=None)
+    assert action1.explanation == "startup_observe_settle"

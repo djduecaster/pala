@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>PALA Lamp Sim</title>
+    <link rel="stylesheet" href="shell.css">
+  </head>
+  <body>
+    <main class="shell-layout">
+      <aside class="shell-sidebar">
+        <header class="brand">
+          <h1>PALA Lamp Sim</h1>
+          <p>One place to design behavior before hardware runs.</p>
+        </header>
+
+        <section class="sidebar-group">
+          <h2>Start Here</h2>
+          <p>1. Step FSM and send a recommendation to Scenario.</p>
+          <p>2. Run Scenario, then Sweep the target step.</p>
+          <p>3. Apply best patch and promote to baseline.</p>
+        </section>
+
+        <section class="sidebar-group">
+          <h2>Modes</h2>
+          <nav id="modeNav" class="mode-nav" aria-label="Lamp sim modes"></nav>
+        </section>
+
+        <section class="sidebar-group">
+          <h2>Quick Actions</h2>
+          <div class="quick-actions">
+            <button id="qaTuneBtn" type="button">Tune Primitive</button>
+            <button id="qaScenarioBtn" type="button">Compose Scenario</button>
+            <button id="qaStateBtn" type="button">Check State Machine</button>
+            <button id="qaJointBtn" type="button">Check Joint/DH</button>
+          </div>
+        </section>
+
+        <section class="sidebar-group muted">
+          <h2>Shortcuts</h2>
+          <p><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>4</kbd> switch modes</p>
+          <p><kbd>r</kbd> run suite playback</p>
+          <p><kbd>o</kbd> open current mode directly</p>
+        </section>
+      </aside>
+
+      <section class="shell-main">
+        <header class="topbar">
+          <div>
+            <p id="modeBadge" class="badge">Mode: loading</p>
+            <h2 id="modeTitle">Loading...</h2>
+            <p id="modeSummary">Preparing mode.</p>
+          </div>
+          <div class="topbar-actions">
+            <button id="modeActionBtn" type="button">Run Action</button>
+            <button id="runSuiteBtn" type="button">Run Suite Playback</button>
+            <button id="paletteBtn" type="button">Command Palette</button>
+            <button id="openRawBtn" type="button">Open Raw Mode</button>
+          </div>
+        </header>
+
+        <div class="workspace">
+          <section class="workspace-stage">
+            <iframe
+              id="modeFrame"
+              title="Lamp sim mode workspace"
+              src="about:blank"></iframe>
+
+            <section id="nativeFsmPanel" class="native-panel hidden" aria-label="Native state machine panel">
+              <div class="native-grid">
+                <section class="native-card">
+                  <h3>FSM Controls</h3>
+                  <div class="native-row">
+                    <button id="fsmStepBtn" type="button">Step</button>
+                    <button id="fsmAutoBtn" type="button">Auto Run</button>
+                    <button id="fsmResetBtn" type="button">Reset</button>
+                    <button id="fsmUseRecommendedBtn" type="button">Send Recommended To Scenario</button>
+                    <label for="fsmDtInput">dt (s)</label>
+                    <input id="fsmDtInput" type="number" min="0.05" max="10" step="0.05" value="0.35">
+                    <label for="fsmZoneSelect">Zone</label>
+                    <select id="fsmZoneSelect">
+                      <option value="">none</option>
+                      <option value="left">left</option>
+                      <option value="center">center</option>
+                      <option value="right">right</option>
+                    </select>
+                    <label class="checkbox">
+                      <input id="fsmCommitToggle" type="checkbox">
+                      Commit
+                    </label>
+                  </div>
+                </section>
+
+                <section class="native-card">
+                  <h3>Signals</h3>
+                  <div class="signal-grid">
+                    <label class="checkbox">
+                      <input id="fsmPersonPresent" type="checkbox">
+                      person_present
+                    </label>
+                    <label class="signal-field" for="fsmPersonConf">
+                      person_conf
+                      <input id="fsmPersonConf" type="number" min="0" max="1" step="0.01" value="0">
+                    </label>
+                    <label class="signal-field" for="fsmActivity">
+                      activity_level
+                      <input id="fsmActivity" type="number" min="0" max="1" step="0.01" value="0">
+                    </label>
+                    <label class="signal-field" for="fsmNovelty">
+                      novelty
+                      <input id="fsmNovelty" type="number" min="0" max="1" step="0.01" value="0">
+                    </label>
+                    <label class="signal-field" for="fsmEnvDelta">
+                      env_delta
+                      <input id="fsmEnvDelta" type="number" min="0" max="1" step="0.01" value="0">
+                    </label>
+                    <label class="checkbox">
+                      <input id="fsmPlannerBreaker" type="checkbox">
+                      planner_open_breaker
+                    </label>
+                    <label class="checkbox">
+                      <input id="fsmPerceptionDegraded" type="checkbox">
+                      perception_degraded
+                    </label>
+                  </div>
+                </section>
+
+                <section class="native-card">
+                  <h3>State Graph</h3>
+                  <svg id="fsmGraphNative" viewBox="0 0 960 620" aria-label="State machine graph"></svg>
+                </section>
+
+                <section class="native-card">
+                  <h3>Proposals</h3>
+                  <table id="fsmProposalTable">
+                    <thead>
+                      <tr>
+                        <th>Rank</th>
+                        <th>Primitive</th>
+                        <th>Score</th>
+                        <th>Allowed</th>
+                        <th>Command</th>
+                      </tr>
+                    </thead>
+                    <tbody></tbody>
+                  </table>
+                </section>
+
+                <section class="native-card">
+                  <h3>Status</h3>
+                  <pre id="fsmStatus">Loading state machine...</pre>
+                </section>
+              </div>
+            </section>
+
+            <section id="nativeScenarioPanel" class="native-panel hidden" aria-label="Native scenario panel">
+              <div class="native-grid">
+                <section class="native-card">
+                  <h3>Step Builder</h3>
+                  <div class="native-row">
+                    <label for="scnPrimitiveSelect">Primitive</label>
+                    <select id="scnPrimitiveSelect"></select>
+                    <label for="scnStyleSelect">Style</label>
+                    <select id="scnStyleSelect"></select>
+                    <label for="scnDurationInput">Duration</label>
+                    <input id="scnDurationInput" type="number" min="0.05" max="20" step="0.05" value="2">
+                    <label class="checkbox">
+                      <input id="scnStopOnDone" type="checkbox" checked>
+                      stop_on_done
+                    </label>
+                  </div>
+                  <label for="scnCommandText">Command JSON</label>
+                  <textarea id="scnCommandText" rows="3">{}</textarea>
+                  <div class="native-row">
+                    <button id="scnAddStepBtn" type="button">Add Step</button>
+                    <button id="scnTemplateBtn" type="button">Load Template</button>
+                    <button id="scnClearBtn" type="button">Clear</button>
+                  </div>
+                </section>
+
+                <section class="native-card">
+                  <h3>Scenario JSON</h3>
+                  <textarea id="scnJsonText" rows="12"></textarea>
+                  <div class="native-row">
+                    <button id="scnValidateBtn" type="button">Validate</button>
+                    <button id="scnRunBtn" type="button">Run</button>
+                    <button id="scnOpenPlaybackBtn" type="button">Open Playback</button>
+                  </div>
+                </section>
+
+                <section class="native-card">
+                  <h3>Parameter Sweep</h3>
+                  <div class="native-row">
+                    <label for="scnSweepTargetInput">Target Step</label>
+                    <input id="scnSweepTargetInput" type="text" value="-1" placeholder="index or step name">
+                    <label for="scnSweepTopKInput">Top K</label>
+                    <input id="scnSweepTopKInput" type="number" min="1" max="120" step="1" value="8">
+                    <label class="checkbox">
+                      <input id="scnSweepSaveTraces" type="checkbox">
+                      save traces
+                    </label>
+                  </div>
+                  <label for="scnSweepGridText">Parameter Grid JSON</label>
+                  <textarea id="scnSweepGridText" rows="4">{"amp_rad":[0.05,0.08,0.11],"period_s":[4.0,6.5,8.0]}</textarea>
+                  <div class="native-row">
+                    <button id="scnSweepTemplateBtn" type="button">Template For Target Step</button>
+                    <button id="scnSweepRunBtn" type="button">Run Sweep</button>
+                    <button id="scnSweepApplyBestBtn" type="button">Apply Best Patch</button>
+                    <button id="scnSweepPromoteBaselineBtn" type="button">Promote Best To Baseline</button>
+                  </div>
+                  <pre id="scnSweepStatus">Sweep: pending</pre>
+                </section>
+
+                <section class="native-card">
+                  <h3>Experiment</h3>
+                  <div class="native-row">
+                    <label for="scnNameInput">Name</label>
+                    <input id="scnNameInput" type="text" placeholder="e.g. greeting_v3">
+                    <label for="scnNotesInput">Notes</label>
+                    <input id="scnNotesInput" type="text" placeholder="what changed">
+                    <button id="scnSaveBtn" type="button">Save Experiment</button>
+                  </div>
+                  <pre id="scnMetrics">Metrics: pending</pre>
+                </section>
+
+                <section class="native-card">
+                  <h3>History</h3>
+                  <table id="scnHistoryTable">
+                    <thead>
+                      <tr>
+                        <th>Saved</th>
+                        <th>Name</th>
+                        <th>Samples</th>
+                        <th>Duration</th>
+                        <th>Playback</th>
+                      </tr>
+                    </thead>
+                    <tbody></tbody>
+                  </table>
+                </section>
+
+                <section class="native-card">
+                  <h3>Sweep Ranking</h3>
+                  <table id="scnSweepTable">
+                    <thead>
+                      <tr>
+                        <th>Rank</th>
+                        <th>Score</th>
+                        <th>Patch</th>
+                        <th>Duration</th>
+                        <th>Peak Vel</th>
+                        <th>Limit Violations</th>
+                        <th>Playback</th>
+                      </tr>
+                    </thead>
+                    <tbody></tbody>
+                  </table>
+                </section>
+
+                <section class="native-card">
+                  <h3>Status</h3>
+                  <pre id="scnStatus">Loading scenario lab...</pre>
+                </section>
+              </div>
+            </section>
+          </section>
+          <aside class="workspace-inspector">
+            <section class="inspector-card">
+              <h3>Workflow</h3>
+              <ol id="workflowSteps"></ol>
+            </section>
+            <section class="inspector-card">
+              <h3>Status</h3>
+              <pre id="statusBox">Loading shell...</pre>
+            </section>
+            <section class="inspector-card">
+              <h3>Entry Point</h3>
+              <p id="rawModePath"></p>
+            </section>
+          </aside>
+        </div>
+      </section>
+    </main>
+
+    <div id="toastStack" class="toast-stack" aria-live="polite"></div>
+
+    <div id="commandPalette" class="palette-overlay hidden" role="dialog" aria-modal="true">
+      <div class="palette-card">
+        <div class="palette-head">
+          <h3>Command Palette</h3>
+          <button id="paletteCloseBtn" type="button">Close</button>
+        </div>
+        <input id="paletteInput" type="text" placeholder="Type a command (mode, run, save, reset...)">
+        <ul id="paletteList" class="palette-list"></ul>
+      </div>
+    </div>
+    <script src="shell.js"></script>
+  </body>
+</html>

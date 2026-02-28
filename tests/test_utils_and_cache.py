@@ -108,6 +108,18 @@ def test_maybe_logger_redacts_data_image_urls(tmp_path):
     assert row["payload"]["c"]["url"] == "http://example.com/image.jpg"
 
 
+def test_maybe_logger_supports_filename_only_path(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    logger = maybe_logger("events.jsonl")
+    assert logger is not None
+    logger.write({"ok": True})
+    logger.close()
+
+    path = tmp_path / "events.jsonl"
+    assert path.exists()
+    assert json.loads(path.read_text(encoding="utf-8").strip()) == {"ok": True}
+
+
 def test_jetson_detector_stub_raises_not_implemented():
     detector = JetsonDetector()
     frame = np.zeros((2, 2, 3), dtype=np.uint8)

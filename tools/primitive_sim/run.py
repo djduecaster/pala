@@ -6,8 +6,11 @@ import copy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import http.server
+from itertools import product
 import json
+import math
 from pathlib import Path
+import re
 import socketserver
 import sys
 import threading
@@ -62,8 +65,20 @@ _DEFAULT_BASELINE_REL = Path("tools/primitive_sim/baseline_params.json")
 _DEFAULT_SUITE_TRACE_REL = Path("logs/primitive_sim/latest_trace.json")
 _DEFAULT_SCENARIO_TRACE_REL = Path("logs/primitive_sim/scenario_latest.json")
 _DEFAULT_EXPERIMENTS_REL = Path("logs/primitive_sim/experiments.jsonl")
+_DEFAULT_SWEEP_DIR_REL = Path("logs/primitive_sim/sweeps")
 _BASELINE_VERSION = 2
 _BASELINE_UPDATED_BY = "primitive_studio"
+_MAX_SWEEP_CANDIDATES = 120
+_DEFAULT_SWEEP_TOP_K = 10
+_DEFAULT_SWEEP_WEIGHTS: dict[str, float] = {
+    "min_limit_margin_rad": 4.0,
+    "limit_violation_count": -12.0,
+    "peak_joint_vel_rad_s": -0.35,
+    "mean_abs_joint_vel_rad_s": -0.25,
+    "path_length_rad": -0.04,
+    "primitive_switch_count": -0.15,
+    "duration_s": -0.02,
+}
 
 _GEOM_PARAM_ALIASES: dict[str, tuple[str, ...]] = {
     "baseRadius": ("baseRadius", "base_radius", "base_radius_m"),
@@ -214,6 +229,104 @@ def _coerce_bool(value: Any, default: bool) -> bool:
         if token in {"0", "false", "no", "off", "n", ""}:
             return False
     return bool(value)
+
+
+def _safe_slug(value: str) -> str:
+    token = re.sub(r"[^a-zA-Z0-9._-]+", "_", str(value or "").strip())
+    return token.strip("._-") or "run"
+
+
+def _default_sweep_weights() -> dict[str, float]:
+    return dict(_DEFAULT_SWEEP_WEIGHTS)
+
+
+def _normalize_sweep_weights(raw: Any) -> dict[str, float]:
+    out = _default_sweep_weights()
+    if not isinstance(raw, Mapping):
+        return out
+    for key, default in _DEFAULT_SWEEP_WEIGHTS.items():
+        val = raw.get(key)
+        if val is None:
+            continue
+        out[key] = _coerce_float(val, default)
+    return out
+
+
+def _score_trace_metrics(metrics: Mapping[str, Any], weights: Mapping[str, float]) -> float:
+    score = 0.0
+    for key, weight in weights.items():
+        score += float(weight) * _coerce_float(metrics.get(key), 0.0)
+    return float(score)
+
+
+def _expand_sweep_grid(raw: Any, *, max_candidates: int = _MAX_SWEEP_CANDIDATES) -> list[dict[str, float]]:
+    if not isinstance(raw, Mapping) or not raw:
+        raise ValueError("param_grid must be a non-empty object of numeric arrays")
+
+    keys: list[str] = []
+    values: list[list[float]] = []
+    for key, grid_values in raw.items():
+        field = str(key).strip()
+        if not field:
+            continue
+        if not isinstance(grid_values, list) or not grid_values:
+            raise ValueError(f"param_grid[{field}] must be a non-empty array")
+        numeric_vals: list[float] = []
+        for value_idx, item in enumerate(grid_values):
+            try:
+                num = float(item)
+            except Exception as exc:
+                raise ValueError(
+                    f"param_grid[{field}][{value_idx}] must be numeric"
+                ) from exc
+            if not math.isfinite(num):
+                raise ValueError(f"param_grid[{field}][{value_idx}] must be finite")
+            numeric_vals.append(num)
+        keys.append(field)
+        values.append(numeric_vals)
+
+    if not keys:
+        raise ValueError("param_grid must include at least one named parameter")
+
+    combos: list[dict[str, float]] = []
+    for row in product(*values):
+        combos.append({keys[i]: float(row[i]) for i in range(len(keys))})
+        if len(combos) > max_candidates:
+            raise ValueError(
+                f"param_grid expands to more than {max_candidates} candidates; reduce value counts"
+            )
+    return combos
+
+
+def _target_step_index(raw_steps: Sequence[Any], token: Any) -> int:
+    if not raw_steps:
+        raise ValueError("steps must be non-empty")
+    if token is None:
+        return max(0, len(raw_steps) - 1)
+    if isinstance(token, int):
+        idx = token
+    elif isinstance(token, str):
+        t = token.strip()
+        if not t:
+            return max(0, len(raw_steps) - 1)
+        if t.isdigit() or (t.startswith("-") and t[1:].isdigit()):
+            idx = int(t)
+        else:
+            lowered = t.lower()
+            for i, row in enumerate(raw_steps):
+                if isinstance(row, Mapping):
+                    name = str(row.get("name", "")).strip().lower()
+                    if name and name == lowered:
+                        return i
+            raise ValueError(f"target_step not found by name: {t}")
+    else:
+        idx = _coerce_int(token, len(raw_steps) - 1)
+
+    if idx < 0:
+        idx = len(raw_steps) + idx
+    if idx < 0 or idx >= len(raw_steps):
+        raise ValueError(f"target_step index out of range: {idx}")
+    return idx
 
 
 def _default_move_target(cfg: Any) -> list[float]:
@@ -1147,6 +1260,11 @@ class _StudioRequestHandler(http.server.SimpleHTTPRequestHandler):
                 "styles": self.studio.style_options,
                 "default_steps": _scenario_default_steps(self.studio.cfg),
                 "baseline": baseline,
+                "sweep": {
+                    "max_candidates": _MAX_SWEEP_CANDIDATES,
+                    "default_top_k": _DEFAULT_SWEEP_TOP_K,
+                    "default_weights": _default_sweep_weights(),
+                },
                 "config_path": str(self.studio.config_path),
             }
             _json_response(self, 200, payload)
@@ -1194,6 +1312,10 @@ class _StudioRequestHandler(http.server.SimpleHTTPRequestHandler):
 
         if parsed.path == "/api/scenario/simulate":
             self._handle_scenario_simulate(payload)
+            return
+
+        if parsed.path == "/api/scenario/sweep":
+            self._handle_scenario_sweep(payload)
             return
 
         if parsed.path == "/api/scenario/save_experiment":
@@ -1396,6 +1518,7 @@ class _StudioRequestHandler(http.server.SimpleHTTPRequestHandler):
             )
             return
         style_default = str(payload.get("style", "calm")).strip().lower() or "calm"
+        run_name = str(payload.get("name") or "scenario_run").strip() or "scenario_run"
         dry_run = _coerce_bool(payload.get("dry_run"), False)
         out_path = _abs_path(str(payload.get("output") or _DEFAULT_SCENARIO_TRACE_REL))
 
@@ -1434,15 +1557,18 @@ class _StudioRequestHandler(http.server.SimpleHTTPRequestHandler):
         )
         trace["metadata"]["scenario"] = "scenario_lab"
         trace["metadata"]["config_path"] = str(self.studio.config_path)
+        trace["metadata"]["run_name"] = run_name
         if self.studio.lamp_geometry:
             trace["metadata"]["lamp_geometry"] = self.studio.lamp_geometry
 
         out_path.parent.mkdir(parents=True, exist_ok=True)
         write_trace_json(out_path, trace)
         rel = _relative_trace_path(out_path)
-        viewer_url = "/tools/primitive_sim/web/index.html?studio=0"
+        viewer_url = "/tools/primitive_sim/web/lamp_sim.html?mode=playback"
         if rel:
             viewer_url += f"&trace={quote(rel, safe='/')}"
+        else:
+            viewer_url = "/tools/primitive_sim/web/lamp_sim.html?mode=studio"
 
         _json_response(
             self,
@@ -1450,12 +1576,150 @@ class _StudioRequestHandler(http.server.SimpleHTTPRequestHandler):
             {
                 "ok": True,
                 "dry_run": False,
+                "run_name": run_name,
                 "trace_path": str(out_path),
                 "trace_url": rel,
                 "viewer_url": viewer_url,
                 "sample_count": len(trace.get("samples", [])),
                 "metrics": _trace_metrics(trace),
                 "steps": _segments_to_payload(segments),
+            },
+        )
+
+    def _handle_scenario_sweep(self, payload: Mapping[str, Any]) -> None:
+        raw_steps = payload.get("steps")
+        if not isinstance(raw_steps, list) or not raw_steps:
+            _json_error(
+                self,
+                400,
+                code="invalid_steps",
+                error="steps must be a non-empty array",
+                details={"field": "steps"},
+            )
+            return
+
+        run_name = str(payload.get("name") or "scenario_sweep").strip() or "scenario_sweep"
+        style_default = str(payload.get("style", "calm")).strip().lower() or "calm"
+        save_traces = _coerce_bool(payload.get("save_traces"), False)
+        top_k = _coerce_int(payload.get("top_k"), _DEFAULT_SWEEP_TOP_K)
+        top_k = max(1, min(_MAX_SWEEP_CANDIDATES, top_k))
+
+        try:
+            target_idx = _target_step_index(raw_steps, payload.get("target_step"))
+            combos = _expand_sweep_grid(payload.get("param_grid"), max_candidates=_MAX_SWEEP_CANDIDATES)
+        except ValueError as exc:
+            _json_error(self, 400, code="invalid_sweep_request", error=str(exc))
+            return
+
+        score_weights = _normalize_sweep_weights(payload.get("score_weights"))
+        sweep_id = f"{_safe_slug(run_name)}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+        output_root = _abs_path(str(payload.get("output_dir") or _DEFAULT_SWEEP_DIR_REL))
+        sweep_dir = output_root / sweep_id
+
+        with self.studio.lock:
+            baseline = copy.deepcopy(self.studio.baseline)
+
+        candidates: list[dict[str, Any]] = []
+        errors: list[str] = []
+        for i, patch in enumerate(combos):
+            steps_variant = copy.deepcopy(raw_steps)
+            target_step = steps_variant[target_idx]
+            if not isinstance(target_step, Mapping):
+                errors.append(f"candidate {i + 1}: steps[{target_idx}] must be an object")
+                continue
+
+            step_copy: dict[str, Any] = dict(target_step)
+            command_src = step_copy.get("command")
+            command_copy = dict(command_src) if isinstance(command_src, Mapping) else {}
+            command_copy.update(patch)
+            step_copy["command"] = command_copy
+            steps_variant[target_idx] = step_copy
+
+            try:
+                segments = _scenario_segments_from_payload(
+                    raw_steps=steps_variant,
+                    cfg=self.studio.cfg,
+                    style_options=self.studio.style_options,
+                    baseline=baseline,
+                    default_style=style_default,
+                )
+            except ValueError as exc:
+                errors.append(f"candidate {i + 1}: {exc}")
+                continue
+
+            trace = simulate_segments(
+                joint_names=self.studio.cfg.joint_names,
+                joint_limits_rad=self.studio.cfg.joint_limits_rad,
+                segments=segments,
+                hz=self.studio.hz,
+                style_profiles=self.studio.cfg.style_profiles,
+            )
+            trace["metadata"]["scenario"] = "scenario_sweep"
+            trace["metadata"]["config_path"] = str(self.studio.config_path)
+            trace["metadata"]["run_name"] = run_name
+            trace["metadata"]["sweep_id"] = sweep_id
+            trace["metadata"]["sweep_candidate_index"] = i + 1
+            trace["metadata"]["sweep_patch"] = dict(patch)
+            if self.studio.lamp_geometry:
+                trace["metadata"]["lamp_geometry"] = self.studio.lamp_geometry
+
+            metrics = _trace_metrics(trace)
+            score = _score_trace_metrics(metrics, score_weights)
+
+            trace_path = ""
+            trace_url = ""
+            if save_traces:
+                sweep_dir.mkdir(parents=True, exist_ok=True)
+                trace_file = sweep_dir / f"candidate_{i + 1:03d}.json"
+                write_trace_json(trace_file, trace)
+                trace_path = str(trace_file)
+                rel = _relative_trace_path(trace_file)
+                if rel:
+                    trace_url = rel
+
+            candidates.append(
+                {
+                    "candidate_index": i + 1,
+                    "score": float(score),
+                    "param_patch": dict(patch),
+                    "metrics": metrics,
+                    "steps": _segments_to_payload(segments),
+                    "trace_path": trace_path,
+                    "trace_url": trace_url,
+                }
+            )
+
+        if not candidates:
+            _json_error(
+                self,
+                400,
+                code="sweep_no_candidates",
+                error="all sweep candidates failed validation",
+                details={"errors": errors[:10]},
+            )
+            return
+
+        candidates.sort(key=lambda row: float(row.get("score", 0.0)), reverse=True)
+        for i, row in enumerate(candidates, start=1):
+            row["rank"] = i
+
+        top_rows = candidates[: max(1, min(top_k, len(candidates)))]
+        best = dict(top_rows[0])
+        _json_response(
+            self,
+            200,
+            {
+                "ok": True,
+                "run_name": run_name,
+                "sweep_id": sweep_id,
+                "target_step_index": target_idx,
+                "candidate_count": len(combos),
+                "valid_count": len(candidates),
+                "error_count": len(errors),
+                "errors": errors[:20],
+                "score_weights": score_weights,
+                "ranking": top_rows,
+                "best": best,
             },
         )
 
@@ -1556,9 +1820,11 @@ def _generate_suite_trace(
     write_trace_json(output_path, trace)
 
     rel = _relative_trace_path(output_path)
-    viewer_url = "/tools/primitive_sim/web/index.html?studio=0"
+    viewer_url = "/tools/primitive_sim/web/lamp_sim.html?mode=playback"
     if rel:
         viewer_url += f"&trace={quote(rel, safe='/')}"
+    else:
+        viewer_url = "/tools/primitive_sim/web/lamp_sim.html?mode=studio"
 
     return {
         "ok": True,
@@ -1580,23 +1846,26 @@ def _serve_toolbox(
     handler_cls = type("PrimitiveStudioHandler", (_StudioRequestHandler,), {"studio": context})
     with _ThreadingReuseTCPServer(("127.0.0.1", int(port)), handler_cls) as server:
         if landing == "joint_checker":
-            url = f"http://127.0.0.1:{port}/tools/primitive_sim/web/joint_checker.html"
+            url = f"http://127.0.0.1:{port}/tools/primitive_sim/web/lamp_sim.html?mode=joint_checker"
         elif landing == "state_machine":
-            url = f"http://127.0.0.1:{port}/tools/primitive_sim/web/state_machine.html"
+            url = f"http://127.0.0.1:{port}/tools/primitive_sim/web/lamp_sim.html?mode=state_machine"
         elif landing == "scenario_lab":
-            url = f"http://127.0.0.1:{port}/tools/primitive_sim/web/scenario_lab.html"
+            url = f"http://127.0.0.1:{port}/tools/primitive_sim/web/lamp_sim.html?mode=scenario_lab"
         elif landing == "playback":
             rel = _relative_trace_path(trace_path) if trace_path is not None else None
-            url = f"http://127.0.0.1:{port}/tools/primitive_sim/web/index.html?studio=0"
+            url = f"http://127.0.0.1:{port}/tools/primitive_sim/web/lamp_sim.html?mode=playback"
             if rel:
                 url += f"&trace={quote(rel, safe='/')}"
+            else:
+                url = f"http://127.0.0.1:{port}/tools/primitive_sim/web/lamp_sim.html?mode=studio"
         else:
-            url = f"http://127.0.0.1:{port}/tools/primitive_sim/web/index.html?studio=1"
+            url = f"http://127.0.0.1:{port}/tools/primitive_sim/web/lamp_sim.html?mode=studio"
         print(f"lamp sim toolbox: {url}")
-        print(f"studio: http://127.0.0.1:{port}/tools/primitive_sim/web/index.html?studio=1")
-        print(f"joint checker: http://127.0.0.1:{port}/tools/primitive_sim/web/joint_checker.html")
-        print(f"state machine: http://127.0.0.1:{port}/tools/primitive_sim/web/state_machine.html")
-        print(f"scenario lab: http://127.0.0.1:{port}/tools/primitive_sim/web/scenario_lab.html")
+        print(f"shell: http://127.0.0.1:{port}/tools/primitive_sim/web/lamp_sim.html")
+        print(f"studio(raw): http://127.0.0.1:{port}/tools/primitive_sim/web/index.html?studio=1")
+        print(f"joint checker(raw): http://127.0.0.1:{port}/tools/primitive_sim/web/joint_checker.html")
+        print(f"state machine(raw): http://127.0.0.1:{port}/tools/primitive_sim/web/state_machine.html")
+        print(f"scenario lab(raw): http://127.0.0.1:{port}/tools/primitive_sim/web/scenario_lab.html")
         print(f"baseline: {context.baseline_path}")
         print(f"experiments: {context.experiments_path}")
         print("Press Ctrl-C to stop viewer server.")

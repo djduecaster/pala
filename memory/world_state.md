@@ -1,6 +1,6 @@
 # PALA World State
 
-Last updated: 2026-02-27T02:51:03+00:00
+Last updated: 2026-02-28T20:13:50+00:00
 
 ## Identity Core
 
@@ -35,11 +35,11 @@ _none_
 
 ## Decision Tail
 
-1. [2026-02-27T02:51:02+00:00] primitive=breath style=calm confidence=0.62 rationale=maintain subtle breathing presence
+_none_
 
 ## Control State
 
-active_kind=breath status=running reason=None started=896129.946802708
+active_kind=None status=done reason=None started=985589.814006375
 
 ## Session Digest
 

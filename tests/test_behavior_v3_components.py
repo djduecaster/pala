@@ -287,7 +287,7 @@ def test_intent_proposer_valid_normalized_and_error_paths():
     assert parsed is not None
     assert parsed.response.proposals[0].primitive == "orient_to_zone"
 
-    # Invalid style fails strict schema.
+    # Invalid proposal items are dropped; valid items remain.
     normalized = parse_intent_proposer_response(
         _valid_proposer_json(
             [
@@ -317,9 +317,10 @@ def test_intent_proposer_valid_normalized_and_error_paths():
             ]
         )
     )
-    assert normalized is None
+    assert normalized is not None
+    assert len(normalized.response.proposals) == 2
 
-    # Mixed-quality payload fails closed (no partial salvage).
+    # Extra top-level keys still fail the response envelope schema.
     salvage_raw = json.dumps(
         {
             "schema_version": "pala.intent_proposals.v2",
@@ -340,7 +341,7 @@ def test_intent_proposer_valid_normalized_and_error_paths():
     proposer.submit_or_replace({"tick": 1})
     assert proposer.complete_request(_valid_proposer_json([{"intent": "bad"}])) is None
     err = proposer.last_parse_error or ""
-    assert err.startswith("schema:")
+    assert err == "all_proposals_invalid"
 
 
 def test_intent_proposer_accepts_wrapped_payload_shape():

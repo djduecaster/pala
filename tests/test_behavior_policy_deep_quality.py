@@ -492,9 +492,12 @@ def test_policy_helper_methods_and_text_encoding_quality(tmp_path):
     assert policy._zone_hint(st=None, snapshot={}) == "right"  # noqa: SLF001
 
     st = SimpleNamespace(primary_person_conf=0.7, debug={"detector_alive": True})
-    signals = policy._build_mode_signals(st=st, snapshot={"latest_env_snapshot": {"features": {}}})  # noqa: SLF001
+    signals = policy._build_mode_signals(  # noqa: SLF001
+        st=st,
+        snapshot={"latest_env_snapshot": {"features": {"person_present": True}}},
+    )
     assert signals.person_present is True
-    assert abs(signals.person_conf - 0.7) < 1e-6
+    assert abs(signals.person_conf - 1.0) < 1e-6
 
     assert policy._compute_failure_backoff_s(ModelResponse(False, 404, 1.0, None, "x")) == policy._cfg.client_error_backoff_s  # noqa: SLF001
     assert policy._compute_failure_backoff_s(ModelResponse(False, 500, 1.0, None, "x")) == policy._cfg.error_backoff_s  # noqa: SLF001
