@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict
+from urllib.parse import urlencode
 
 from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -13,7 +14,7 @@ from tools.ft_capture.catalog import ScenarioCatalog, load_catalog
 from .service import (
     RecordFilters,
     build_record_views,
-    default_expected_action_json,
+    default_expected_decision_json,
     find_record_view,
     record_by_token,
     scenario_choices,
@@ -41,9 +42,9 @@ def _build_context(
     )
     selected = find_record_view(views, selected_token)
 
-    expected_action_json = ""
+    expected_decision_json = ""
     if selected is not None:
-        expected_action_json = default_expected_action_json(selected.record)
+        expected_decision_json = default_expected_decision_json(selected.record)
 
     return {
         "request": request,
@@ -52,7 +53,7 @@ def _build_context(
         "records": views,
         "selected": selected,
         "selected_token": selected.token if selected is not None else "",
-        "expected_action_json": expected_action_json,
+        "expected_decision_json": expected_decision_json,
         "message": message,
         "error": error,
         "scenario_choices": scenario_choices(views),
@@ -121,7 +122,7 @@ def create_app(*, dataset_root: str, catalog_path: str, mount_prefix: str = "/da
         annotator: str = Form(""),
         rationale_text: str = Form(""),
         notes: str = Form(""),
-        expected_action_json: str = Form(""),
+        expected_decision_json: str = Form(""),
         scenario_filter: str = Form(""),
         status_filter: str = Form(""),
         split_filter: str = Form(""),
@@ -146,7 +147,7 @@ def create_app(*, dataset_root: str, catalog_path: str, mount_prefix: str = "/da
                 annotator=annotator,
                 rationale_text=rationale_text,
                 notes=notes,
-                expected_action_json=expected_action_json,
+                expected_decision_json=expected_decision_json,
             )
         except Exception as exc:
             ctx = _build_context(
@@ -159,7 +160,7 @@ def create_app(*, dataset_root: str, catalog_path: str, mount_prefix: str = "/da
                 message="",
                 error=str(exc),
             )
-            ctx["expected_action_json"] = expected_action_json
+            ctx["expected_decision_json"] = expected_decision_json
             return templates.TemplateResponse(request, "index.html", ctx)
 
         redirect = request.url_for("index")
@@ -171,7 +172,7 @@ def create_app(*, dataset_root: str, catalog_path: str, mount_prefix: str = "/da
             "quality": filters.quality,
             "message": "label saved",
         }
-        query = "&".join(f"{key}={value}" for key, value in params.items() if value)
+        query = urlencode({key: value for key, value in params.items() if value})
         target = f"{redirect}?{query}" if query else str(redirect)
         return RedirectResponse(url=target, status_code=303)
 

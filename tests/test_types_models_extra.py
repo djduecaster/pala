@@ -12,6 +12,7 @@ from pala.types.models import (
     MoveToCommand,
     NodCommand,
     OrientToZoneCommand,
+    ScanSweepCommand,
     PrimitiveKind,
     action_plan_from_dict,
     command_from_dict,
@@ -45,6 +46,12 @@ def test_command_from_dict_supports_all_primitives():
     orient = command_from_dict(PrimitiveKind.ORIENT_TO_ZONE, {"zone": "RIGHT"})
     assert isinstance(orient, OrientToZoneCommand)
     assert orient.zone == "right"
+    scan = command_from_dict(
+        PrimitiveKind.SCAN_SWEEP,
+        {"positions": 5, "camera_hfov_deg": 70.42, "overlap": 0.2, "dwell_s": 0.1, "timeout_s": 3.0},
+    )
+    assert isinstance(scan, ScanSweepCommand)
+    assert scan.positions == 5
 
 
 def test_command_from_dict_rejects_invalid_payloads():
@@ -60,6 +67,8 @@ def test_command_from_dict_rejects_invalid_payloads():
         command_from_dict(PrimitiveKind.ORIENT_TO_ZONE, {"zone": "desk"})
     with pytest.raises(ValueError, match="yaw_rad is required"):
         command_from_dict(PrimitiveKind.GAZE_TO, {"pitch_rad": 0.1})
+    with pytest.raises(ValueError, match="overlap must be"):
+        command_from_dict(PrimitiveKind.SCAN_SWEEP, {"overlap": 1.2})
 
 
 def test_action_plan_from_dict_supports_wrapped_payload_and_defaults():

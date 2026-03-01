@@ -5,7 +5,7 @@ from pathlib import Path
 import re
 from typing import Any
 
-from pala.behavior.prompts import SYSTEM_PROMPT, env_contract_lines
+from pala.behavior.prompts import SYSTEM_PROMPT
 from pala.config import load_config
 
 from .models import ProbeDefaults
@@ -84,17 +84,10 @@ def resolve_defaults() -> ProbeDefaults:
         cosmos = None
 
     timeout_s = max(1.0, float(_cfg_value(cosmos, "request_timeout_ms", 20000)) / 1000.0)
-    env_max_tokens = int(_cfg_value(cosmos, "env_max_tokens", 1000))
-    planner_max_tokens = int(_cfg_value(cosmos, "planner_max_tokens", 1000))
-    planner_max_proposals = int(_cfg_value(cosmos, "planner_max_proposals", 3))
-    planner_use_env_context = bool(_cfg_value(cosmos, "planner_use_env_context", True))
-    planner_prompt = str(
-        _cfg_value(
-            cosmos,
-            "planner_prompt",
-            "Prioritize calm, safe desk-companion behavior. Always choose one concrete next action.",
-        )
-    )
+    max_tokens = int(_cfg_value(cosmos, "planner_max_tokens", 1000))
+    frame_max_width = int(_cfg_value(cosmos, "summary_max_width", 320))
+    frame_jpeg_quality = int(_cfg_value(cosmos, "summary_jpeg_quality", 55))
+
     policy_identity = str(
         _cfg_value(
             cosmos,
@@ -127,11 +120,25 @@ def resolve_defaults() -> ProbeDefaults:
         )
     )
 
+    planner_prompt = str(
+        _cfg_value(
+            cosmos,
+            "planner_prompt",
+            "Prioritize calm, safe desk-companion behavior. Always choose one concrete next action.",
+        )
+    )
+
+    min_action_dwell_s = float(_cfg_value(cosmos, "arbiter_min_dwell_s", 0.8))
+    stale_after_s = float(_cfg_value(cosmos, "stale_expire_s", 6.0))
+    min_mode_dwell_s = float(_cfg_value(cosmos, "mode_min_dwell_s", 1.2))
+    engage_person_conf = float(_cfg_value(cosmos, "mode_engage_person_conf", 0.45))
+    disengage_person_conf = float(_cfg_value(cosmos, "mode_disengage_person_conf", 0.25))
+
     base_url = (os.getenv("PALA_COSMOS_BASE_URL") or DEFAULT_BASE_URL).strip()
     model = (os.getenv("PALA_COSMOS_MODEL") or DEFAULT_MODEL).strip()
-    # Gemini 2.5 frequently truncates JSON-schema replies when this is too low.
     if DEFAULT_PROVIDER == "gemini" and "gemini" in model.lower():
-        env_max_tokens = max(env_max_tokens, 1000)
+        max_tokens = max(max_tokens, 1000)
+
     api_key, api_key_source = resolve_api_key_info()
     has_api_key = api_key is not None
 
@@ -140,31 +147,28 @@ def resolve_defaults() -> ProbeDefaults:
         model=model,
         base_url=base_url,
         system_prompt=SYSTEM_PROMPT,
-        env_contract="\n".join(env_contract_lines()),
+        timeout_s=timeout_s,
+        max_tokens=max_tokens,
+        temperature=0.0,
+        top_p=1.0,
+        presence_penalty=0.0,
+        frame_max_width=max(64, frame_max_width),
+        frame_jpeg_quality=max(30, min(95, frame_jpeg_quality)),
         policy_identity=policy_identity,
         policy_capabilities=policy_capabilities,
         policy_safety=policy_safety,
         policy_style=policy_style,
-        timeout_s=timeout_s,
-        env_max_tokens=env_max_tokens,
-        temperature=0.0,
-        top_p=0.3,
-        presence_penalty=0.0,
         planner_prompt=planner_prompt,
-        planner_max_proposals=planner_max_proposals,
-        planner_use_env_context=planner_use_env_context,
-        planner_max_tokens=planner_max_tokens,
-        planner_temperature=0.0,
-        planner_top_p=0.3,
-        planner_presence_penalty=0.0,
-        planner_system_prompt=SYSTEM_PROMPT,
-        planner_image_indices="4",
-        planner_context_override_json="",
-        planner_user_text_override="",
-        planner_payload_override_json="",
-        planner_prompt_override="",
+        context_override_json="",
+        user_text_override="",
+        payload_override_json="",
         inter_frame_ms=1000.0,
-        packet_view_mode="compact",
+        packet_view_mode="expanded",
+        min_action_dwell_s=max(0.0, min_action_dwell_s),
+        stale_after_s=max(0.2, stale_after_s),
+        min_mode_dwell_s=max(0.0, min_mode_dwell_s),
+        engage_person_conf=max(0.0, min(1.0, engage_person_conf)),
+        disengage_person_conf=max(0.0, min(1.0, disengage_person_conf)),
         api_key_source=api_key_source,
         has_api_key=has_api_key,
     )

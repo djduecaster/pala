@@ -129,10 +129,12 @@ def _report_cmd(args: argparse.Namespace) -> int:
             f"alerts={report.get('alerts_count')} health={report.get('health')}"
         )
         cases = report.get("cases") if isinstance(report.get("cases"), dict) else {}
+        case_labels = cases.get("label_counts") if isinstance(cases.get("label_counts"), dict) else {}
         print(
             "cases: "
             f"total={cases.get('total_cases')} reviewed={cases.get('reviewed_cases')} "
-            f"coverage={cases.get('review_coverage')}"
+            f"coverage={cases.get('review_coverage')} planner_fail={case_labels.get('planner_transport_error', 0)} "
+            f"guard_fallback={case_labels.get('guard_fallback', 0)}"
         )
         stream_health = report.get("stream_health") if isinstance(report.get("stream_health"), dict) else {}
         print(

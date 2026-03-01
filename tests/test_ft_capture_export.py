@@ -73,12 +73,19 @@ def test_export_openai_jsonl_filters_labeled_usable(tmp_path: Path) -> None:
         {
             "status": "labeled",
             "quality_flag": "usable",
-            "expected_action": {
-                "intent": "track_user",
-                "primitive": "orient_to_zone",
-                "command": {"zone": "center", "amp_rad": 0.2, "rate_rad_s": 1.4},
-                "style": "focused",
+            "expected_decision": {
+                "schema_version": "pala.behavior_decision.v1",
+                "mode": "task_lighting",
+                "mood": "focused",
+                "skill": "task_light_adjust",
+                "action": {
+                    "primitive": "orient_to_zone",
+                    "command": {"zone": "center", "amp_rad": 0.2, "rate_rad_s": 1.4},
+                    "style": "focused",
+                },
                 "confidence": 0.9,
+                "rationale_short": "user entered frame",
+                "mode_transition": "to_task_lighting",
             },
             "rationale_text": "user entered frame",
             "annotator": "tester",
@@ -105,7 +112,7 @@ def test_export_openai_jsonl_filters_labeled_usable(tmp_path: Path) -> None:
         {
             "status": "discarded",
             "quality_flag": "discard",
-            "expected_action": None,
+            "expected_decision": None,
             "rationale_text": "bad framing",
             "annotator": "tester",
             "notes": "",

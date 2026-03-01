@@ -1,6 +1,6 @@
 # Fine-Tune Capture Tooling
 
-Dedicated data collection and labeling workflow for Cosmos intent-proposer fine-tuning.
+Dedicated data collection and labeling workflow for Cosmos behavior-decision fine-tuning.
 
 ## Components
 

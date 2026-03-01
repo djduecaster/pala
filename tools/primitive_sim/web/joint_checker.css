@@ -16,6 +16,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
+  position: relative;
 }
 
 .joint-checker-page #simCanvas {
@@ -38,17 +39,20 @@
 }
 
 .joint-checker-page.embedded-shell .layout {
-  height: auto;
-  min-height: auto;
+  height: 100dvh;
+  min-height: 100dvh;
   padding: 8px;
+  grid-template-columns: minmax(420px, 1.15fr) minmax(340px, 1fr);
+  grid-template-rows: 1fr;
 }
 
 .joint-checker-page.embedded-shell #simCanvas {
-  max-height: 50vh;
+  max-height: none;
 }
 
 .joint-checker-page.embedded-shell .control-card {
-  max-height: 50vh;
+  max-height: none;
+  min-height: 0;
 }
 
 .joint-slider-list {
@@ -69,7 +73,7 @@
 
 .joint-slider-row {
   display: grid;
-  grid-template-columns: minmax(88px, 120px) 1fr minmax(90px, 104px);
+  grid-template-columns: minmax(88px, 120px) 1fr 30px minmax(88px, 104px) 30px;
   gap: 8px;
   align-items: center;
 }
@@ -85,6 +89,31 @@
 
 .joint-slider-row input[type="number"] {
   width: 100%;
+}
+
+.joint-slider-row .step-btn {
+  padding: 6px 0;
+  min-width: 30px;
+}
+
+.stage-tools {
+  position: absolute;
+  right: 12px;
+  top: 12px;
+  display: inline-flex;
+  gap: 6px;
+  z-index: 3;
+}
+
+.stage-tools button {
+  min-width: 32px;
+  padding: 6px 8px;
+  border: 1px solid #2d5b68;
+  background: rgba(10, 24, 32, 0.88);
+}
+
+.stage-tools button.wide {
+  min-width: 74px;
 }
 
 .joint-slider-meta {
@@ -137,5 +166,12 @@
   .joint-checker-page .control-card {
     max-height: none;
     overflow: auto;
+  }
+}
+
+@media (max-width: 1260px) {
+  .joint-checker-page.embedded-shell .layout {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(320px, 52dvh) minmax(0, 1fr);
   }
 }

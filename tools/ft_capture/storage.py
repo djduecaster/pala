@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List
 
 from .schema import default_label_record, normalize_label_payload, utc_now_iso
 
@@ -171,8 +171,10 @@ def create_take_layout(session_dir: Path, *, scenario_id: str, take_id: str) -> 
 def write_initial_label(take_dir: Path, *, label_template: Dict[str, Any]) -> Dict[str, Any]:
     base = default_label_record()
     if isinstance(label_template, dict):
-        if "expected_action" in label_template:
-            base["expected_action"] = label_template.get("expected_action")
+        if "expected_decision" in label_template:
+            base["expected_decision"] = label_template.get("expected_decision")
+        elif "expected_action" in label_template:
+            raise ValueError("label_template.expected_action is deprecated; use label_template.expected_decision")
         if "rationale_text" in label_template:
             base["rationale_text"] = str(label_template.get("rationale_text") or "").strip()
         if "notes" in label_template:

@@ -9,6 +9,7 @@ from .primitives import (
     NodCommand,
     BreathCommand,
     OrientToZoneCommand,
+    ScanSweepCommand,
     ALL_PRIMITIVES,
 )
 from .executor import TrajectoryExecutor
@@ -24,6 +25,7 @@ __all__ = [
     "NodCommand",
     "BreathCommand",
     "OrientToZoneCommand",
+    "ScanSweepCommand",
     "ALL_PRIMITIVES",
     "TrajectoryExecutor",
 ]

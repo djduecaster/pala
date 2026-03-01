@@ -1,0 +1,11 @@
+{% include "partials/scenario_presets.html" %}
+
+<div id="fsm-panel" hx-swap-oob="innerHTML">{% include "partials/fsm_panel.html" %}</div>
+<div id="override-fields" hx-swap-oob="innerHTML">{% include "partials/override_fields.html" %}</div>
+
+<input id="max-tokens-input" name="max_tokens" type="number" min="64" max="4000" value="{{ form_values.max_tokens }}" hx-swap-oob="true" />
+<input id="temperature-input" name="temperature" type="number" step="0.01" min="0" max="2" value="{{ form_values.temperature }}" hx-swap-oob="true" />
+<input id="top-p-input" name="top_p" type="number" step="0.01" min="0" max="1" value="{{ form_values.top_p }}" hx-swap-oob="true" />
+<input id="presence-penalty-input" name="presence_penalty" type="number" step="0.01" min="-2" max="2" value="{{ form_values.presence_penalty }}" hx-swap-oob="true" />
+<textarea id="policy-style-input" name="policy_style" rows="3" hx-swap-oob="true">{{ form_values.policy_style }}</textarea>
+<textarea id="planner-prompt-input" name="planner_prompt" rows="3" hx-swap-oob="true">{{ form_values.planner_prompt }}</textarea>

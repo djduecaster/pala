@@ -11,6 +11,7 @@ from ..types import (
     NodCommand,
     BreathCommand,
     OrientToZoneCommand,
+    ScanSweepCommand,
 )
 
 ALL_PRIMITIVES = {kind.value for kind in PrimitiveKind}
@@ -26,5 +27,6 @@ __all__ = [
     "NodCommand",
     "BreathCommand",
     "OrientToZoneCommand",
+    "ScanSweepCommand",
     "ALL_PRIMITIVES",
 ]

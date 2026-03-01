@@ -15,11 +15,10 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from pala.behavior.intent_proposer import parse_intent_proposer_response
+from pala.behavior.decision_schema_v4 import behavior_decision_response_format, parse_behavior_decision_response
 from pala.behavior.json_parse import parse_json_flexible
 from pala.behavior.model_clients import extract_message_content, normalize_chat_url, post_chat_json
-from pala.behavior.prompts import build_messages, build_planner_user_text
-from pala.behavior.schemas import intent_response_format
+from pala.behavior.prompts import build_behavior_v4_user_text, build_messages
 from pala.config import load_config
 
 
@@ -79,14 +78,15 @@ def _safe_json_parse(content: Optional[str]) -> tuple[bool, Optional[str]]:
     return True, None
 
 
-def _planner_parse(content: Optional[str]) -> tuple[bool, Optional[str]]:
+def _behavior_parse(content: Optional[str]) -> tuple[bool, Optional[str]]:
     if content is None:
         return False, "missing_message_content"
-    parsed = parse_intent_proposer_response(content)
+    parsed = parse_behavior_decision_response(content)
     if parsed is None:
-        return False, "planner_parse_failed"
-    if not parsed.response.proposals:
-        return False, "planner_no_proposals"
+        return False, "behavior_parse_failed"
+    primitive = str(parsed.decision.action.primitive or "").strip()
+    if not primitive:
+        return False, "behavior_missing_primitive"
     return True, None
 
 
@@ -169,14 +169,15 @@ def _run_case(
     }
 
 
-def _planner_payload(model: str, *, max_tokens: int, provider: str) -> Dict[str, Any]:
+def _behavior_payload(model: str, *, max_tokens: int, provider: str) -> Dict[str, Any]:
     context = {
+        "mode": "social_interact",
+        "current_mode": "social_interact",
         "current_action": {
             "primitive": "hold",
             "command": {},
             "style": "calm",
             "confidence": 0.2,
-            "age_s": 0.4,
         },
         "signals": {
             "person_conf": 0.7,
@@ -191,18 +192,17 @@ def _planner_payload(model: str, *, max_tokens: int, provider: str) -> Dict[str,
             "summary": "user present and shifting posture",
         },
         "control_state": "active_kind=hold",
-        "planner_health": {"state": "HEALTHY"},
-        "anti_collapse": {"no_commit_s": 1.0},
-        "evidence_index": {"available": ["frame:latest", "env:latest", "perception:zone:left"]},
+        "health": {"planner": "healthy", "perception": "healthy"},
+        "skill_hint": "social_ack",
+        "mode_transition_candidates": ["stay", "to_idle_presence", "to_search_assist"],
     }
-    user_text = build_planner_user_text(
+    user_text = build_behavior_v4_user_text(
         context=context,
         policy_identity="You are PALA.",
         policy_capabilities="Use hold, breath, glance, nod, orient_to_zone.",
         policy_safety="Keep movement safe and calm.",
         policy_style="Use calm by default.",
-        planner_prompt="Return concrete next action proposals.",
-        max_proposals=3,
+        planner_prompt="Return one concrete next behavior decision for the current scene.",
     )
     return {
         "model": model,
@@ -212,7 +212,7 @@ def _planner_payload(model: str, *, max_tokens: int, provider: str) -> Dict[str,
         "presence_penalty": 0.0,
         "max_tokens": int(max_tokens),
         "stream": False,
-        "response_format": intent_response_format(),
+        "response_format": behavior_decision_response_format(),
     }
 
 
@@ -295,7 +295,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--sleep-s", type=float, default=0.0, help="Delay between requests in each case.")
     parser.add_argument("--max-tokens", type=int, default=160)
     parser.add_argument("--planner-max-tokens", type=int, default=520)
-    parser.add_argument("--no-planner", action="store_true", help="Skip planner-schema probe case.")
+    parser.add_argument("--no-planner", action="store_true", help="Skip behavior-schema probe case.")
     parser.add_argument("--schema-no-strict", action="store_true", help="Use json_schema probe without strict=true.")
     parser.add_argument("--out-root", default="logs/provider_probe")
     parser.add_argument("--verbose", action="store_true")
@@ -377,16 +377,16 @@ def main() -> int:
     if not args.no_planner:
         results.append(
             _run_case(
-                name="planner_schema_probe",
+                name="behavior_schema_probe",
                 url=str(base_url),
                 provider=str(provider),
                 api_key=api_key,
-                payload_builder=lambda: _planner_payload(
+                payload_builder=lambda: _behavior_payload(
                     model=str(model),
                     max_tokens=max(320, int(args.planner_max_tokens)),
                     provider=str(provider),
                 ),
-                parse_fn=_planner_parse,
+                parse_fn=_behavior_parse,
                 timeout_s=float(args.timeout_s),
                 runs=runs,
                 sleep_s=float(args.sleep_s),

@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import os
 from pathlib import Path
 from typing import Dict, List, Optional
 
 from tools.ft_capture.catalog import ScenarioCatalog, assign_split
-from tools.ft_capture.schema import parse_expected_action_json
+from tools.ft_capture.schema import decision_to_dict, parse_expected_decision_json
 from tools.ft_capture.storage import TakeRecord, load_take_records, save_label
 
 
@@ -128,7 +127,7 @@ def update_label_from_form(
     annotator: str,
     rationale_text: str,
     notes: str,
-    expected_action_json: str,
+    expected_decision_json: str,
 ) -> Dict[str, object]:
     payload = dict(record.label or {})
     payload["status"] = str(status or "").strip().lower() or "unlabeled"
@@ -137,27 +136,15 @@ def update_label_from_form(
     payload["rationale_text"] = str(rationale_text or "").strip()
     payload["notes"] = str(notes or "").strip()
 
-    expected_action = None
+    expected_decision = None
     if payload["status"] == "labeled":
-        expected_action = parse_expected_action_json(expected_action_json)
-        payload["expected_action"] = {
-            "intent": expected_action.intent,
-            "primitive": expected_action.primitive,
-            "command": dict(expected_action.command),
-            "style": expected_action.style,
-            "confidence": expected_action.confidence,
-        }
-    elif str(expected_action_json or "").strip():
-        expected_action = parse_expected_action_json(expected_action_json)
-        payload["expected_action"] = {
-            "intent": expected_action.intent,
-            "primitive": expected_action.primitive,
-            "command": dict(expected_action.command),
-            "style": expected_action.style,
-            "confidence": expected_action.confidence,
-        }
+        expected_decision = parse_expected_decision_json(expected_decision_json)
+        payload["expected_decision"] = decision_to_dict(expected_decision)
+    elif str(expected_decision_json or "").strip():
+        expected_decision = parse_expected_decision_json(expected_decision_json)
+        payload["expected_decision"] = decision_to_dict(expected_decision)
     else:
-        payload["expected_action"] = None
+        payload["expected_decision"] = None
 
     normalized = save_label(Path(record.take_dir), payload)
     return normalized
@@ -184,8 +171,8 @@ def record_by_token(dataset_root: str, token: str) -> Optional[TakeRecord]:
 
 
 
-def default_expected_action_json(record: TakeRecord) -> str:
-    expected = (record.label or {}).get("expected_action")
+def default_expected_decision_json(record: TakeRecord) -> str:
+    expected = (record.label or {}).get("expected_decision")
     if not isinstance(expected, dict):
         return ""
     import json

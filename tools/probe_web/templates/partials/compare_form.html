@@ -1,0 +1,31 @@
+<form
+  id="compare-form"
+  hx-post="/compare/runs"
+  hx-target="#compare-panel"
+  hx-swap="innerHTML"
+>
+  <div class="grid two">
+    <label>
+      Run A
+      <select name="compare_run_a_id" id="compare-run-a">
+        <option value="">Select run</option>
+        {% for run in recent_runs %}
+          <option value="{{ run.run_id }}" {% if form_values.compare_run_a_id == run.run_id %}selected{% endif %}>{{ run.run_id }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      Run B
+      <select name="compare_run_b_id" id="compare-run-b">
+        <option value="">Select run</option>
+        {% for run in recent_runs %}
+          <option value="{{ run.run_id }}" {% if form_values.compare_run_b_id == run.run_id %}selected{% endif %}>{{ run.run_id }}</option>
+        {% endfor %}
+      </select>
+    </label>
+  </div>
+  <div class="compare-actions">
+    <button type="button" class="btn-secondary" id="compare-latest-btn">Use Latest Two</button>
+    <button type="submit" class="btn-secondary">Compare Runs</button>
+  </div>
+</form>

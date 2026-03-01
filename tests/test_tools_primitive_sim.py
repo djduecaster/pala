@@ -5,9 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from pala.behavior.mode_fsm_v4 import ModeFsmV4Config
 from pala.types import ActionPlan
-from pala.behavior.idle_engine import IdleEngineConfig
-from pala.behavior.mode_manager import ModeManagerConfig
 from pala.control.primitives import BreathCommand, PrimitiveKind
 from tools.primitive_sim.run import (
     _append_experiment_record,
@@ -362,35 +361,51 @@ def test_experiment_history_appends_and_reads_newest_first(tmp_path):
 
 def _fsm_sim() -> LampStateMachineSimulator:
     return LampStateMachineSimulator.create(
-        mode_config=ModeManagerConfig(),
-        idle_config=IdleEngineConfig(),
+        mode_config=ModeFsmV4Config(),
+        idle_config=None,
     )
 
 
-def test_state_machine_defaults_to_idle_presence():
+def test_state_machine_defaults_to_boot_awaken():
     sim = _fsm_sim()
     snap = sim.snapshot()
-    assert snap["mode"] == "idle_presence"
+    assert snap["mode"] == "boot_awaken"
+    assert "hold" in snap["allowed_primitives"]
     assert "breath" in snap["allowed_primitives"]
 
 
-def test_state_machine_presence_step_transitions_to_engage_track():
+def test_state_machine_boot_holds_without_startup_complete_signal():
     sim = _fsm_sim()
     out = sim.step(
-        dt_s=1.1,
+        dt_s=0.5,
+        signals={
+            "person_present": True,
+            "person_conf": 0.95,
+        },
+    )
+    assert out["mode_decision"]["to"] == "boot_awaken"
+    assert out["mode_decision"]["transitioned"] is False
+    assert out["mode_decision"]["reason"] in {"hold_mode", "min_mode_dwell_hold"}
+
+
+def test_state_machine_presence_step_transitions_to_social_interact():
+    sim = _fsm_sim()
+    _ = sim.step(
+        dt_s=0.5,
+        signals={"startup_complete": True},
+        zone_hint="center",
+    )
+    out = sim.step(
+        dt_s=1.3,
         signals={
             "person_present": True,
             "person_conf": 0.85,
-            "activity_level": 0.1,
-            "novelty": 0.1,
-            "env_delta": 0.0,
-            "planner_open_breaker": False,
-            "perception_degraded": False,
+            "startup_complete": True,
         },
         zone_hint="center",
     )
-    assert out["mode_decision"]["to"] == "engage_track"
-    assert out["mode_decision"]["reason"] == "presence_track"
+    assert out["mode_decision"]["to"] == "social_interact"
+    assert out["mode_decision"]["reason"] == "person_present_engage"
     assert any(item["primitive"] == "orient_to_zone" for item in out["proposals"])
 
 
@@ -401,16 +416,47 @@ def test_state_machine_health_breaker_forces_recover_reset():
         signals={
             "person_present": False,
             "person_conf": 0.0,
-            "activity_level": 0.0,
-            "novelty": 0.0,
-            "env_delta": 0.0,
             "planner_open_breaker": True,
             "perception_degraded": False,
         },
     )
     assert out["mode_decision"]["to"] == "recover_reset"
     assert out["mode_decision"]["reason"] == "health_degraded"
+    assert out["recommended"]["primitive"] == "hold"
+
+
+def test_state_machine_home_request_transitions_to_return_home():
+    sim = _fsm_sim()
+    _ = sim.step(dt_s=0.5, signals={"startup_complete": True})
+    out = sim.step(
+        dt_s=1.3,
+        signals={
+            "startup_complete": True,
+            "home_requested": True,
+        },
+    )
+    assert out["mode_decision"]["to"] == "return_home"
+    assert out["mode_decision"]["reason"] == "home_requested"
     assert out["recommended"]["primitive"] == "home"
+
+
+def test_state_machine_force_mode_transitions():
+    sim = _fsm_sim()
+    out = sim.force_mode(
+        next_mode="recover_reset",
+        reason="ops_force",
+        dt_s=0.2,
+        signals={"health_degraded": True},
+    )
+    assert out["mode_decision"]["to"] == "recover_reset"
+    assert out["mode_decision"]["reason"] == "ops_force"
+    assert out["tick_index"] == 1
+
+
+def test_state_machine_force_mode_rejects_invalid_mode():
+    sim = _fsm_sim()
+    with pytest.raises(ValueError, match="invalid mode token"):
+        sim.force_mode(next_mode="bad_mode")
 
 
 def test_state_machine_commit_resets_no_commit_timer():

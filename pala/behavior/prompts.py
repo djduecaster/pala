@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 
 SYSTEM_PROMPT = (
@@ -10,6 +10,37 @@ SYSTEM_PROMPT = (
     "No markdown, no code fences, no tags, no prose outside JSON. "
     "First non-whitespace character must be '{' or '['."
 )
+
+_MODE_GUIDANCE: Dict[str, List[str]] = {
+    "boot_awaken": [
+        "BOOT_AWAKEN: complete wake-up expression, then settle to stable observation.",
+        "Prefer gentle orient, nod, breath; avoid abrupt transitions.",
+    ],
+    "idle_presence": [
+        "IDLE_PRESENCE: keep calm aliveness with sparse accents.",
+        "Prefer breath/hold, with occasional glance or slow orient.",
+    ],
+    "social_interact": [
+        "SOCIAL_INTERACT: acknowledge user presence and maintain readable attention.",
+        "Prioritize greet_user/social_ack style actions with stable zone orientation.",
+    ],
+    "search_assist": [
+        "SEARCH_ASSIST: perform deliberate search and confirmation behavior.",
+        "Prefer expressive_search or point_and_hold depending on confidence.",
+    ],
+    "task_lighting": [
+        "TASK_LIGHTING: optimize supportive lighting posture for active task.",
+        "Prefer focused orient/hold adjustments and avoid unnecessary motion.",
+    ],
+    "return_home": [
+        "RETURN_HOME: converge back to neutral home posture smoothly.",
+        "Use home/hold actions; do not add extra expressive motion.",
+    ],
+    "recover_reset": [
+        "RECOVER_RESET: fail-closed and stable; prioritize safe, low-risk behavior.",
+        "Use hold/home/breath only until health recovers.",
+    ],
+}
 
 
 def env_contract_lines() -> List[str]:
@@ -78,6 +109,43 @@ def build_planner_user_text(
     return "\n".join(contract) + f"\npolicy_json={policy_json}\ncontext_json={ctx_json}"
 
 
+def build_behavior_v4_user_text(
+    *,
+    context: Dict[str, Any],
+    policy_identity: str,
+    policy_capabilities: str,
+    policy_safety: str,
+    policy_style: str,
+    planner_prompt: str,
+    mode_guidance: Optional[List[str]] = None,
+) -> str:
+    contract = [
+        "You are the PALA behavior planner for a desk companion lamp.",
+        "The camera view is my view as the lamp.",
+        "Return JSON only matching schema `pala.behavior_decision.v1`.",
+        "No markdown, no code fences, no tags.",
+        "Always provide keys: schema_version,mode,mood,skill,action,confidence,rationale_short,mode_transition.",
+        "Choose one best next action for the current mode and active skill.",
+        "Set mode_transition to either 'stay' or 'to_<mode>'.",
+        "Keep rationale_short concise and concrete.",
+        "Only use primitives allowed by schema and provided mode context.",
+        "Use calm motion unless context strongly supports curious/focused.",
+        "When uncertain, choose low-risk stable behavior (hold or gentle breath).",
+    ]
+    if mode_guidance:
+        contract.extend([str(line).strip() for line in mode_guidance if str(line).strip()])
+    policy = {
+        "identity": policy_identity,
+        "capabilities": policy_capabilities,
+        "safety": policy_safety,
+        "style": policy_style,
+        "planner_prompt": planner_prompt,
+    }
+    policy_json = json.dumps(policy, separators=(",", ":"), ensure_ascii=True)
+    ctx_json = json.dumps(context, separators=(",", ":"), ensure_ascii=True)
+    return "\n".join(contract) + f"\npolicy_json={policy_json}\ncontext_json={ctx_json}"
+
+
 def build_messages(*, user_text: str, image_data_urls: List[str]) -> List[Dict[str, Any]]:
     user_content: List[Dict[str, Any]] = []
     for url in image_data_urls:
@@ -87,3 +155,12 @@ def build_messages(*, user_text: str, image_data_urls: List[str]) -> List[Dict[s
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user_content},
     ]
+
+
+def behavior_v4_mode_guidance(mode: str, active_skill: str) -> List[str]:
+    mode_token = str(mode or "").strip().lower()
+    skill_token = str(active_skill or "").strip().lower()
+    lines = list(_MODE_GUIDANCE.get(mode_token, []))
+    if skill_token:
+        lines.append(f"Current skill focus: {skill_token}.")
+    return lines

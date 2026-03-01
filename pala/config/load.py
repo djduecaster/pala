@@ -98,10 +98,18 @@ class CosmosConfig:
     startup_observe_pitch2_rad: float = -0.18
     startup_person_conf_fast_exit: float = 0.60
     mode_min_dwell_s: float = 1.0
+    mode_return_home_settle_s: float = 1.2
+    mode_recover_settle_s: float = 1.0
     mode_engage_person_conf: float = 0.45
     mode_disengage_person_conf: float = 0.20
+    mode_boot_timeout_s: float = 6.7
     stale_penalty_per_s: float = 0.05
     stale_expire_s: float = 14.0
+    action_guard_stale_after_s: float = 7.0
+    action_guard_orient_cooldown_s: float = 1.2
+    action_guard_glance_cooldown_s: float = 3.0
+    action_guard_nod_cooldown_s: float = 4.0
+    action_guard_home_cooldown_s: float = 4.0
     # Frame sampling and media packaging.
     planner_max_frames: int = 1
     planner_include_latest_frame: bool = True
@@ -409,6 +417,14 @@ def load_config(path: str) -> RobotConfig:
             "cosmos.startup_person_conf_fast_exit",
         ),
         mode_min_dwell_s=_as_float(cosmos_raw.get("mode_min_dwell_s", 1.0), "cosmos.mode_min_dwell_s"),
+        mode_return_home_settle_s=_as_float(
+            cosmos_raw.get("mode_return_home_settle_s", 1.2),
+            "cosmos.mode_return_home_settle_s",
+        ),
+        mode_recover_settle_s=_as_float(
+            cosmos_raw.get("mode_recover_settle_s", 1.0),
+            "cosmos.mode_recover_settle_s",
+        ),
         mode_engage_person_conf=_as_float(
             cosmos_raw.get("mode_engage_person_conf", 0.45),
             "cosmos.mode_engage_person_conf",
@@ -417,8 +433,32 @@ def load_config(path: str) -> RobotConfig:
             cosmos_raw.get("mode_disengage_person_conf", 0.20),
             "cosmos.mode_disengage_person_conf",
         ),
+        mode_boot_timeout_s=_as_float(
+            cosmos_raw.get("mode_boot_timeout_s", 6.7),
+            "cosmos.mode_boot_timeout_s",
+        ),
         stale_penalty_per_s=_as_float(cosmos_raw.get("stale_penalty_per_s", 0.05), "cosmos.stale_penalty_per_s"),
         stale_expire_s=_as_float(cosmos_raw.get("stale_expire_s", 14.0), "cosmos.stale_expire_s"),
+        action_guard_stale_after_s=_as_float(
+            cosmos_raw.get("action_guard_stale_after_s", cosmos_raw.get("stale_expire_s", 7.0)),
+            "cosmos.action_guard_stale_after_s",
+        ),
+        action_guard_orient_cooldown_s=_as_float(
+            cosmos_raw.get("action_guard_orient_cooldown_s", cosmos_raw.get("arbiter_orient_cooldown_s", 1.2)),
+            "cosmos.action_guard_orient_cooldown_s",
+        ),
+        action_guard_glance_cooldown_s=_as_float(
+            cosmos_raw.get("action_guard_glance_cooldown_s", cosmos_raw.get("idle_glance_after_s", 3.0)),
+            "cosmos.action_guard_glance_cooldown_s",
+        ),
+        action_guard_nod_cooldown_s=_as_float(
+            cosmos_raw.get("action_guard_nod_cooldown_s", 4.0),
+            "cosmos.action_guard_nod_cooldown_s",
+        ),
+        action_guard_home_cooldown_s=_as_float(
+            cosmos_raw.get("action_guard_home_cooldown_s", 4.0),
+            "cosmos.action_guard_home_cooldown_s",
+        ),
         planner_max_frames=_as_int(cosmos_raw.get("planner_max_frames", 1), "cosmos.planner_max_frames"),
         planner_include_latest_frame=_as_bool(
             cosmos_raw.get("planner_include_latest_frame", True),

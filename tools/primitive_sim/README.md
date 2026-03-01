@@ -1,6 +1,6 @@
 # Lamp Sim (Sidecar Tool)
 
-Lamp Sim is a sidecar workflow for quickly understanding primitives, joint geometry, and behavior modes before hardware runs.
+Lamp Sim is a sidecar workflow for quickly understanding primitives, joint geometry, and behavior loops before hardware runs.
 
 It keeps runtime behavior math aligned by reusing `TrajectoryExecutor` from `pala/control/executor.py`.
 
@@ -18,14 +18,17 @@ Then open the unified shell:
 http://127.0.0.1:8766/tools/primitive_sim/web/lamp_sim.html
 ```
 
-The shell provides one persistent navigation/workflow UI for Studio, Scenario Lab, State Machine, and Joint Checker.
+The shell provides one persistent navigation/workflow UI for Studio, Scenario Lab, Joint Checker, and the Behavior V4 state-machine simulator.
 
 Shell UX features:
 - One persistent mode navigation + workflow checklist
+- Operational goal selector (`Tune Primitive`, `Build Scenario`, `Validate State Machine`, `Review Playback`)
 - Mode-aware primary action button in top bar
+- Mode-aware `Run + Playback` button for faster operational loops
+- Focus Viewer mode (`v`) to maximize stage real estate
 - Global command palette (`Cmd/Ctrl+K`) for fast mode/action switching
 - Global toast/status feedback from active mode actions
-- Keyboard mode shortcuts (`1..4`) and suite playback shortcut (`r`)
+- Keyboard mode shortcuts (`1..4`), suite playback (`r`), run+playback (`p`), and focus toggle (`v`)
 - Cross-mode handoff: send FSM recommended primitive into Scenario builder/steps
 
 ## Primitive Studio mode (recommended)
@@ -53,7 +56,9 @@ Studio features:
 - Save tuned values to baseline params
 - Save all baseline params in one write (`Save All`)
 - Reload from baselines on startup
-- Top bar mode buttons: switch between Studio, Joint Checker, State Machine, and Scenario Lab
+- Camera toolbar (`zoom +/-`, `orbit <- ->`, `reset view`) + mouse-wheel zoom
+- Parameter filter and expanded nudge controls (`--`, `-`, `+`, `++`)
+- Top bar mode buttons: switch between Studio, Joint Checker, Scenario Lab, and State Machine
 - `Run Suite Playback` button: generates `logs/primitive_sim/latest_trace.json` and opens playback
 
 ## Joint checker mode
@@ -76,12 +81,14 @@ Joint checker features:
 - Per-joint sliders generated from `joint_names` + `joint_limits_rad`
 - Live angle readouts in radians and degrees
 - 3D pose rendering driven by current slider values
+- Camera toolbar (`zoom +/-`, `orbit <- ->`, `reset view`) + mouse-wheel zoom
+- Per-joint `+/-` nudge buttons adjacent to angle input
 - DH parameter table loaded from `config/robot.yaml`
 - Top bar mode buttons and `Run Suite Playback` button
 
-## State machine mode
+## State machine mode (Behavior V4)
 
-Run the behavior mode simulator:
+Run the V4 macro-mode simulator:
 
 ```bash
 uv run python tools/primitive_sim/run.py --scenario state_machine --port 8766
@@ -94,12 +101,13 @@ http://127.0.0.1:8766/tools/primitive_sim/web/state_machine.html
 ```
 
 State machine features:
-- Visual mode graph for `idle_presence`, `scan_explore`, `engage_track`, `acknowledge`, `recover_reset`
-- Step or auto-run mode transitions from editable input signals
-- Signal controls: person presence/confidence, activity, novelty, env delta, health breakers
-- Live primitive response table using deterministic `IdleEngine` proposals
-- Allowed-primitive readout per mode
-- Reuses runtime `ModeManager` + `IdleEngine` semantics for transition/proposal behavior
+- Behavior V4 mode graph (`boot_awaken`, `idle_presence`, `social_interact`, `search_assist`, `task_lighting`, `return_home`, `recover_reset`)
+- Direct signal stepping (`person/search/task/home/health`) with explicit transition reason
+- Skill-scoped allowed primitive lists and ranked deterministic proposals
+- Operator presets (`boot`, `idle`, `social`, `search`, `task`, `home`, `recover`, `fault`) for fast triage
+- Forced mode transitions with operator reason tags for debugging/recovery drills
+- Transition log + snapshot copy for runbooks/incidents
+- Cross-mode handoff by sending recommended primitive to Scenario Lab from the shell
 
 ## Scenario lab mode
 
@@ -143,7 +151,6 @@ uv run python tools/primitive_sim/run.py --scenario scenario_lab --experiments p
 Phase 1 (implemented):
 - Primitive Studio tuning
 - Joint Checker
-- State Machine simulator
 - Scenario Lab (compose + run + evaluate + save history)
 
 Phase 2 (in progress):

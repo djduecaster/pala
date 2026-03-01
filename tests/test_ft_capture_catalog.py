@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from tools.ft_capture.catalog import assign_split, load_catalog
 
 
@@ -45,3 +47,63 @@ def test_load_catalog_and_split_deterministic(tmp_path: Path) -> None:
     second = assign_split(scenario_id="alpha_case", split_seed=catalog.split_seed, split_ratio=catalog.split_ratio)
     assert first == second
     assert first in {"train", "val", "test"}
+
+
+def test_catalog_rejects_legacy_expected_action_template(tmp_path: Path) -> None:
+    path = tmp_path / "catalog_bad.yaml"
+    path.write_text(
+        """
+version: 1
+scenarios:
+  - id: alpha_case
+    title: Alpha
+    description: Alpha scenario
+    countdown_s: 5
+    duration_s: 5
+    sample_fps: 1
+    tags: [alpha]
+    label_template:
+      expected_action:
+        primitive: hold
+        command: {}
+        style: calm
+        confidence: 0.2
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="expected_action"):
+        load_catalog(str(path))
+
+
+def test_catalog_rejects_invalid_expected_decision_template(tmp_path: Path) -> None:
+    path = tmp_path / "catalog_invalid_decision.yaml"
+    path.write_text(
+        """
+version: 1
+scenarios:
+  - id: alpha_case
+    title: Alpha
+    description: Alpha scenario
+    countdown_s: 5
+    duration_s: 5
+    sample_fps: 1
+    tags: [alpha]
+    label_template:
+      expected_decision:
+        schema_version: pala.behavior_decision.v1
+        mode: idle_presence
+        mood: calm
+        skill: social_ack
+        action:
+          primitive: breath
+          command: {}
+          style: calm
+        confidence: 0.8
+        rationale_short: stable
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="expected_decision"):
+        load_catalog(str(path))

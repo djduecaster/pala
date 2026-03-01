@@ -303,6 +303,33 @@ def _check_session_dir(session_dir: str) -> List[Check]:
                                 detail=f"{reviewed_cases}/{total_cases} ({coverage:.3f})",
                             )
                         )
+                if "reasoning_traces" in tables:
+                    columns = {
+                        str(row[1])
+                        for row in conn.execute("PRAGMA table_info(reasoning_traces)").fetchall()
+                        if row and len(row) > 1 and isinstance(row[1], str)
+                    }
+                    required_cols = {
+                        "mode",
+                        "active_skill",
+                        "guard_accepted",
+                        "guard_fallback",
+                        "guard_reason",
+                        "planner_last_parse_stage",
+                        "planner_last_error",
+                        "mode_transition_to",
+                    }
+                    missing = sorted(required_cols - columns)
+                    if missing:
+                        out.append(
+                            Check(
+                                name="session:reasoning_traces.v4_columns",
+                                status="warn",
+                                detail="missing=" + ",".join(missing),
+                            )
+                        )
+                    else:
+                        out.append(Check(name="session:reasoning_traces.v4_columns", status="pass", detail="ok"))
         except Exception as exc:
             out.append(Check(name="session:case_reviews.coverage", status="warn", detail=repr(exc)))
     if os.path.exists(summary_path) or os.path.exists(runs_path):

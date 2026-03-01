@@ -3,13 +3,13 @@
     {% for run in recent_runs %}
       <li>
         <a href="/runs/{{ run.run_id }}">{{ run.run_id }}</a>
-        <span>mode={{ run.mode or "env" }}</span>
-        {% if run.chain_status %}<span>chain={{ run.chain_status }}</span>{% endif %}
+        <span>mode={{ run.mode or "behavior_v4" }}</span>
         <span>model={{ run.model }}</span>
         <span>http={{ run.http_status }}</span>
         <span>parse={% if run.parse_ok %}ok{% else %}fail{% endif %}</span>
-        {% if run.planner_executed is not none %}<span>planner={% if run.planner_executed %}yes{% else %}no{% endif %}</span>{% endif %}
-        {% if run.planner_parse_ok is not none %}<span>planner_parse={% if run.planner_parse_ok %}ok{% else %}fail{% endif %}</span>{% endif %}
+        <span>guard={{ run.guard_reason or "-" }}</span>
+        <span>fallback={{ run.guard_used_fallback }}</span>
+        <span>final={{ run.final_primitive or "-" }}</span>
         <span>latency={{ run.latency_ms }}ms</span>
       </li>
     {% endfor %}

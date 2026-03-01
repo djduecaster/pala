@@ -108,9 +108,9 @@ PACKS: Dict[str, SignalPack] = {
         sources=("timeline_log", "memory_log", "journal", "actions_log", "behavior_env_log", "behavior_planner_log", "behavior_reasoning_log", "behavior_trace_log"),
         journal_filters=(r"(cosmos|reasoning|probe|response|parse|fallback)",),
     ),
-    "behavior_v2_debug": SignalPack(
-        name="behavior_v2_debug",
-        description="BehaviorV2 environment/planner/reasoning traces with perception context.",
+    "behavior_v4_debug": SignalPack(
+        name="behavior_v4_debug",
+        description="Behavior V4 env/planner/guard traces with perception context.",
         sources=(
             "perception_log",
             "behavior_env_log",

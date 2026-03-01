@@ -5,9 +5,9 @@
 {% if result %}
   <h2>Run {{ result.run_id }}</h2>
   <p class="muted">UTC {{ result.created_at_utc }}</p>
-  <p class="muted">mode={{ result.mode or "env" }} chain_status={{ result.chain_status or "env_only" }}</p>
+  <p class="muted">mode={{ result.mode or "behavior_v4" }}</p>
 
-  <h3>Env Phase Stats</h3>
+  <h3>Run Stats</h3>
   <div class="stats">
     <div><strong>HTTP</strong> {{ result.response_meta.http_status }} {% if result.response_meta.http_ok %}(ok){% else %}(error){% endif %}</div>
     <div><strong>Latency</strong> {{ result.response_meta.latency_ms }} ms</div>
@@ -15,6 +15,8 @@
     <div><strong>Stage</strong> {{ result.parse_stage }}</div>
     <div><strong>Prompt Tokens</strong> {{ result.response_meta.prompt_tokens }}</div>
     <div><strong>Completion Tokens</strong> {{ result.response_meta.completion_tokens }}</div>
+    <div><strong>Guard Accepted</strong> {{ (result.guard_result or {}).accepted }}</div>
+    <div><strong>Guard Reason</strong> {{ (result.guard_result or {}).reason }}</div>
   </div>
 
   {% set images = result.inputs_manifest or result.images or [] %}
@@ -25,14 +27,14 @@
         <img src="{{ item.packet_image_url }}" alt="packet image {{ item.index }}" loading="lazy" />
         <div class="thumb-meta">
           <div>#{{ item.index }} {{ item.filename }}</div>
-          <div>{{ item.original_width }}x{{ item.original_height }}</div>
+          <div>{{ item.encoded_width }}x{{ item.encoded_height }} (orig {{ item.original_width }}x{{ item.original_height }})</div>
           <div>{{ item.jpeg_bytes }} bytes</div>
         </div>
       </article>
     {% endfor %}
   </div>
 
-  <h3>Env Packet View (Compact)</h3>
+  <h3>Packet View (Compact)</h3>
   <dl class="field-list">
     {% for row in result.packet_compact %}
       <dt>{{ row.label }}</dt>
@@ -40,7 +42,7 @@
     {% endfor %}
   </dl>
 
-  <h3>Env Packet View (Expanded)</h3>
+  <h3>Packet View (Expanded)</h3>
   {% for section in result.packet_expanded %}
     <h4>{{ section.title }}</h4>
     <dl class="field-list">
@@ -51,7 +53,10 @@
     </dl>
   {% endfor %}
 
-  <h3>Env Message Blocks</h3>
+  <h3>Request Payload (Redacted)</h3>
+  <pre>{{ result.request_payload_redacted | tojson(indent=2) }}</pre>
+
+  <h3>Message Blocks</h3>
   <table>
     <thead>
       <tr><th>#</th><th>Role</th><th>Type</th><th>Image Blocks</th><th>Text Blocks</th><th>Chars</th></tr>
@@ -70,13 +75,13 @@
     </tbody>
   </table>
 
-  <h3>Env Results</h3>
+  <h3>Model Results</h3>
   <div class="toggle-row">
-    <button type="button" onclick="ProbeUI.setResultView('env','parsed')">Parsed Output</button>
-    <button type="button" onclick="ProbeUI.setResultView('env','raw')">Raw Content</button>
+    <button type="button" onclick="ProbeUI.setResultView('v4','parsed')">Parsed Decision</button>
+    <button type="button" onclick="ProbeUI.setResultView('v4','raw')">Raw Content</button>
   </div>
 
-  <section id="env-result-view-parsed" class="result-view">
+  <section id="v4-result-view-parsed" class="result-view">
     {% if result.parsed_output %}
       <pre>{{ result.parsed_output | tojson(indent=2) }}</pre>
     {% else %}
@@ -84,7 +89,7 @@
     {% endif %}
   </section>
 
-  <section id="env-result-view-raw" class="result-view hidden">
+  <section id="v4-result-view-raw" class="result-view hidden">
     {% if result.raw_content %}
       <pre>{{ result.raw_content }}</pre>
     {% else %}
@@ -100,188 +105,91 @@
     <div class="error-banner">{{ result.parse_error }}</div>
   {% endif %}
 
-  {% if result.effective_inputs and result.effective_inputs.env and result.effective_inputs.env.response_format and result.effective_inputs.env.response_format.json_schema %}
-    <h3>Env Response JSON Schema</h3>
-    <pre>{{ result.effective_inputs.env.response_format.json_schema.schema | tojson(indent=2) }}</pre>
-  {% endif %}
+  <h3>Guard Result</h3>
+  <pre>{{ result.guard_result | tojson(indent=2) }}</pre>
 
-  {% if (result.mode or "env").startswith("env_planner") %}
-    {% set planner = result.planner_phase or {} %}
-    <h3>Planner Phase</h3>
-    {% if planner.executed %}
-      <div class="stats">
-        <div><strong>HTTP</strong> {{ planner.response_meta.http_status }} {% if planner.response_meta.http_ok %}(ok){% else %}(error){% endif %}</div>
-        <div><strong>Latency</strong> {{ planner.response_meta.latency_ms }} ms</div>
-        <div><strong>Parse</strong> {% if planner.parse_ok %}ok{% else %}fail{% endif %}</div>
-        <div><strong>Stage</strong> {{ planner.parse_stage }}</div>
-        <div><strong>Prompt Tokens</strong> {{ planner.response_meta.prompt_tokens }}</div>
-        <div><strong>Completion Tokens</strong> {{ planner.response_meta.completion_tokens }}</div>
-      </div>
+  <h3>Final Action</h3>
+  <pre>{{ result.final_action | tojson(indent=2) }}</pre>
 
-      <h4>Planner Packet View (Compact)</h4>
-      <dl class="field-list">
-        {% for row in planner.packet_compact %}
-          <dt>{{ row.label }}</dt>
-          <dd>{{ row.value }}</dd>
-        {% endfor %}
-      </dl>
-
-      <h4>Planner Packet View (Expanded)</h4>
-      {% for section in planner.packet_expanded %}
-        <h5>{{ section.title }}</h5>
-        <dl class="field-list">
-          {% for row in section.rows %}
-            <dt>{{ row.label }}</dt>
-            <dd>{{ row.value }}</dd>
-          {% endfor %}
-        </dl>
-      {% endfor %}
-
-      <h4>Planner Request Packet (Redacted)</h4>
-      <pre>{{ planner.request_payload_redacted | tojson(indent=2) }}</pre>
-
-      <h4>Planner Message Blocks</h4>
-      <table>
-        <thead>
-          <tr><th>#</th><th>Role</th><th>Type</th><th>Image Blocks</th><th>Text Blocks</th><th>Chars</th></tr>
-        </thead>
-        <tbody>
-          {% for item in planner.message_structure %}
-            <tr>
-              <td>{{ item.index }}</td>
-              <td>{{ item.role }}</td>
-              <td>{{ item.content_type }}</td>
-              <td>{{ item.image_blocks or "-" }}</td>
-              <td>{{ item.text_blocks or "-" }}</td>
-              <td>{{ item.text_chars or item.chars or "-" }}</td>
-            </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-
-      <h4>Planner Results</h4>
-      <div class="toggle-row">
-        <button type="button" onclick="ProbeUI.setResultView('planner','parsed')">Parsed Output</button>
-        <button type="button" onclick="ProbeUI.setResultView('planner','raw')">Raw Content</button>
-      </div>
-
-      <section id="planner-result-view-parsed" class="result-view">
-        {% if planner.parsed_output %}
-          <pre>{{ planner.parsed_output | tojson(indent=2) }}</pre>
-        {% else %}
-          <div class="muted">No parsed output.</div>
-        {% endif %}
-      </section>
-
-      <section id="planner-result-view-raw" class="result-view hidden">
-        {% if planner.raw_content %}
-          <pre>{{ planner.raw_content }}</pre>
-        {% else %}
-          <div class="muted">No raw content returned.</div>
-        {% endif %}
-        {% if planner.reasoning_content %}
-          <h5>Reasoning Content</h5>
-          <pre>{{ planner.reasoning_content }}</pre>
-        {% endif %}
-      </section>
-
-      {% if planner.parse_error %}
-        <div class="error-banner">{{ planner.parse_error }}</div>
-      {% endif %}
-      {% if result.effective_inputs and result.effective_inputs.planner and not result.effective_inputs.planner.skipped and result.effective_inputs.planner.response_format and result.effective_inputs.planner.response_format.json_schema %}
-        <h4>Planner Response JSON Schema</h4>
-        <pre>{{ result.effective_inputs.planner.response_format.json_schema.schema | tojson(indent=2) }}</pre>
-      {% endif %}
-    {% else %}
-      <div class="error-banner">Planner step skipped: {{ planner.skip_reason or result.planner_skipped_reason or "unknown" }}</div>
-    {% endif %}
-  {% endif %}
+  <h3>FSM Snapshots</h3>
+  <details open>
+    <summary>FSM Before</summary>
+    <pre>{{ result.fsm_before | tojson(indent=2) }}</pre>
+  </details>
+  <details>
+    <summary>FSM After</summary>
+    <pre>{{ result.fsm_after | tojson(indent=2) }}</pre>
+  </details>
 
   {% if result.effective_inputs %}
     <h3>Effective Inputs</h3>
-
-    {% if result.effective_inputs.env %}
-      <h4>Env Effective Inputs</h4>
-      <details open>
-        <summary>Target</summary>
-        <pre>{{ result.effective_inputs.env.target | tojson(indent=2) }}</pre>
-      </details>
-      <details>
-        <summary>Knobs</summary>
-        <pre>{{ result.effective_inputs.env.knobs | tojson(indent=2) }}</pre>
-      </details>
-      <details>
-        <summary>Prompt Fields</summary>
-        <pre>{{ result.effective_inputs.env.prompt_fields | tojson(indent=2) }}</pre>
-      </details>
-      <details>
-        <summary>Context</summary>
-        <pre>{{ result.effective_inputs.env.context | tojson(indent=2) }}</pre>
-      </details>
-      <details>
-        <summary>Frame Timeline</summary>
-        <pre>{{ result.effective_inputs.env.frame_timeline | tojson(indent=2) }}</pre>
-      </details>
-      <details>
-        <summary>Images</summary>
-        <pre>{{ result.effective_inputs.env.images | tojson(indent=2) }}</pre>
-      </details>
-      <details>
-        <summary>Response Format</summary>
-        <pre>{{ result.effective_inputs.env.response_format | tojson(indent=2) }}</pre>
-      </details>
-      <details>
-        <summary>Message Structure</summary>
-        <pre>{{ result.effective_inputs.env.message_structure | tojson(indent=2) }}</pre>
-      </details>
-      <details>
-        <summary>Request Payload (Redacted)</summary>
-        <pre>{{ result.effective_inputs.env.request_payload_redacted | tojson(indent=2) }}</pre>
-      </details>
-    {% endif %}
-
-    {% if result.effective_inputs.planner %}
-      <h4>Planner Effective Inputs</h4>
-      {% if result.effective_inputs.planner.skipped %}
-        <div class="muted">Planner inputs not built: {{ result.effective_inputs.planner.reason }}</div>
-      {% else %}
-        <details open>
-          <summary>Target</summary>
-          <pre>{{ result.effective_inputs.planner.target | tojson(indent=2) }}</pre>
-        </details>
-        <details>
-          <summary>Knobs</summary>
-          <pre>{{ result.effective_inputs.planner.knobs | tojson(indent=2) }}</pre>
-        </details>
-        <details>
-          <summary>Prompt Fields</summary>
-          <pre>{{ result.effective_inputs.planner.prompt_fields | tojson(indent=2) }}</pre>
-        </details>
-        <details>
-          <summary>Context</summary>
-          <pre>{{ result.effective_inputs.planner.context | tojson(indent=2) }}</pre>
-        </details>
-        <details>
-          <summary>Images</summary>
-          <pre>{{ result.effective_inputs.planner.images | tojson(indent=2) }}</pre>
-        </details>
-        <details>
-          <summary>Response Format</summary>
-          <pre>{{ result.effective_inputs.planner.response_format | tojson(indent=2) }}</pre>
-        </details>
-        <details>
-          <summary>Message Structure</summary>
-          <pre>{{ result.effective_inputs.planner.message_structure | tojson(indent=2) }}</pre>
-        </details>
-        <details>
-          <summary>Request Payload (Redacted)</summary>
-          <pre>{{ result.effective_inputs.planner.request_payload_redacted | tojson(indent=2) }}</pre>
-        </details>
-      {% endif %}
-    {% endif %}
+    <details open>
+      <summary>Target</summary>
+      <pre>{{ result.effective_inputs.target | tojson(indent=2) }}</pre>
+    </details>
+    <details>
+      <summary>Knobs</summary>
+      <pre>{{ result.effective_inputs.knobs | tojson(indent=2) }}</pre>
+    </details>
+    <details>
+      <summary>Policy Fields</summary>
+      <pre>{{ result.effective_inputs.policy_fields | tojson(indent=2) }}</pre>
+    </details>
+    <details>
+      <summary>Context Default</summary>
+      <pre>{{ result.effective_inputs.context_default | tojson(indent=2) }}</pre>
+    </details>
+    <details>
+      <summary>Context Effective</summary>
+      <pre>{{ result.effective_inputs.context_effective | tojson(indent=2) }}</pre>
+    </details>
+    <details>
+      <summary>User Text Default</summary>
+      <pre>{{ result.effective_inputs.user_text_default | tojson(indent=2) }}</pre>
+    </details>
+    <details>
+      <summary>User Text Effective</summary>
+      <pre>{{ result.effective_inputs.user_text_effective | tojson(indent=2) }}</pre>
+    </details>
+    <details>
+      <summary>Payload Default (Redacted)</summary>
+      <pre>{{ result.effective_inputs.payload_default | tojson(indent=2) }}</pre>
+    </details>
+    <details>
+      <summary>Payload Effective (Redacted)</summary>
+      <pre>{{ result.effective_inputs.payload_effective | tojson(indent=2) }}</pre>
+    </details>
+    <details>
+      <summary>Overrides</summary>
+      <pre>{{ result.effective_inputs.overrides | tojson(indent=2) }}</pre>
+    </details>
+    <details>
+      <summary>Response Format</summary>
+      <pre>{{ result.effective_inputs.response_format | tojson(indent=2) }}</pre>
+    </details>
+    <details>
+      <summary>Message Structure</summary>
+      <pre>{{ result.effective_inputs.message_structure | tojson(indent=2) }}</pre>
+    </details>
+    <details>
+      <summary>Request Payload (Redacted)</summary>
+      <pre>{{ result.effective_inputs.request_payload_redacted | tojson(indent=2) }}</pre>
+    </details>
+    <details>
+      <summary>Frame Timeline</summary>
+      <pre>{{ result.effective_inputs.frame_timeline | tojson(indent=2) }}</pre>
+    </details>
+    <details>
+      <summary>Images</summary>
+      <pre>{{ result.effective_inputs.images | tojson(indent=2) }}</pre>
+    </details>
+    <details>
+      <summary>Mode Transition Applied</summary>
+      <pre>{{ result.effective_inputs.mode_transition_applied | tojson(indent=2) }}</pre>
+    </details>
   {% endif %}
 
 {% else %}
   <h2>Results</h2>
-  <p class="muted">Run a probe to view packet fields, full effective input context, and output diagnostics.</p>
+  <p class="muted">Run a V4 probe to inspect full packet fields, parser diagnostics, guard outcomes, and committed action.</p>
 {% endif %}

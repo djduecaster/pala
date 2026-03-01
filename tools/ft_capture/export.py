@@ -36,7 +36,7 @@ def _is_usable_labeled_take(record: TakeRecord) -> bool:
     return (
         str(label.get("status", "")).strip().lower() == "labeled"
         and str(label.get("quality_flag", "")).strip().lower() == "usable"
-        and isinstance(label.get("expected_action"), dict)
+        and isinstance(label.get("expected_decision"), dict)
     )
 
 
@@ -58,7 +58,7 @@ def _build_user_text(record: TakeRecord, sampled_frames: List[str], split: str) 
         f"- split: {split}\n"
         f"- sampled_frames: {len(sampled_frames)}\n"
         f"- operator_rationale: {rationale}\n"
-        "Use the visual evidence to produce the canonical expected action JSON."
+        "Use the visual evidence to produce the canonical expected behavior decision JSON."
     )
 
 
@@ -74,16 +74,16 @@ def _openai_row(record: TakeRecord, *, split: str) -> Dict[str, Any]:
             }
         )
 
-    expected_action = dict(record.label.get("expected_action") or {})
-    assistant_payload = json.dumps(expected_action, ensure_ascii=True, separators=(",", ":"))
+    expected_decision = dict(record.label.get("expected_decision") or {})
+    assistant_payload = json.dumps(expected_decision, ensure_ascii=True, separators=(",", ":"))
 
     return {
         "messages": [
             {
                 "role": "system",
                 "content": (
-                    "You are the PALA intent proposer ground-truth model. "
-                    "Return exactly one canonical action JSON with intent, primitive, command, style, confidence."
+                    "You are the PALA behavior planner ground-truth model. "
+                    "Return exactly one canonical JSON object matching schema pala.behavior_decision.v1."
                 ),
             },
             {"role": "user", "content": user_content},
@@ -114,7 +114,7 @@ def _index_row(record: TakeRecord, *, split: str) -> Dict[str, Any]:
         "clip_path": record.clip_path,
         "sampled_frames_dir": record.sampled_frames_dir,
         "label_path": record.label_path,
-        "expected_action": record.label.get("expected_action"),
+        "expected_decision": record.label.get("expected_decision"),
         "rationale_text": record.label.get("rationale_text"),
     }
 

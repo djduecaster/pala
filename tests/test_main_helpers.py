@@ -13,6 +13,7 @@ from pala.config.load import (
     RobotConfig,
 )
 import pala.main as pala_main
+from pala.behavior.policy_v4 import BehaviorPolicyV4Config
 from pala.types import HardwareCommand
 
 
@@ -100,3 +101,28 @@ def test_init_run_log_dir_honors_env_flags(monkeypatch, tmp_path):
     out = pala_main._init_run_log_dir(cfg)
     assert out == str(tmp_path / "run_123")
     assert (tmp_path / "run_123").exists()
+
+
+def test_build_behavior_config_returns_v4_config():
+    cfg = _cfg(mode="jetson_full", detector="deepstream", cosmos_enabled=True)
+    cfg.cosmos.mode_return_home_settle_s = 1.7
+    cfg.cosmos.mode_recover_settle_s = 1.3
+    cfg.cosmos.mode_boot_timeout_s = 8.4
+    cfg.cosmos.action_guard_stale_after_s = 5.5
+    cfg.cosmos.action_guard_orient_cooldown_s = 2.1
+    cfg.cosmos.action_guard_glance_cooldown_s = 3.2
+    cfg.cosmos.action_guard_nod_cooldown_s = 4.4
+    cfg.cosmos.action_guard_home_cooldown_s = 5.6
+    out = pala_main._build_behavior_config(cfg, run_log_dir=None)
+    assert isinstance(out, BehaviorPolicyV4Config)
+    assert out.remote_enabled is True
+    assert out.model == cfg.cosmos.model
+    assert out.startup_wake_enabled is True
+    assert out.mode_fsm.return_home_settle_s == pytest.approx(1.7)
+    assert out.mode_fsm.recover_settle_s == pytest.approx(1.3)
+    assert out.mode_fsm.boot_timeout_s == pytest.approx(8.4)
+    assert out.action_guard.stale_after_s == pytest.approx(5.5)
+    assert out.action_guard.cooldowns_s["orient_to_zone"] == pytest.approx(2.1)
+    assert out.action_guard.cooldowns_s["glance"] == pytest.approx(3.2)
+    assert out.action_guard.cooldowns_s["nod"] == pytest.approx(4.4)
+    assert out.action_guard.cooldowns_s["home"] == pytest.approx(5.6)

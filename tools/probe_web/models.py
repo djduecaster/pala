@@ -10,70 +10,55 @@ class ProbeDefaults:
     model: str
     base_url: str
     system_prompt: str
-    env_contract: str
+    timeout_s: float
+    max_tokens: int
+    temperature: float
+    top_p: float
+    presence_penalty: float
+    frame_max_width: int
+    frame_jpeg_quality: int
     policy_identity: str
     policy_capabilities: str
     policy_safety: str
     policy_style: str
-    timeout_s: float
-    env_max_tokens: int
-    temperature: float
-    top_p: float
-    presence_penalty: float
     planner_prompt: str
-    planner_max_proposals: int
-    planner_use_env_context: bool
-    planner_max_tokens: int
-    planner_temperature: float
-    planner_top_p: float
-    planner_presence_penalty: float
-    planner_system_prompt: str
-    planner_image_indices: str
-    planner_context_override_json: str
-    planner_user_text_override: str
-    planner_payload_override_json: str
-    planner_prompt_override: str
+    context_override_json: str
+    user_text_override: str
+    payload_override_json: str
     inter_frame_ms: float
     packet_view_mode: str
+    min_action_dwell_s: float
+    stale_after_s: float
+    min_mode_dwell_s: float
+    engage_person_conf: float
+    disengage_person_conf: float
     api_key_source: str
     has_api_key: bool
 
 
 @dataclass(frozen=True)
-class EnvProbeParams:
+class BehaviorProbeParams:
     provider: str
     model: str
     base_url: str
     system_prompt: str
-    env_contract: str
-    policy_identity: str
     timeout_s: float
-    env_max_tokens: int
+    max_tokens: int
     temperature: float
     top_p: float
     presence_penalty: float
-    planner_prompt_override: str
-    inter_frame_ms: float
-    packet_view_mode: str
-
-
-@dataclass(frozen=True)
-class EnvPlannerProbeParams(EnvProbeParams):
-    planner_prompt: str
+    frame_max_width: int
+    frame_jpeg_quality: int
+    policy_identity: str
     policy_capabilities: str
     policy_safety: str
     policy_style: str
-    planner_max_proposals: int
-    planner_use_env_context: bool
-    planner_max_tokens: int
-    planner_temperature: float
-    planner_top_p: float
-    planner_presence_penalty: float
-    planner_system_prompt: str
-    planner_image_indices: str
-    planner_context_override_json: str
-    planner_user_text_override: str
-    planner_payload_override_json: str
+    planner_prompt: str
+    context_override_json: str
+    user_text_override: str
+    payload_override_json: str
+    inter_frame_ms: float
+    packet_view_mode: str
 
 
 @dataclass(frozen=True)
@@ -89,13 +74,13 @@ class PreparedImage:
 
 
 @dataclass
-class EnvProbeRun:
+class BehaviorProbeRun:
     run_id: str
     created_at_utc: str
     params: Dict[str, Any]
     images: List[Dict[str, Any]]
-    packet_compact: Dict[str, Any]
-    packet_expanded: Dict[str, Any]
+    packet_compact: List[Dict[str, Any]]
+    packet_expanded: List[Dict[str, Any]]
     message_structure: List[Dict[str, Any]]
     request_payload_redacted: Dict[str, Any]
     response_meta: Dict[str, Any]
@@ -105,11 +90,12 @@ class EnvProbeRun:
     parse_stage: str
     parse_error: Optional[str]
     parsed_output: Optional[Dict[str, Any]]
-    mode: str = "env"
-    chain_status: str = "env_only"
-    planner_skipped_reason: Optional[str] = None
+    guard_result: Optional[Dict[str, Any]]
+    final_action: Optional[Dict[str, Any]]
+    mode: str = "behavior_v4"
     effective_inputs: Optional[Dict[str, Any]] = None
-    planner_phase: Optional[Dict[str, Any]] = None
+    fsm_before: Optional[Dict[str, Any]] = None
+    fsm_after: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

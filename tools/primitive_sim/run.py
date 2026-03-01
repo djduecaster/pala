@@ -29,8 +29,6 @@ from pala.types import (
     PrimitiveKind,
     to_json_dict,
 )
-from pala.behavior.idle_engine import IdleEngineConfig
-from pala.behavior.mode_manager import ModeManagerConfig
 from tools.primitive_sim.simulate import (
     CONTINUOUS_PRIMITIVES,
     SimSegment,
@@ -39,7 +37,6 @@ from tools.primitive_sim.simulate import (
     simulate_segments,
     write_trace_json,
 )
-from tools.primitive_sim.state_machine import LampStateMachineSimulator
 
 
 class _ReuseTCPServer(socketserver.TCPServer):
@@ -150,7 +147,7 @@ class _StudioContext:
     style_options: list[str]
     lamp_geometry: dict[str, float]
     dh_params: dict[str, float]
-    fsm_sim: LampStateMachineSimulator
+    fsm_sim: Any
     experiments_path: Path
     lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -722,59 +719,15 @@ def _load_viewer_geometry_from_config(config_path: Path) -> dict[str, float]:
     return _load_viewer_geometry_from_raw(raw)
 
 
-def _extract_state_machine_overrides(raw: Mapping[str, Any]) -> dict[str, float]:
-    candidates: list[Any] = []
-
-    section = raw.get("state_machine")
-    if isinstance(section, Mapping):
-        candidates.append(section)
-
-    primitive_sim = raw.get("primitive_sim")
-    if isinstance(primitive_sim, Mapping):
-        nested = primitive_sim.get("state_machine")
-        if isinstance(nested, Mapping):
-            candidates.append(nested)
-
-    tools = raw.get("tools")
-    if isinstance(tools, Mapping):
-        tools_ps = tools.get("primitive_sim")
-        if isinstance(tools_ps, Mapping):
-            nested = tools_ps.get("state_machine")
-            if isinstance(nested, Mapping):
-                candidates.append(nested)
-
-    source = next((item for item in candidates if isinstance(item, Mapping)), None)
-    if not isinstance(source, Mapping):
-        return {}
-
-    out: dict[str, float] = {}
-    for key in ("novelty_for_ack", "activity_for_scan"):
-        val = source.get(key)
-        if val is None:
-            continue
-        try:
-            out[key] = float(val)
-        except Exception:
-            continue
-    return out
-
-
-def _build_state_machine_simulator(cfg: Any, raw_config: Mapping[str, Any]) -> LampStateMachineSimulator:
-    cosmos = getattr(cfg, "cosmos", None)
-    overrides = _extract_state_machine_overrides(raw_config)
-
-    mode_cfg = ModeManagerConfig(
-        min_mode_dwell_s=max(0.0, float(getattr(cosmos, "mode_min_dwell_s", 1.0))),
-        engage_person_conf=max(0.0, min(1.0, float(getattr(cosmos, "mode_engage_person_conf", 0.45)))),
-        disengage_person_conf=max(0.0, min(1.0, float(getattr(cosmos, "mode_disengage_person_conf", 0.20)))),
-        novelty_for_ack=max(0.0, min(1.0, float(overrides.get("novelty_for_ack", 0.45)))),
-        activity_for_scan=max(0.0, min(1.0, float(overrides.get("activity_for_scan", 0.30)))),
-    )
-    idle_cfg = IdleEngineConfig(
-        idle_after_s=max(0.0, float(getattr(cosmos, "idle_after_s", 6.0))),
-        glance_after_s=max(0.0, float(getattr(cosmos, "idle_glance_after_s", 10.0))),
-    )
-    return LampStateMachineSimulator.create(mode_config=mode_cfg, idle_config=idle_cfg)
+def _build_state_machine_simulator(cfg: Any, raw_config: Mapping[str, Any]) -> Any:
+    try:
+        from tools.primitive_sim.state_machine import create_state_machine_simulator
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(
+            "primitive_sim state_machine mode failed to load. "
+            "Check tools/primitive_sim/state_machine.py for import/runtime errors."
+        ) from exc
+    return create_state_machine_simulator(cfg=cfg, raw_config=raw_config)
 
 
 def _default_joint_angles(cfg: Any) -> list[float]:
@@ -1310,6 +1263,10 @@ class _StudioRequestHandler(http.server.SimpleHTTPRequestHandler):
             self._handle_state_machine_step(payload)
             return
 
+        if parsed.path == "/api/state_machine/force":
+            self._handle_state_machine_force(payload)
+            return
+
         if parsed.path == "/api/scenario/simulate":
             self._handle_scenario_simulate(payload)
             return
@@ -1504,6 +1461,52 @@ class _StudioRequestHandler(http.server.SimpleHTTPRequestHandler):
                 zone_hint=zone_hint,
                 commit=commit,
             )
+        _json_response(self, 200, result)
+
+    def _handle_state_machine_force(self, payload: Mapping[str, Any]) -> None:
+        mode_raw = payload.get("mode")
+        if mode_raw is None:
+            _json_error(
+                self,
+                400,
+                code="invalid_mode",
+                error="mode is required",
+                details={"field": "mode"},
+            )
+            return
+        reason = str(payload.get("reason") or "force_mode").strip() or "force_mode"
+        dt_s = _coerce_float(payload.get("dt_s"), 0.0)
+        commit = _coerce_bool(payload.get("commit"), False)
+        zone_hint = payload.get("zone_hint")
+        signals_raw = payload.get("signals")
+        if signals_raw is not None and not isinstance(signals_raw, Mapping):
+            _json_error(
+                self,
+                400,
+                code="invalid_signals",
+                error="signals must be an object when provided",
+                details={"field": "signals"},
+            )
+            return
+        with self.studio.lock:
+            try:
+                result = self.studio.fsm_sim.force_mode(
+                    next_mode=mode_raw,
+                    reason=reason,
+                    dt_s=dt_s,
+                    signals=signals_raw if isinstance(signals_raw, Mapping) else None,
+                    zone_hint=zone_hint,
+                    commit=commit,
+                )
+            except ValueError as exc:
+                _json_error(
+                    self,
+                    400,
+                    code="invalid_mode",
+                    error=str(exc),
+                    details={"field": "mode"},
+                )
+                return
         _json_response(self, 200, result)
 
     def _handle_scenario_simulate(self, payload: Mapping[str, Any]) -> None:

@@ -8,9 +8,10 @@ from typing import Any, Dict, List, Mapping
 
 import yaml
 
-from .schema import scenario_id_is_valid
+from .schema import decision_to_dict, scenario_id_is_valid, validate_expected_decision
 
 _ALLOWED_SPLITS = ("train", "val", "test")
+_ALLOWED_LABEL_TEMPLATE_KEYS = {"expected_decision", "rationale_text", "notes"}
 
 
 @dataclass(frozen=True)
@@ -80,6 +81,29 @@ def _normalize_split_ratio(raw: Any, path: str) -> Dict[str, float]:
     return {name: values[name] / total for name in _ALLOWED_SPLITS}
 
 
+def _normalize_label_template(raw: Mapping[str, Any], path: str) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+
+    unknown = [str(key) for key in raw.keys() if str(key) not in _ALLOWED_LABEL_TEMPLATE_KEYS]
+    if unknown:
+        _fail(path, f"unknown keys: {sorted(unknown)}")
+
+    if "expected_decision" in raw:
+        decision_raw = raw.get("expected_decision")
+        if not isinstance(decision_raw, Mapping):
+            _fail(f"{path}.expected_decision", "expected object")
+        decision = validate_expected_decision(decision_raw)
+        out["expected_decision"] = decision_to_dict(decision)
+
+    if "rationale_text" in raw:
+        out["rationale_text"] = " ".join(str(raw.get("rationale_text") or "").split()).strip()
+
+    if "notes" in raw:
+        out["notes"] = str(raw.get("notes") or "").strip()
+
+    return out
+
+
 def load_catalog(path: str) -> ScenarioCatalog:
     path_obj = Path(path)
     if not path_obj.exists():
@@ -140,7 +164,12 @@ def load_catalog(path: str) -> ScenarioCatalog:
         label_template_raw = raw.get("label_template", {})
         if not isinstance(label_template_raw, Mapping):
             _fail(f"{base_path}.label_template", "expected mapping")
-        label_template = {str(k): label_template_raw[k] for k in label_template_raw.keys()}
+        if "expected_action" in label_template_raw:
+            _fail(
+                f"{base_path}.label_template.expected_action",
+                "deprecated; use label_template.expected_decision",
+            )
+        label_template = _normalize_label_template(label_template_raw, f"{base_path}.label_template")
 
         scenarios[sid] = ScenarioDefinition(
             scenario_id=sid,

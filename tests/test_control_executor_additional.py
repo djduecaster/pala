@@ -10,6 +10,7 @@ from pala.control.primitives import (
     HomeCommand,
     MoveToCommand,
     NodCommand,
+    ScanSweepCommand,
     PrimitiveKind,
 )
 from pala.types import ActionPlan
@@ -193,3 +194,39 @@ def test_glance_target_up_and_down_update_pitch_axis():
     )
     assert up[4] < 0.0
     assert down[4] > 0.0
+
+
+def test_scan_sweep_completes_with_auto_waypoints(monkeypatch):
+    now = {"t": 500.0}
+    monkeypatch.setattr("pala.control.executor.time.monotonic", lambda: now["t"])
+
+    limits = [
+        [-1.57, 1.57],
+        [-1.0, 1.0],
+        [-1.0, 1.0],
+        [-1.0, 1.0],
+        [-1.0, 1.0],
+    ]
+    executor = TrajectoryExecutor(limits)
+    action = ActionPlan(
+        primitive=PrimitiveKind.SCAN_SWEEP,
+        command=ScanSweepCommand(
+            positions=0,
+            camera_hfov_deg=70.42,
+            overlap=0.2,
+            dwell_s=0.0,
+            rate_rad_s=20.0,
+            edge_margin_rad=0.0,
+            return_to_center=False,
+            timeout_s=4.0,
+        ),
+        confidence=1.0,
+    )
+
+    for _ in range(200):
+        executor.step(action, dt=0.02)
+        if executor.control_state.status == ExecutionStatus.DONE:
+            break
+        now["t"] += 0.02
+
+    assert executor.control_state.status == ExecutionStatus.DONE

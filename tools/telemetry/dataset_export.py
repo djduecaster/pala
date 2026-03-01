@@ -9,6 +9,7 @@ from .annotations import annotation_key, load_annotations
 from .labels import load_labels_jsonl
 from .schema_v3 import DATASET_MANIFEST_PATH, DATASET_ROWS_PATH, TELEMETRY_SCHEMA_VERSION_V3, WEAK_LABELS_PATH
 from .storage_sqlite import resolve_session_db_path
+from .mode_health_fsm import ModeHealthFSM, ingest_mode_event
 
 
 _REQUIRED_DB_TABLES = {"cases", "case_events", "case_labels", "case_reviews", "reasoning_traces"}
@@ -28,6 +29,8 @@ _REQUIRED_ROW_KEYS = (
     "env_context",
     "planner_context",
     "arbiter_context",
+    "mode_context",
+    "mode_fsm_state",
     "perception_context",
     "video_context",
 )
@@ -51,6 +54,19 @@ def _as_text(value: Any) -> str:
     if value is None:
         return ""
     return str(value)
+
+
+def _as_boolish(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(int(value))
+    text = str(value or "").strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off", ""}:
+        return False
+    return bool(text)
 
 
 def _load_manifest(session_dir: str) -> Optional[Dict[str, Any]]:
@@ -242,6 +258,23 @@ def _load_case_event_context_map(conn: sqlite3.Connection) -> Dict[str, List[Dic
             rt.model AS rt_model,
             rt.provider AS rt_provider,
             rt.delta_score AS rt_delta_score,
+            rt.mode AS rt_mode,
+            rt.active_skill AS rt_active_skill,
+            rt.guard_accepted AS rt_guard_accepted,
+            rt.guard_fallback AS rt_guard_fallback,
+            rt.guard_reason AS rt_guard_reason,
+            rt.guard_skill AS rt_guard_skill,
+            rt.guard_primitive AS rt_guard_primitive,
+            rt.planner_enabled AS rt_planner_enabled,
+            rt.planner_inflight AS rt_planner_inflight,
+            rt.planner_pending AS rt_planner_pending,
+            rt.planner_last_parse_stage AS rt_planner_last_parse_stage,
+            rt.planner_last_error AS rt_planner_last_error,
+            rt.planner_next_allowed_in_s AS rt_planner_next_allowed_in_s,
+            rt.mode_transition_from AS rt_mode_transition_from,
+            rt.mode_transition_to AS rt_mode_transition_to,
+            rt.mode_transition_reason AS rt_mode_transition_reason,
+            rt.mode_transitioned AS rt_mode_transitioned,
             rt.perception_person_conf AS rt_perception_person_conf,
             rt.perception_zone_hint AS rt_perception_zone_hint,
             rt.perception_frame_id AS rt_perception_frame_id,
@@ -271,6 +304,9 @@ def _is_failure_label(name: str) -> bool:
         "reasoning_error",
         "trace_failure",
         "hard_case",
+        "planner_transport_error",
+        "guard_fallback",
+        "mode_transition_churn",
     }
 
 
@@ -294,6 +330,16 @@ def _case_is_hard_case(case_row: Mapping[str, Any], labels: Sequence[Mapping[str
     return False
 
 
+def _has_case_label(rows: Sequence[Mapping[str, Any]], name: str) -> bool:
+    target = str(name or "").strip().lower()
+    if not target:
+        return False
+    for item in rows:
+        if str(item.get("label") or "").strip().lower() == target:
+            return True
+    return False
+
+
 def _inclusion_reasons(
     case_row: Mapping[str, Any],
     *,
@@ -308,6 +354,12 @@ def _inclusion_reasons(
         reasons.append("annotation")
     if any(_is_failure_label(str(item.get("label") or "")) for item in weak_labels):
         reasons.append("weak_label")
+    if _has_case_label(case_labels, "planner_transport_error"):
+        reasons.append("planner_failure")
+    if _has_case_label(case_labels, "guard_fallback"):
+        reasons.append("guard_fallback")
+    if _has_case_label(case_labels, "mode_transition_churn"):
+        reasons.append("transition_instability")
     if not reasons:
         reasons.append("baseline")
     return reasons
@@ -321,7 +373,7 @@ def _profile_allows_case(*, profile: str, reviewed: bool, reasons: Sequence[str]
     if name == "hard_cases":
         if include_unlabeled:
             return True
-        return bool(reason_set & {"hard_case", "annotation", "weak_label"})
+        return bool(reason_set & {"hard_case", "annotation", "weak_label", "planner_failure", "guard_fallback", "transition_instability"})
     return True
 
 
@@ -394,6 +446,23 @@ def _event_context_item(raw: Mapping[str, Any]) -> Dict[str, Any]:
         "model": _as_text(raw.get("rt_model")),
         "provider": _as_text(raw.get("rt_provider")),
         "delta_score": _as_float(raw.get("rt_delta_score")),
+        "mode": _as_text(raw.get("rt_mode")),
+        "active_skill": _as_text(raw.get("rt_active_skill")),
+        "guard_accepted": _as_int(raw.get("rt_guard_accepted")),
+        "guard_fallback": _as_int(raw.get("rt_guard_fallback")),
+        "guard_reason": _as_text(raw.get("rt_guard_reason")),
+        "guard_skill": _as_text(raw.get("rt_guard_skill")),
+        "guard_primitive": _as_text(raw.get("rt_guard_primitive")),
+        "planner_enabled": _as_int(raw.get("rt_planner_enabled")),
+        "planner_inflight": _as_int(raw.get("rt_planner_inflight")),
+        "planner_pending": _as_int(raw.get("rt_planner_pending")),
+        "planner_last_parse_stage": _as_text(raw.get("rt_planner_last_parse_stage")),
+        "planner_last_error": _as_text(raw.get("rt_planner_last_error")),
+        "planner_next_allowed_in_s": _as_float(raw.get("rt_planner_next_allowed_in_s")),
+        "mode_transition_from": _as_text(raw.get("rt_mode_transition_from")),
+        "mode_transition_to": _as_text(raw.get("rt_mode_transition_to")),
+        "mode_transition_reason": _as_text(raw.get("rt_mode_transition_reason")),
+        "mode_transitioned": _as_int(raw.get("rt_mode_transitioned")),
         "perception_person_conf": _as_float(raw.get("rt_perception_person_conf")),
         "perception_zone_hint": _as_text(raw.get("rt_perception_zone_hint")),
         "perception_frame_id": _as_int(raw.get("rt_perception_frame_id")),
@@ -421,6 +490,23 @@ def _compress_context_event(item: Mapping[str, Any]) -> Dict[str, Any]:
         "confidence": item.get("confidence"),
         "target_zone": item.get("target_zone"),
         "delta_score": item.get("delta_score"),
+        "mode": item.get("mode"),
+        "active_skill": item.get("active_skill"),
+        "guard_accepted": item.get("guard_accepted"),
+        "guard_fallback": item.get("guard_fallback"),
+        "guard_reason": item.get("guard_reason"),
+        "guard_skill": item.get("guard_skill"),
+        "guard_primitive": item.get("guard_primitive"),
+        "planner_enabled": item.get("planner_enabled"),
+        "planner_inflight": item.get("planner_inflight"),
+        "planner_pending": item.get("planner_pending"),
+        "planner_last_parse_stage": item.get("planner_last_parse_stage"),
+        "planner_last_error": item.get("planner_last_error"),
+        "planner_next_allowed_in_s": item.get("planner_next_allowed_in_s"),
+        "mode_transition_from": item.get("mode_transition_from"),
+        "mode_transition_to": item.get("mode_transition_to"),
+        "mode_transition_reason": item.get("mode_transition_reason"),
+        "mode_transitioned": item.get("mode_transitioned"),
         "model": item.get("model"),
         "provider": item.get("provider"),
     }
@@ -460,13 +546,55 @@ def _build_contexts(case_events: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
                     }
                 )
 
+    mode_context: Dict[str, Any] = {}
+    for item in reversed(case_events):
+        mode = str(item.get("mode") or "").strip()
+        skill = str(item.get("active_skill") or "").strip()
+        trans_from = str(item.get("mode_transition_from") or "").strip()
+        trans_to = str(item.get("mode_transition_to") or "").strip()
+        if mode or skill or trans_from or trans_to:
+            mode_context = {
+                "mode": mode,
+                "active_skill": skill,
+                "transition_from": trans_from,
+                "transition_to": trans_to,
+                "transition_reason": item.get("mode_transition_reason"),
+                "transitioned": item.get("mode_transitioned"),
+            }
+            break
+
     return {
         "reasoning_context": reasoning_context,
         "env_context": latest_by_component.get("env_processor", {}),
-        "planner_context": latest_by_component.get("planner", {}),
+        "planner_context": latest_by_component.get("planner_v4", latest_by_component.get("planner", {})),
         "arbiter_context": latest_by_component.get("arbiter", {}),
+        "mode_context": mode_context,
         "perception_context": perception_context,
         "video_context": {"frames": video_frames},
+    }
+
+
+
+def _mode_health_for_case(case_events: Sequence[Mapping[str, Any]]) -> Dict[str, Any]:
+    fsm = ModeHealthFSM()
+    saw = False
+    for item in case_events:
+        if not isinstance(item, Mapping):
+            continue
+        mode = str(item.get("mode") or "").strip()
+        transitioned = _as_boolish(item.get("mode_transitioned"))
+        reason = str(item.get("mode_transition_reason") or "").strip()
+        planner_error = str(item.get("planner_last_error") or "").strip()
+        guard_fallback = _as_boolish(item.get("guard_fallback"))
+        if (not mode) and (not transitioned) and (not reason) and (not planner_error) and (not guard_fallback):
+            continue
+        ingest_mode_event(fsm, item)
+        saw = True
+    snapshot = fsm.last_snapshot
+    state = snapshot.state if saw else "unknown"
+    return {
+        "state": state,
+        "transition_reason_counts": fsm.transition_reason_counts(),
     }
 
 
@@ -505,12 +633,15 @@ def _validate_case_export_row_contract(row: Mapping[str, Any]) -> List[str]:
     case_id = str(row.get("case_id") or "").strip()
     trace_id = str(row.get("trace_id") or "").strip()
     source = str(row.get("source") or "").strip()
+    mode_fsm_state = str(row.get("mode_fsm_state") or "").strip()
     if not case_id:
         errors.append("empty_case_id")
     if not trace_id:
         errors.append("empty_trace_id")
     if source != "sqlite.cases.v4":
         errors.append(f"bad_source:{source}")
+    if not mode_fsm_state:
+        errors.append("empty_mode_fsm_state")
     reasons = row.get("inclusion_reasons")
     if not isinstance(reasons, list) or (not reasons):
         errors.append("bad_inclusion_reasons")
@@ -579,11 +710,19 @@ def export_dataset_rows(
     severity_counts: Dict[str, int] = {}
     annotation_tag_counts: Dict[str, int] = {}
     inclusion_reason_counts: Dict[str, int] = {}
+    planner_parse_stage_counts: Dict[str, int] = {}
+    guard_reason_counts: Dict[str, int] = {}
+    mode_transition_to_counts: Dict[str, int] = {}
+    mode_fsm_state_counts: Dict[str, int] = {}
+    mode_transition_reason_counts: Dict[str, int] = {}
 
     annotation_count = 0
     annotated_row_count = 0
     labeled_row_count = 0
     hard_case_row_count = 0
+    planner_failure_row_count = 0
+    guard_fallback_row_count = 0
+    transition_instability_row_count = 0
     reviewed_row_count = 0
 
     for case_row in case_rows:
@@ -627,6 +766,9 @@ def export_dataset_rows(
             continue
 
         contexts = _build_contexts(case_events)
+        mode_health = _mode_health_for_case(case_events)
+        mode_fsm_state = str(mode_health.get("state") or "unknown").strip().lower() or "unknown"
+        transition_reason_counts = mode_health.get("transition_reason_counts") if isinstance(mode_health.get("transition_reason_counts"), dict) else {}
         provenance = {
             "event_indices": sorted(set(event_indices)),
             "row_ids": sorted(set(row_ids)),
@@ -669,6 +811,8 @@ def export_dataset_rows(
             "env_context": contexts["env_context"],
             "planner_context": contexts["planner_context"],
             "arbiter_context": contexts["arbiter_context"],
+            "mode_context": contexts["mode_context"],
+            "mode_fsm_state": mode_fsm_state,
             "perception_context": contexts["perception_context"],
             "video_context": contexts["video_context"],
         }
@@ -678,6 +822,19 @@ def export_dataset_rows(
             raise ValueError(f"dataset row contract failed for {case_id}: {', '.join(row_errors)}")
 
         rows.append(row)
+
+        mode_fsm_state_counts[mode_fsm_state] = mode_fsm_state_counts.get(mode_fsm_state, 0) + 1
+        for reason_name, reason_count in transition_reason_counts.items():
+            name = str(reason_name or "").strip().lower()
+            if not name:
+                continue
+            try:
+                count_value = int(reason_count)
+            except (TypeError, ValueError):
+                continue
+            if count_value <= 0:
+                continue
+            mode_transition_reason_counts[name] = mode_transition_reason_counts.get(name, 0) + count_value
 
         if reviewed:
             reviewed_row_count += 1
@@ -693,6 +850,12 @@ def export_dataset_rows(
             labeled_row_count += 1
         if "hard_case" in reasons:
             hard_case_row_count += 1
+        if "planner_failure" in reasons:
+            planner_failure_row_count += 1
+        if "guard_fallback" in reasons:
+            guard_fallback_row_count += 1
+        if "transition_instability" in reasons:
+            transition_instability_row_count += 1
         for reason in reasons:
             inclusion_reason_counts[reason] = inclusion_reason_counts.get(reason, 0) + 1
 
@@ -715,6 +878,15 @@ def export_dataset_rows(
                 source_counts[src] = source_counts.get(src, 0) + 1
             if phs:
                 phase_counts[phs] = phase_counts.get(phs, 0) + 1
+            parse_stage = str(item.get("planner_last_parse_stage") or "").strip().lower()
+            guard_reason = str(item.get("guard_reason") or "").strip().lower()
+            transition_to = str(item.get("mode_transition_to") or "").strip().lower()
+            if parse_stage:
+                planner_parse_stage_counts[parse_stage] = planner_parse_stage_counts.get(parse_stage, 0) + 1
+            if guard_reason:
+                guard_reason_counts[guard_reason] = guard_reason_counts.get(guard_reason, 0) + 1
+            if transition_to:
+                mode_transition_to_counts[transition_to] = mode_transition_to_counts.get(transition_to, 0) + 1
 
         for item in case_labels:
             name = str(item.get("label") or "").strip().lower()
@@ -759,10 +931,21 @@ def export_dataset_rows(
             "annotated_row_count": annotated_row_count,
             "labeled_row_count": labeled_row_count,
             "hard_case_row_count": hard_case_row_count,
+            "planner_failure_row_count": planner_failure_row_count,
+            "guard_fallback_row_count": guard_fallback_row_count,
+            "transition_instability_row_count": transition_instability_row_count,
             "annotation_coverage_ratio": _safe_ratio(annotated_row_count, len(rows)),
             "label_coverage_ratio": _safe_ratio(labeled_row_count, len(rows)),
             "hard_case_ratio": _safe_ratio(hard_case_row_count, len(rows)),
+            "planner_failure_ratio": _safe_ratio(planner_failure_row_count, len(rows)),
+            "guard_fallback_ratio": _safe_ratio(guard_fallback_row_count, len(rows)),
+            "transition_instability_ratio": _safe_ratio(transition_instability_row_count, len(rows)),
             "inclusion_reason_counts": inclusion_reason_counts,
+            "planner_parse_stage_counts": planner_parse_stage_counts,
+            "guard_reason_counts": guard_reason_counts,
+            "mode_transition_to_counts": mode_transition_to_counts,
+            "mode_fsm_state_counts": mode_fsm_state_counts,
+            "mode_transition_reason_counts": mode_transition_reason_counts,
             "annotation_tag_counts": annotation_tag_counts,
             "session_annotation_tag_counts": session_annotation_tag_counts,
             "min_label_confidence": threshold,

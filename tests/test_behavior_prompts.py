@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import json
 
-from pala.behavior.prompts import SYSTEM_PROMPT, build_env_user_text, build_messages, build_planner_user_text
+from pala.behavior.prompts import (
+    SYSTEM_PROMPT,
+    behavior_v4_mode_guidance,
+    build_env_user_text,
+    build_messages,
+    build_planner_user_text,
+)
 
 
 def test_build_env_user_text_requires_json_contract():
@@ -59,3 +65,9 @@ def test_build_messages_orders_media_before_text():
     assert user[1]["type"] == "image_url"
     assert user[2]["type"] == "text"
     assert user[2]["text"] == "hello"
+
+
+def test_behavior_v4_mode_guidance_includes_mode_and_skill_focus():
+    lines = behavior_v4_mode_guidance("search_assist", "expressive_search")
+    assert any("SEARCH_ASSIST" in line for line in lines)
+    assert any("Current skill focus: expressive_search." == line for line in lines)

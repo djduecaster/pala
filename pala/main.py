@@ -15,7 +15,7 @@ from .perception import PerceptionNode, LatestFrameCache
 from .perception.preview_tap import PreviewTapWriter
 from .perception.detector import DummyDetector, JetsonDetector, DeepStreamDetector
 from .perception.frame_source import DummyFrameSource, CameraFrameSource
-from .behavior import BehaviorPolicy, BehaviorPolicyConfig
+from .behavior import ActionGuardConfig, BehaviorPolicyV4 as BehaviorPolicy, BehaviorPolicyV4Config, ModeFsmV4Config
 from .control import TrajectoryExecutor
 from .control.primitives import PrimitiveKind, HoldCommand
 from .hardware import DummyServo, PCA9685Servo, ServoCalibration
@@ -451,7 +451,7 @@ def _build_preview_extra(cfg, cmd: Optional[HardwareCommand]) -> Optional[Dict[s
     }
 
 
-def _latest_env_summary(behavior: BehaviorPolicy) -> Optional[str]:
+def _latest_env_summary(behavior: object) -> Optional[str]:
     world_state = getattr(behavior, "world_state", None)
     if world_state is None or not hasattr(world_state, "snapshot"):
         return None
@@ -510,10 +510,10 @@ def _scope_log_path(path: Optional[str], run_log_dir: Optional[str]) -> Optional
     return os.path.join(run_log_dir, filename)
 
 
-def _build_behavior_config(cfg, *, run_log_dir: Optional[str] = None) -> BehaviorPolicyConfig:
+def _build_behavior_config(cfg, *, run_log_dir: Optional[str] = None) -> BehaviorPolicyV4Config:
     cosmos = getattr(cfg, "cosmos", None)
     if cosmos is None:
-        return BehaviorPolicyConfig(remote_enabled=False)
+        return BehaviorPolicyV4Config(remote_enabled=False)
 
     base_url = os.getenv("PALA_COSMOS_BASE_URL") or cosmos.base_url
     api_key = os.getenv("PALA_COSMOS_API_KEY")
@@ -527,10 +527,6 @@ def _build_behavior_config(cfg, *, run_log_dir: Optional[str] = None) -> Behavio
     model = os.getenv("PALA_COSMOS_MODEL") or cosmos.model
     planner_prompt = os.getenv("PALA_COSMOS_PROMPT") or cosmos.planner_prompt
 
-    env_log_path = _scope_log_path(
-        str(getattr(cosmos, "behavior_env_log_path", "logs/behavior_env.jsonl")),
-        run_log_dir,
-    )
     planner_log_path = _scope_log_path(
         str(getattr(cosmos, "behavior_planner_log_path", "logs/behavior_planner.jsonl")),
         run_log_dir,
@@ -543,21 +539,10 @@ def _build_behavior_config(cfg, *, run_log_dir: Optional[str] = None) -> Behavio
         str(getattr(cosmos, "behavior_trace_log_path", "logs/behavior_trace.jsonl")),
         run_log_dir,
     )
-    remote_enabled = bool(cosmos.enabled)
-    idle_after_cfg = float(getattr(cosmos, "idle_after_s", 6.0))
-    idle_glance_after_cfg = float(getattr(cosmos, "idle_glance_after_s", 10.0))
-    arbiter_margin_cfg = float(getattr(cosmos, "arbiter_base_margin", 0.10))
-    if not remote_enabled:
-        idle_after_cfg = 0.0
-        idle_glance_after_cfg = 0.8
-        arbiter_margin_cfg = 0.05
-
     planner_hz_cfg = float(getattr(cosmos, "planner_hz", 0.5))
-    base_ttl_s = max(0.2, float(getattr(cosmos, "response_ttl_ms", 10000)) / 1000.0)
-    # Keep proposals fresh relative to planner cadence; avoid long stale windows.
-    min_ttl_s = max(1.5, 1.5 * (1.0 / max(0.05, planner_hz_cfg)))
+    remote_enabled = bool(cosmos.enabled)
 
-    return BehaviorPolicyConfig(
+    return BehaviorPolicyV4Config(
         remote_enabled=remote_enabled,
         base_url=None if base_url in (None, "") else str(base_url),
         remote_provider=provider_token,
@@ -566,28 +551,12 @@ def _build_behavior_config(cfg, *, run_log_dir: Optional[str] = None) -> Behavio
         request_timeout_ms=int(getattr(cosmos, "request_timeout_ms", 6000)),
         error_backoff_s=float(getattr(cosmos, "behavior_error_backoff_s", 1.5)),
         client_error_backoff_s=float(getattr(cosmos, "behavior_client_error_backoff_s", 5.0)),
-        env_hz=float(getattr(cosmos, "summarizer_hz", 0.10)),
         planner_hz=planner_hz_cfg,
-        planner_event_delta_threshold=float(getattr(cosmos, "planner_event_delta_threshold", 0.65)),
-        planner_event_cooldown_s=float(getattr(cosmos, "planner_event_cooldown_s", 0.7)),
         max_frame_age_ms=int(getattr(cosmos, "max_frame_age_ms", 500)),
-        frame_window_s=float(getattr(cosmos, "summary_window_s", 6.0)),
-        env_max_frames=int(getattr(cosmos, "summary_max_frames", 1)),
-        planner_max_frames=int(getattr(cosmos, "planner_max_frames", 1)),
         frame_max_width=int(getattr(cosmos, "summary_max_width", 320)),
         frame_jpeg_quality=int(getattr(cosmos, "summary_jpeg_quality", 55)),
-        request_min_fresh_frames=int(getattr(cosmos, "request_min_fresh_frames", 1)),
         planner_include_latest_frame=bool(getattr(cosmos, "planner_include_latest_frame", True)),
-        env_max_tokens=int(getattr(cosmos, "env_max_tokens", 1000)),
         planner_max_tokens=int(getattr(cosmos, "planner_max_tokens", 1000)),
-        proposer_max_age_s=max(base_ttl_s, min_ttl_s),
-        planner_max_proposals=int(getattr(cosmos, "planner_max_proposals", 3)),
-        planner_use_env_context=bool(getattr(cosmos, "planner_use_env_context", True)),
-        arbiter_min_dwell_s=float(getattr(cosmos, "arbiter_min_dwell_s", 1.2)),
-        arbiter_base_margin=arbiter_margin_cfg,
-        arbiter_orient_cooldown_s=float(getattr(cosmos, "arbiter_orient_cooldown_s", 1.2)),
-        idle_after_s=idle_after_cfg,
-        idle_glance_after_s=idle_glance_after_cfg,
         startup_wake_enabled=bool(getattr(cosmos, "startup_wake_enabled", True)),
         startup_wake_left_s=float(getattr(cosmos, "startup_wake_left_s", 0.35)),
         startup_wake_right_s=float(getattr(cosmos, "startup_wake_right_s", 0.35)),
@@ -595,25 +564,37 @@ def _build_behavior_config(cfg, *, run_log_dir: Optional[str] = None) -> Behavio
         startup_wake_settle_s=float(getattr(cosmos, "startup_wake_settle_s", 0.70)),
         startup_wake_rate_rad_s=float(getattr(cosmos, "startup_wake_rate_rad_s", 1.8)),
         startup_wake_yaw_rad=float(getattr(cosmos, "startup_wake_yaw_rad", 0.16)),
-        startup_wake_roll_rad=float(getattr(cosmos, "startup_wake_roll_rad", 0.10)),
-        startup_wake_pitch2_rad=float(getattr(cosmos, "startup_wake_pitch2_rad", 0.12)),
-        startup_observe_yaw_rad=float(getattr(cosmos, "startup_observe_yaw_rad", 0.0)),
-        startup_observe_pitch2_rad=float(getattr(cosmos, "startup_observe_pitch2_rad", -0.18)),
+        startup_min_s=float(getattr(cosmos, "startup_wake_left_s", 0.35))
+        + float(getattr(cosmos, "startup_wake_right_s", 0.35))
+        + float(getattr(cosmos, "startup_wake_loop_s", 0.45))
+        + float(getattr(cosmos, "startup_wake_settle_s", 0.70)),
         startup_person_conf_fast_exit=float(getattr(cosmos, "startup_person_conf_fast_exit", 0.60)),
-        mode_min_dwell_s=float(getattr(cosmos, "mode_min_dwell_s", 1.0)),
-        mode_engage_person_conf=float(getattr(cosmos, "mode_engage_person_conf", 0.45)),
-        mode_disengage_person_conf=float(getattr(cosmos, "mode_disengage_person_conf", 0.20)),
-        stale_penalty_per_s=float(getattr(cosmos, "stale_penalty_per_s", 0.05)),
-        stale_expire_s=float(getattr(cosmos, "stale_expire_s", 14.0)),
         policy_identity=str(getattr(cosmos, "policy_identity", "You are PALA.")),
         policy_capabilities=str(getattr(cosmos, "policy_capabilities", "")),
         policy_safety=str(getattr(cosmos, "policy_safety", "")),
         policy_style=str(getattr(cosmos, "policy_style", "")),
         planner_prompt=str(planner_prompt),
-        env_log_path=env_log_path,
         planner_log_path=planner_log_path,
         reasoning_log_path=reasoning_log_path,
         trace_log_path=trace_log_path,
+        mode_fsm=ModeFsmV4Config(
+            min_mode_dwell_s=float(getattr(cosmos, "mode_min_dwell_s", 1.0)),
+            engage_person_conf=float(getattr(cosmos, "mode_engage_person_conf", 0.45)),
+            disengage_person_conf=float(getattr(cosmos, "mode_disengage_person_conf", 0.20)),
+            boot_timeout_s=float(getattr(cosmos, "mode_boot_timeout_s", 6.7)),
+            return_home_settle_s=float(getattr(cosmos, "mode_return_home_settle_s", 1.2)),
+            recover_settle_s=float(getattr(cosmos, "mode_recover_settle_s", 1.0)),
+        ),
+        action_guard=ActionGuardConfig(
+            min_action_dwell_s=float(getattr(cosmos, "arbiter_min_dwell_s", 1.2)),
+            stale_after_s=float(getattr(cosmos, "action_guard_stale_after_s", getattr(cosmos, "stale_expire_s", 7.0))),
+            cooldowns_s={
+                "orient_to_zone": float(getattr(cosmos, "action_guard_orient_cooldown_s", getattr(cosmos, "arbiter_orient_cooldown_s", 1.2))),
+                "glance": float(getattr(cosmos, "action_guard_glance_cooldown_s", getattr(cosmos, "idle_glance_after_s", 3.0))),
+                "nod": float(getattr(cosmos, "action_guard_nod_cooldown_s", 4.0)),
+                "home": float(getattr(cosmos, "action_guard_home_cooldown_s", 4.0)),
+            },
+        ),
     )
 
 

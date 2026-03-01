@@ -173,6 +173,23 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
             model TEXT,
             provider TEXT,
             delta_score REAL,
+            mode TEXT,
+            active_skill TEXT,
+            guard_accepted INTEGER,
+            guard_fallback INTEGER,
+            guard_reason TEXT,
+            guard_skill TEXT,
+            guard_primitive TEXT,
+            planner_enabled INTEGER,
+            planner_inflight INTEGER,
+            planner_pending INTEGER,
+            planner_last_parse_stage TEXT,
+            planner_last_error TEXT,
+            planner_next_allowed_in_s REAL,
+            mode_transition_from TEXT,
+            mode_transition_to TEXT,
+            mode_transition_reason TEXT,
+            mode_transitioned INTEGER,
             snippet TEXT,
             input_preview TEXT,
             output_preview TEXT,
@@ -189,6 +206,10 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         CREATE INDEX IF NOT EXISTS idx_reasoning_traces_trace ON reasoning_traces(trace_id);
         CREATE INDEX IF NOT EXISTS idx_reasoning_traces_req ON reasoning_traces(req_id);
         CREATE INDEX IF NOT EXISTS idx_reasoning_traces_comp ON reasoning_traces(component);
+        CREATE INDEX IF NOT EXISTS idx_reasoning_traces_mode ON reasoning_traces(mode);
+        CREATE INDEX IF NOT EXISTS idx_reasoning_traces_skill ON reasoning_traces(active_skill);
+        CREATE INDEX IF NOT EXISTS idx_reasoning_traces_guard ON reasoning_traces(guard_accepted, guard_fallback);
+        CREATE INDEX IF NOT EXISTS idx_reasoning_traces_parse_stage ON reasoning_traces(planner_last_parse_stage);
         CREATE INDEX IF NOT EXISTS idx_reasoning_traces_ts ON reasoning_traces(ts_wall_s);
 
         CREATE TABLE IF NOT EXISTS cases (
@@ -312,14 +333,18 @@ def _severity_rank(value: str) -> int:
 def _status_rank(value: str) -> int:
     status = _normalize_status(value)
     if "parse_fail" in status:
-        return 6
+        return 8
+    if "planner_error" in status:
+        return 7
     if "timeout" in status:
+        return 6
+    if "fallback" in status:
         return 5
     if "error" in status or "fail" in status:
         return 4
     if "warning" in status:
         return 3
-    if status in {"ok", "success"}:
+    if status in {"committed", "ok", "success"}:
         return 2
     return 1
 
@@ -344,6 +369,9 @@ def _compute_hardness(
     error_count: int,
     warning_count: int,
     max_latency_ms: Optional[float],
+    planner_failure_count: int,
+    guard_fallback_count: int,
+    transition_count: int,
 ) -> float:
     score = 0.0
     status_norm = _normalize_status(status)
@@ -370,6 +398,10 @@ def _compute_hardness(
             score += 0.08
     score += min(0.12, max(0, int(error_count)) * 0.03)
     score += min(0.06, max(0, int(warning_count)) * 0.015)
+    score += min(0.20, max(0, int(planner_failure_count)) * 0.05)
+    score += min(0.16, max(0, int(guard_fallback_count)) * 0.04)
+    if int(transition_count) >= 3:
+        score += min(0.10, 0.02 * float(int(transition_count)))
     return round(max(0.0, min(1.0, score)), 3)
 
 
@@ -378,6 +410,9 @@ def _case_labels(
     status: str,
     severity: str,
     hardness: float,
+    planner_failure_count: int,
+    guard_fallback_count: int,
+    transition_count: int,
 ) -> List[Tuple[str, float, str]]:
     labels: List[Tuple[str, float, str]] = []
     norm_status = _normalize_status(status)
@@ -386,8 +421,14 @@ def _case_labels(
         labels.append(("planner_parse_fail", 0.99, f"status={norm_status}"))
     if "timeout" in norm_status:
         labels.append(("planner_timeout", 0.96, f"status={norm_status}"))
+    if norm_status == "planner_error" or planner_failure_count > 0:
+        labels.append(("planner_transport_error", 0.90, f"planner_failures={int(planner_failure_count)}"))
     if norm_severity == "error":
         labels.append(("reasoning_error", 0.84, f"severity={norm_severity}"))
+    if guard_fallback_count > 0:
+        labels.append(("guard_fallback", min(1.0, 0.70 + (0.05 * min(5, int(guard_fallback_count)))), f"fallbacks={int(guard_fallback_count)}"))
+    if transition_count >= 3:
+        labels.append(("mode_transition_churn", min(1.0, 0.65 + (0.03 * min(10, int(transition_count)))), f"transitions={int(transition_count)}"))
     if hardness >= 0.70:
         labels.append(("hard_case", max(0.7, min(1.0, hardness)), f"hardness={hardness:.3f}"))
     return labels
@@ -443,6 +484,14 @@ def _build_cases(
         max_latency_ms = max(latencies) if latencies else None
         error_count = sum(1 for row in rows if _as_text(row.get("severity")).lower() == "error")
         warning_count = sum(1 for row in rows if _as_text(row.get("severity")).lower() == "warning")
+        planner_failure_count = sum(
+            1
+            for row in rows
+            if (_as_text(row.get("status")).lower() in {"parse_fail", "timeout", "planner_error", "error"})
+            or bool(_as_text(row.get("planner_last_error")))
+        )
+        guard_fallback_count = sum(1 for row in rows if (_as_int(row.get("guard_fallback")) or 0) > 0)
+        transition_count = sum(1 for row in rows if (_as_int(row.get("mode_transitioned")) or 0) > 0)
         summary = _as_text(trace.summary) if trace is not None else ""
         if not summary:
             summary = _as_text(rows[-1].get("snippet"))
@@ -454,6 +503,9 @@ def _build_cases(
             error_count=error_count,
             warning_count=warning_count,
             max_latency_ms=max_latency_ms,
+            planner_failure_count=planner_failure_count,
+            guard_fallback_count=guard_fallback_count,
+            transition_count=transition_count,
         )
 
         case_rows.append(
@@ -496,7 +548,14 @@ def _build_cases(
                 )
             )
 
-        for label, score, reason in _case_labels(status=status, severity=severity, hardness=hardness):
+        for label, score, reason in _case_labels(
+            status=status,
+            severity=severity,
+            hardness=hardness,
+            planner_failure_count=planner_failure_count,
+            guard_fallback_count=guard_fallback_count,
+            transition_count=transition_count,
+        ):
             case_label_rows.append((case_id, label, score, reason))
 
     return case_rows, case_event_rows, case_label_rows
@@ -655,11 +714,14 @@ def build_session_db(
                 """
                 INSERT INTO reasoning_traces (
                     row_id, event_index, trace_id, req_id, component, source, ts_wall_s, phase, status, severity,
-                    latency_ms, primitive, confidence, target_zone, model, provider, delta_score, snippet,
-                    input_preview, output_preview, perception_ts_wall_s, perception_person_conf, perception_zone_hint,
-                    perception_frame_id, video_frame_event_index, video_frame_id, video_frame_ref, video_frame_width,
-                    video_frame_height
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    latency_ms, primitive, confidence, target_zone, model, provider, delta_score, mode, active_skill,
+                    guard_accepted, guard_fallback, guard_reason, guard_skill, guard_primitive, planner_enabled,
+                    planner_inflight, planner_pending, planner_last_parse_stage, planner_last_error,
+                    planner_next_allowed_in_s, mode_transition_from, mode_transition_to, mode_transition_reason,
+                    mode_transitioned, snippet, input_preview, output_preview, perception_ts_wall_s,
+                    perception_person_conf, perception_zone_hint, perception_frame_id, video_frame_event_index,
+                    video_frame_id, video_frame_ref, video_frame_width, video_frame_height
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 [
                     (
@@ -680,6 +742,23 @@ def build_session_db(
                         _as_text(row.get("model")),
                         _as_text(row.get("provider")),
                         _as_float(row.get("delta_score")),
+                        _as_text(row.get("mode")),
+                        _as_text(row.get("active_skill")),
+                        _as_int(row.get("guard_accepted")),
+                        _as_int(row.get("guard_fallback")),
+                        _as_text(row.get("guard_reason")),
+                        _as_text(row.get("guard_skill")),
+                        _as_text(row.get("guard_primitive")),
+                        _as_int(row.get("planner_enabled")),
+                        _as_int(row.get("planner_inflight")),
+                        _as_int(row.get("planner_pending")),
+                        _as_text(row.get("planner_last_parse_stage")),
+                        _as_text(row.get("planner_last_error")),
+                        _as_float(row.get("planner_next_allowed_in_s")),
+                        _as_text(row.get("mode_transition_from")),
+                        _as_text(row.get("mode_transition_to")),
+                        _as_text(row.get("mode_transition_reason")),
+                        _as_int(row.get("mode_transitioned")),
                         _as_text(row.get("snippet")),
                         _as_text(row.get("input_preview")),
                         _as_text(row.get("output_preview")),
@@ -786,6 +865,15 @@ def _parse_query_tokens(query: str) -> Dict[str, List[str]]:
         "req": [],
         "trace": [],
         "component": [],
+        "mode": [],
+        "skill": [],
+        "guard": [],
+        "guard_reason": [],
+        "parse_stage": [],
+        "planner_error": [],
+        "transition_from": [],
+        "transition_to": [],
+        "transitioned": [],
         "kind": [],
         "latency_ms": [],
         "duration_ms": [],
@@ -905,6 +993,38 @@ def _append_or_like(clauses: List[str], params: List[Any], column: str, values: 
     params.extend([f"%{v}%" for v in clean])
 
 
+def _append_guard_filters(clauses: List[str], values: Sequence[str]) -> None:
+    clean = [str(v).strip().lower() for v in values if str(v).strip()]
+    if not clean:
+        return
+    parts: List[str] = []
+    for value in clean:
+        if value == "accepted":
+            parts.append("COALESCE(guard_accepted, 0) = 1")
+        elif value == "fallback":
+            parts.append("COALESCE(guard_fallback, 0) = 1")
+        elif value == "rejected":
+            parts.append("COALESCE(guard_accepted, 0) = 0 AND COALESCE(guard_fallback, 0) = 0")
+        elif value == "unknown":
+            parts.append("guard_accepted IS NULL")
+    if parts:
+        clauses.append("(" + " OR ".join(parts) + ")")
+
+
+def _append_transitioned_filters(clauses: List[str], values: Sequence[str]) -> None:
+    clean = [str(v).strip().lower() for v in values if str(v).strip()]
+    if not clean:
+        return
+    parts: List[str] = []
+    for value in clean:
+        if value in {"1", "true", "yes", "on"}:
+            parts.append("COALESCE(mode_transitioned, 0) = 1")
+        elif value in {"0", "false", "no", "off"}:
+            parts.append("COALESCE(mode_transitioned, 0) = 0")
+    if parts:
+        clauses.append("(" + " OR ".join(parts) + ")")
+
+
 def query_session_db(
     path: str,
     *,
@@ -990,6 +1110,15 @@ def query_session_db(
     _append_or_equals(joined_clauses, joined_params, "status", groups["status"])
     _append_or_equals(joined_clauses, joined_params, "phase", groups["phase"])
     _append_or_equals(joined_clauses, joined_params, "component", groups["component"])
+    _append_or_equals(joined_clauses, joined_params, "mode", groups["mode"])
+    _append_or_equals(joined_clauses, joined_params, "active_skill", groups["skill"])
+    _append_or_equals(joined_clauses, joined_params, "planner_last_parse_stage", groups["parse_stage"])
+    _append_or_like(joined_clauses, joined_params, "planner_last_error", groups["planner_error"])
+    _append_or_like(joined_clauses, joined_params, "guard_reason", groups["guard_reason"])
+    _append_or_equals(joined_clauses, joined_params, "mode_transition_from", groups["transition_from"])
+    _append_or_equals(joined_clauses, joined_params, "mode_transition_to", groups["transition_to"])
+    _append_transitioned_filters(joined_clauses, groups["transitioned"])
+    _append_guard_filters(joined_clauses, groups["guard"])
     _append_numeric_filters(joined_clauses, joined_params, column="latency_ms", filters=groups["latency_ms"])
     _append_ts_range(joined_clauses, joined_params, column="ts_wall_s", filters=groups["ts"])
     for value in groups["trace"]:
@@ -1001,9 +1130,11 @@ def query_session_db(
             joined_clauses.append("req_id = ?")
             joined_params.append(req_value)
     for value in groups["text"]:
-        joined_clauses.append("(snippet LIKE ? OR input_preview LIKE ? OR output_preview LIKE ?)")
+        joined_clauses.append(
+            "(snippet LIKE ? OR input_preview LIKE ? OR output_preview LIKE ? OR planner_last_error LIKE ? OR guard_reason LIKE ?)"
+        )
         like = f"%{value}%"
-        joined_params.extend([like, like, like])
+        joined_params.extend([like, like, like, like, like])
 
     where_events = f"WHERE {' AND '.join(event_clauses)}" if event_clauses else ""
     where_traces = f"WHERE {' AND '.join(trace_clauses)}" if trace_clauses else ""
@@ -1108,9 +1239,12 @@ def query_session_db(
                 dict(row)
                 for row in conn.execute(
                     f"SELECT row_id, event_index, trace_id, req_id, component, source, ts_wall_s, phase, status, "
-                    f"severity, latency_ms, primitive, confidence, target_zone, model, provider, delta_score, snippet, "
-                    f"input_preview, output_preview, perception_person_conf, perception_zone_hint, perception_frame_id, "
-                    f"video_frame_id, video_frame_ref "
+                    f"severity, latency_ms, primitive, confidence, target_zone, model, provider, delta_score, mode, "
+                    f"active_skill, guard_accepted, guard_fallback, guard_reason, guard_skill, guard_primitive, "
+                    f"planner_enabled, planner_inflight, planner_pending, planner_last_parse_stage, planner_last_error, "
+                    f"planner_next_allowed_in_s, mode_transition_from, mode_transition_to, mode_transition_reason, "
+                    f"mode_transitioned, snippet, input_preview, output_preview, perception_person_conf, "
+                    f"perception_zone_hint, perception_frame_id, video_frame_id, video_frame_ref "
                     f"FROM reasoning_traces {where_joined} ORDER BY {order_joined} LIMIT ?",
                     (*joined_params, lim),
                 ).fetchall()
@@ -1286,6 +1420,23 @@ def query_case_detail_db(
                     rt.model,
                     rt.provider,
                     rt.delta_score,
+                    rt.mode,
+                    rt.active_skill,
+                    rt.guard_accepted,
+                    rt.guard_fallback,
+                    rt.guard_reason,
+                    rt.guard_skill,
+                    rt.guard_primitive,
+                    rt.planner_enabled,
+                    rt.planner_inflight,
+                    rt.planner_pending,
+                    rt.planner_last_parse_stage,
+                    rt.planner_last_error,
+                    rt.planner_next_allowed_in_s,
+                    rt.mode_transition_from,
+                    rt.mode_transition_to,
+                    rt.mode_transition_reason,
+                    rt.mode_transitioned,
                     rt.perception_person_conf,
                     rt.perception_zone_hint,
                     rt.perception_frame_id,
@@ -1310,6 +1461,7 @@ def query_case_detail_db(
         "env_context": {},
         "planner_context": {},
         "arbiter_context": {},
+        "mode_context": {},
         "perception_context": {},
         "video_context": {"frames": []},
     }
@@ -1336,6 +1488,23 @@ def query_case_detail_db(
                 "delta_score": item.get("delta_score"),
                 "model": item.get("model"),
                 "provider": item.get("provider"),
+                "mode": item.get("mode"),
+                "active_skill": item.get("active_skill"),
+                "guard_accepted": item.get("guard_accepted"),
+                "guard_fallback": item.get("guard_fallback"),
+                "guard_reason": item.get("guard_reason"),
+                "guard_skill": item.get("guard_skill"),
+                "guard_primitive": item.get("guard_primitive"),
+                "planner_enabled": item.get("planner_enabled"),
+                "planner_inflight": item.get("planner_inflight"),
+                "planner_pending": item.get("planner_pending"),
+                "planner_last_parse_stage": item.get("planner_last_parse_stage"),
+                "planner_last_error": item.get("planner_last_error"),
+                "planner_next_allowed_in_s": item.get("planner_next_allowed_in_s"),
+                "mode_transition_from": item.get("mode_transition_from"),
+                "mode_transition_to": item.get("mode_transition_to"),
+                "mode_transition_reason": item.get("mode_transition_reason"),
+                "mode_transitioned": item.get("mode_transitioned"),
             }
 
         if not contexts["perception_context"]:
@@ -1365,8 +1534,26 @@ def query_case_detail_db(
                 )
 
     contexts["env_context"] = latest_by_component.get("env_processor", {})
-    contexts["planner_context"] = latest_by_component.get("planner", {})
+    contexts["planner_context"] = latest_by_component.get("planner_v4", latest_by_component.get("planner", {}))
     contexts["arbiter_context"] = latest_by_component.get("arbiter", {})
+
+    for item in reversed(events):
+        if not isinstance(item, dict):
+            continue
+        mode = str(item.get("mode") or "").strip()
+        skill = str(item.get("active_skill") or "").strip()
+        trans_from = str(item.get("mode_transition_from") or "").strip()
+        trans_to = str(item.get("mode_transition_to") or "").strip()
+        if mode or skill or trans_from or trans_to:
+            contexts["mode_context"] = {
+                "mode": mode,
+                "active_skill": skill,
+                "transition_from": trans_from,
+                "transition_to": trans_to,
+                "transition_reason": item.get("mode_transition_reason"),
+                "transitioned": item.get("mode_transitioned"),
+            }
+            break
 
     return {
         "case": dict(case_row) if case_row is not None else None,

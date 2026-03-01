@@ -41,6 +41,12 @@ const autoRunMsInput = document.getElementById("autoRunMsInput");
 const compareToggle = document.getElementById("compareToggle");
 const compareModeSelect = document.getElementById("compareModeSelect");
 const runStateBadge = document.getElementById("runStateBadge");
+const paramFilterInput = document.getElementById("paramFilterInput");
+const zoomOutBtn = document.getElementById("zoomOutBtn");
+const zoomInBtn = document.getElementById("zoomInBtn");
+const orbitLeftBtn = document.getElementById("orbitLeftBtn");
+const orbitRightBtn = document.getElementById("orbitRightBtn");
+const resetViewBtn = document.getElementById("resetViewBtn");
 
 const state = {
   samples: [],
@@ -55,6 +61,7 @@ const state = {
   dtS: 1 / 60,
   lastFrameMs: null,
   cameraOrbit: 0.82,
+  cameraDistance: 2.85,
   drag: {
     active: false,
     lastX: 0,
@@ -85,6 +92,7 @@ const state = {
     baselineTrace: null,
     baselineSourceLabel: "",
     draftSourceLabel: "",
+    paramFilter: "",
   },
 };
 
@@ -264,6 +272,7 @@ function saveStudioPrefs() {
     auto_run_debounce_ms: Number(state.studio.autoRunDebounceMs),
     compare_enabled: Boolean(state.studio.compareEnabled),
     compare_mode: String(state.studio.compareMode || "overlay"),
+    param_filter: String(state.studio.paramFilter || ""),
     speed: Number(state.speed || 1),
   };
   try {
@@ -307,6 +316,10 @@ function applyStudioPrefs(meta) {
   }
   compareToggle.checked = state.studio.compareEnabled;
   compareModeSelect.value = state.studio.compareMode;
+  state.studio.paramFilter = String(prefs.param_filter || "").trim();
+  if (paramFilterInput) {
+    paramFilterInput.value = state.studio.paramFilter;
+  }
 
   const speed = Number(prefs.speed);
   state.speed = Number.isFinite(speed) && speed > 0 ? speed : Number(speedSelect.value || 1);
@@ -473,13 +486,36 @@ function resizeCanvas() {
 
 function makeCamera() {
   const orbit = state.cameraOrbit;
-  const camPos = [2.85 * Math.cos(orbit), 1.58, 2.85 * Math.sin(orbit)];
+  const dist = clamp(Number(state.cameraDistance), 1.8, 6.0);
+  const camPos = [dist * Math.cos(orbit), 1.58, dist * Math.sin(orbit)];
   const target = [0, 0.72, 0];
 
   const forward = norm(vecSub(target, camPos));
   const right = norm(cross(forward, [0, 1, 0]));
   const up = norm(cross(right, forward));
   return { camPos, forward, right, up };
+}
+
+function adjustCameraDistance(delta) {
+  state.cameraDistance = clamp(Number(state.cameraDistance) + Number(delta || 0), 1.8, 6.0);
+  if (state.samples.length) {
+    drawScene(state.samples[state.idx]);
+  }
+}
+
+function adjustCameraOrbit(delta) {
+  state.cameraOrbit += Number(delta || 0);
+  if (state.samples.length) {
+    drawScene(state.samples[state.idx]);
+  }
+}
+
+function resetCameraView() {
+  state.cameraOrbit = 0.82;
+  state.cameraDistance = 2.85;
+  if (state.samples.length) {
+    drawScene(state.samples[state.idx]);
+  }
 }
 
 function projectPoint(p, camera) {
@@ -1209,12 +1245,37 @@ function updateVectorDraft(name, idx, numeric, spec) {
   state.studio.commandDraft[name][idx] = next;
 }
 
+function makeNudgeButtons() {
+  const minusCoarse = document.createElement("button");
+  minusCoarse.type = "button";
+  minusCoarse.className = "step-btn";
+  minusCoarse.textContent = "--";
+
+  const minusFine = document.createElement("button");
+  minusFine.type = "button";
+  minusFine.className = "step-btn";
+  minusFine.textContent = "-";
+
+  const plusFine = document.createElement("button");
+  plusFine.type = "button";
+  plusFine.className = "step-btn";
+  plusFine.textContent = "+";
+
+  const plusCoarse = document.createElement("button");
+  plusCoarse.type = "button";
+  plusCoarse.className = "step-btn";
+  plusCoarse.textContent = "++";
+
+  return { minusCoarse, minusFine, plusFine, plusCoarse };
+}
+
 function renderParamForm() {
   paramForm.innerHTML = "";
   const spec = getSelectedSpec();
   if (!spec) {
     return;
   }
+  const filterToken = String(state.studio.paramFilter || "").trim().toLowerCase();
 
   if (!Array.isArray(spec.params) || spec.params.length === 0) {
     const empty = document.createElement("p");
@@ -1225,6 +1286,12 @@ function renderParamForm() {
   }
 
   spec.params.forEach((paramSpec) => {
+    const labelText = String(paramSpec.label || paramSpec.name || "");
+    const nameText = String(paramSpec.name || "");
+    if (filterToken && !labelText.toLowerCase().includes(filterToken) && !nameText.toLowerCase().includes(filterToken)) {
+      return;
+    }
+
     const item = document.createElement("div");
     item.className = "param-item";
 
@@ -1301,14 +1368,7 @@ function renderParamForm() {
         const input = createNumberInput(values[i], vectorSpec);
         const control = document.createElement("div");
         control.className = "param-control-row";
-        const minus = document.createElement("button");
-        minus.type = "button";
-        minus.className = "step-btn";
-        minus.textContent = "-";
-        const plus = document.createElement("button");
-        plus.type = "button";
-        plus.className = "step-btn";
-        plus.textContent = "+";
+        const nudges = makeNudgeButtons();
         const note = document.createElement("span");
         note.className = "param-value-note";
 
@@ -1335,24 +1395,40 @@ function renderParamForm() {
           setValue: (next) => applyValue(next),
           baseStep: stepValue,
         });
-        minus.addEventListener("click", (ev) => {
+        nudges.minusFine.addEventListener("click", (ev) => {
           const baseValue = Number(input.value);
           if (!Number.isFinite(baseValue)) {
             return;
           }
           applyValue(baseValue - scaledStep(stepValue, ev));
         });
-        plus.addEventListener("click", (ev) => {
+        nudges.minusCoarse.addEventListener("click", (ev) => {
+          const baseValue = Number(input.value);
+          if (!Number.isFinite(baseValue)) {
+            return;
+          }
+          applyValue(baseValue - (scaledStep(stepValue, ev) * 5));
+        });
+        nudges.plusFine.addEventListener("click", (ev) => {
           const baseValue = Number(input.value);
           if (!Number.isFinite(baseValue)) {
             return;
           }
           applyValue(baseValue + scaledStep(stepValue, ev));
         });
+        nudges.plusCoarse.addEventListener("click", (ev) => {
+          const baseValue = Number(input.value);
+          if (!Number.isFinite(baseValue)) {
+            return;
+          }
+          applyValue(baseValue + (scaledStep(stepValue, ev) * 5));
+        });
 
-        control.appendChild(minus);
+        control.appendChild(nudges.minusCoarse);
+        control.appendChild(nudges.minusFine);
         control.appendChild(input);
-        control.appendChild(plus);
+        control.appendChild(nudges.plusFine);
+        control.appendChild(nudges.plusCoarse);
         control.appendChild(note);
         note.textContent = `${(Number(values[i] || 0) * RAD_TO_DEG).toFixed(1)} deg`;
         row.appendChild(control);
@@ -1367,14 +1443,7 @@ function renderParamForm() {
     const numericInput = createNumberInput(currentValue, paramSpec);
     const controlRow = document.createElement("div");
     controlRow.className = "param-control-row";
-    const minus = document.createElement("button");
-    minus.type = "button";
-    minus.className = "step-btn";
-    minus.textContent = "-";
-    const plus = document.createElement("button");
-    plus.type = "button";
-    plus.className = "step-btn";
-    plus.textContent = "+";
+    const nudges = makeNudgeButtons();
     const note = document.createElement("span");
     note.className = "param-value-note";
 
@@ -1406,24 +1475,40 @@ function renderParamForm() {
       setValue: (next) => applyValue(next),
       baseStep: stepValue,
     });
-    minus.addEventListener("click", (ev) => {
+    nudges.minusFine.addEventListener("click", (ev) => {
       const baseValue = Number(numericInput.value);
       if (!Number.isFinite(baseValue)) {
         return;
       }
       applyValue(baseValue - scaledStep(stepValue, ev));
     });
-    plus.addEventListener("click", (ev) => {
+    nudges.minusCoarse.addEventListener("click", (ev) => {
+      const baseValue = Number(numericInput.value);
+      if (!Number.isFinite(baseValue)) {
+        return;
+      }
+      applyValue(baseValue - (scaledStep(stepValue, ev) * 5));
+    });
+    nudges.plusFine.addEventListener("click", (ev) => {
       const baseValue = Number(numericInput.value);
       if (!Number.isFinite(baseValue)) {
         return;
       }
       applyValue(baseValue + scaledStep(stepValue, ev));
     });
+    nudges.plusCoarse.addEventListener("click", (ev) => {
+      const baseValue = Number(numericInput.value);
+      if (!Number.isFinite(baseValue)) {
+        return;
+      }
+      applyValue(baseValue + (scaledStep(stepValue, ev) * 5));
+    });
 
-    controlRow.appendChild(minus);
+    controlRow.appendChild(nudges.minusCoarse);
+    controlRow.appendChild(nudges.minusFine);
     controlRow.appendChild(numericInput);
-    controlRow.appendChild(plus);
+    controlRow.appendChild(nudges.plusFine);
+    controlRow.appendChild(nudges.plusCoarse);
     controlRow.appendChild(note);
     if (isAngularParam(name)) {
       note.textContent = `${(Number(currentValue || 0) * RAD_TO_DEG).toFixed(1)} deg`;
@@ -1431,6 +1516,13 @@ function renderParamForm() {
     item.appendChild(controlRow);
     paramForm.appendChild(item);
   });
+
+  if (paramForm.childElementCount === 0) {
+    const empty = document.createElement("p");
+    empty.className = "muted";
+    empty.textContent = "No parameters match this filter.";
+    paramForm.appendChild(empty);
+  }
 }
 
 function buildStudioPayload(command) {
@@ -1718,6 +1810,30 @@ runSuiteBtn.addEventListener("click", () => {
   runSuitePlayback();
 });
 
+if (paramFilterInput) {
+  paramFilterInput.addEventListener("input", () => {
+    state.studio.paramFilter = String(paramFilterInput.value || "").trim();
+    renderParamForm();
+    saveStudioPrefs();
+  });
+}
+
+zoomOutBtn.addEventListener("click", () => {
+  adjustCameraDistance(0.18);
+});
+zoomInBtn.addEventListener("click", () => {
+  adjustCameraDistance(-0.18);
+});
+orbitLeftBtn.addEventListener("click", () => {
+  adjustCameraOrbit(0.1);
+});
+orbitRightBtn.addEventListener("click", () => {
+  adjustCameraOrbit(-0.1);
+});
+resetViewBtn.addEventListener("click", () => {
+  resetCameraView();
+});
+
 styleSelect.addEventListener("change", () => {
   if (!state.studio.enabled) {
     return;
@@ -1795,6 +1911,12 @@ canvas.addEventListener("pointermove", (ev) => {
   }
 });
 
+canvas.addEventListener("wheel", (ev) => {
+  const direction = ev.deltaY > 0 ? 1 : -1;
+  adjustCameraDistance(direction * 0.16);
+  ev.preventDefault();
+}, { passive: false });
+
 canvas.addEventListener("pointerup", (ev) => {
   state.drag.active = false;
   canvas.releasePointerCapture(ev.pointerId);
@@ -1844,6 +1966,27 @@ window.addEventListener("keydown", (ev) => {
   if (!mod && !ev.altKey && key === " ") {
     ev.preventDefault();
     playPause();
+    return;
+  }
+
+  if (key === "=" || key === "+") {
+    ev.preventDefault();
+    adjustCameraDistance(-0.18);
+    return;
+  }
+  if (key === "-" || key === "_") {
+    ev.preventDefault();
+    adjustCameraDistance(0.18);
+    return;
+  }
+  if (key === "[" && !editable) {
+    ev.preventDefault();
+    adjustCameraOrbit(0.1);
+    return;
+  }
+  if (key === "]" && !editable) {
+    ev.preventDefault();
+    adjustCameraOrbit(-0.1);
   }
 });
 

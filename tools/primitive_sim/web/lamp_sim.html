@@ -22,6 +22,21 @@
         </section>
 
         <section class="sidebar-group">
+          <h2>Operational Goal</h2>
+          <label for="opsGoalSelect">Current objective</label>
+          <div class="native-row">
+            <select id="opsGoalSelect">
+              <option value="tune_primitive">Tune Primitive</option>
+              <option value="build_scenario">Build Scenario</option>
+              <option value="validate_state_machine">Validate State Machine</option>
+              <option value="review_playback">Review Playback</option>
+            </select>
+            <button id="opsGoalBtn" type="button">Enter Goal</button>
+          </div>
+          <p id="opsGoalHint" class="muted-line">Goal: tune primitive params and save a stable baseline.</p>
+        </section>
+
+        <section class="sidebar-group">
           <h2>Modes</h2>
           <nav id="modeNav" class="mode-nav" aria-label="Lamp sim modes"></nav>
         </section>
@@ -40,6 +55,8 @@
           <h2>Shortcuts</h2>
           <p><kbd>1</kbd> <kbd>2</kbd> <kbd>3</kbd> <kbd>4</kbd> switch modes</p>
           <p><kbd>r</kbd> run suite playback</p>
+          <p><kbd>p</kbd> run current flow + playback</p>
+          <p><kbd>v</kbd> toggle focus viewer</p>
           <p><kbd>o</kbd> open current mode directly</p>
         </section>
       </aside>
@@ -50,10 +67,13 @@
             <p id="modeBadge" class="badge">Mode: loading</p>
             <h2 id="modeTitle">Loading...</h2>
             <p id="modeSummary">Preparing mode.</p>
+            <p id="nextActionHint" class="muted-line">Next action: loading...</p>
           </div>
           <div class="topbar-actions">
             <button id="modeActionBtn" type="button">Run Action</button>
-            <button id="runSuiteBtn" type="button">Run Suite Playback</button>
+            <button id="runAndPlaybackBtn" type="button">Run + Playback</button>
+            <button id="runSuiteBtn" type="button">Generate Playback</button>
+            <button id="focusViewerBtn" type="button">Focus Viewer</button>
             <button id="paletteBtn" type="button">Command Palette</button>
             <button id="openRawBtn" type="button">Open Raw Mode</button>
           </div>
@@ -72,8 +92,10 @@
                   <h3>FSM Controls</h3>
                   <div class="native-row">
                     <button id="fsmStepBtn" type="button">Step</button>
+                    <button id="fsmStep5Btn" type="button">Step x5</button>
                     <button id="fsmAutoBtn" type="button">Auto Run</button>
                     <button id="fsmResetBtn" type="button">Reset</button>
+                    <button id="fsmCopySnapshotBtn" type="button">Copy Snapshot</button>
                     <button id="fsmUseRecommendedBtn" type="button">Send Recommended To Scenario</button>
                     <label for="fsmDtInput">dt (s)</label>
                     <input id="fsmDtInput" type="number" min="0.05" max="10" step="0.05" value="0.35">
@@ -89,6 +111,36 @@
                       Commit
                     </label>
                   </div>
+                  <div class="native-row">
+                    <label for="fsmForceModeSelect">Force Mode</label>
+                    <select id="fsmForceModeSelect">
+                      <option value="">(none)</option>
+                      <option value="boot_awaken">boot_awaken</option>
+                      <option value="idle_presence">idle_presence</option>
+                      <option value="social_interact">social_interact</option>
+                      <option value="search_assist">search_assist</option>
+                      <option value="task_lighting">task_lighting</option>
+                      <option value="return_home">return_home</option>
+                      <option value="recover_reset">recover_reset</option>
+                    </select>
+                    <label for="fsmForceReasonInput">Reason</label>
+                    <input id="fsmForceReasonInput" type="text" value="ops_force" placeholder="force reason">
+                    <button id="fsmForceBtn" type="button">Force Mode</button>
+                  </div>
+                </section>
+
+                <section class="native-card">
+                  <h3>Ops Presets</h3>
+                  <div class="native-row">
+                    <button id="fsmPresetBootBtn" type="button">Boot</button>
+                    <button id="fsmPresetIdleBtn" type="button">Idle</button>
+                    <button id="fsmPresetSocialBtn" type="button">Social</button>
+                    <button id="fsmPresetSearchBtn" type="button">Search</button>
+                    <button id="fsmPresetTaskBtn" type="button">Task</button>
+                    <button id="fsmPresetHomeBtn" type="button">Home</button>
+                    <button id="fsmPresetRecoverBtn" type="button">Recover</button>
+                    <button id="fsmPresetFaultBtn" type="button">Fault</button>
+                  </div>
                 </section>
 
                 <section class="native-card">
@@ -102,25 +154,53 @@
                       person_conf
                       <input id="fsmPersonConf" type="number" min="0" max="1" step="0.01" value="0">
                     </label>
-                    <label class="signal-field" for="fsmActivity">
-                      activity_level
-                      <input id="fsmActivity" type="number" min="0" max="1" step="0.01" value="0">
+                    <label class="checkbox">
+                      <input id="fsmSearchRequested" type="checkbox">
+                      search_requested
                     </label>
-                    <label class="signal-field" for="fsmNovelty">
-                      novelty
-                      <input id="fsmNovelty" type="number" min="0" max="1" step="0.01" value="0">
+                    <label class="checkbox">
+                      <input id="fsmSearchComplete" type="checkbox">
+                      search_complete
                     </label>
-                    <label class="signal-field" for="fsmEnvDelta">
-                      env_delta
-                      <input id="fsmEnvDelta" type="number" min="0" max="1" step="0.01" value="0">
+                    <label class="checkbox">
+                      <input id="fsmAssistComplete" type="checkbox">
+                      assist_complete
+                    </label>
+                    <label class="checkbox">
+                      <input id="fsmUserAck" type="checkbox">
+                      user_ack
+                    </label>
+                    <label class="checkbox">
+                      <input id="fsmTaskActive" type="checkbox">
+                      task_active
+                    </label>
+                    <label class="checkbox">
+                      <input id="fsmHomeRequested" type="checkbox">
+                      home_requested
+                    </label>
+                    <label class="checkbox">
+                      <input id="fsmHomeCompleted" type="checkbox">
+                      home_completed
+                    </label>
+                    <label class="checkbox">
+                      <input id="fsmCancelRequested" type="checkbox">
+                      cancel_requested
+                    </label>
+                    <label class="checkbox">
+                      <input id="fsmStartupComplete" type="checkbox">
+                      startup_complete
+                    </label>
+                    <label class="checkbox">
+                      <input id="fsmHealthDegraded" type="checkbox">
+                      health_degraded
                     </label>
                     <label class="checkbox">
                       <input id="fsmPlannerBreaker" type="checkbox">
-                      planner_open_breaker
+                      legacy: planner_open_breaker
                     </label>
                     <label class="checkbox">
                       <input id="fsmPerceptionDegraded" type="checkbox">
-                      perception_degraded
+                      legacy: perception_degraded
                     </label>
                   </div>
                 </section>
@@ -149,6 +229,24 @@
                 <section class="native-card">
                   <h3>Status</h3>
                   <pre id="fsmStatus">Loading state machine...</pre>
+                </section>
+
+                <section class="native-card">
+                  <h3>Transition Log</h3>
+                  <div class="native-row">
+                    <button id="fsmClearHistoryBtn" type="button">Clear Log</button>
+                  </div>
+                  <table id="fsmHistoryTable">
+                    <thead>
+                      <tr>
+                        <th>Tick</th>
+                        <th>Transition</th>
+                        <th>Reason</th>
+                        <th>Recommended</th>
+                      </tr>
+                    </thead>
+                    <tbody></tbody>
+                  </table>
                 </section>
               </div>
             </section>

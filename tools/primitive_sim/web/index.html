@@ -10,6 +10,13 @@
     <main class="layout">
       <section class="stage-card">
         <canvas id="simCanvas" width="1080" height="680"></canvas>
+        <div class="stage-tools" aria-label="Viewer controls">
+          <button id="zoomOutBtn" type="button" title="Zoom out">-</button>
+          <button id="zoomInBtn" type="button" title="Zoom in">+</button>
+          <button id="orbitLeftBtn" type="button" title="Orbit left">&#8592;</button>
+          <button id="orbitRightBtn" type="button" title="Orbit right">&#8594;</button>
+          <button id="resetViewBtn" class="wide" type="button">Reset View</button>
+        </div>
       </section>
 
       <aside class="control-card">
@@ -67,6 +74,13 @@
                 <option value="overlay" selected>Overlay</option>
                 <option value="split">Split</option>
               </select>
+            </label>
+          </div>
+
+          <div class="row">
+            <label class="inline stack" for="paramFilterInput">
+              Filter params
+              <input id="paramFilterInput" type="text" placeholder="type to filter...">
             </label>
           </div>
 

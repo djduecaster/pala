@@ -25,9 +25,16 @@ const rawModePath = document.getElementById("rawModePath");
 const modeFrame = document.getElementById("modeFrame");
 
 const modeActionBtn = document.getElementById("modeActionBtn");
+const runAndPlaybackBtn = document.getElementById("runAndPlaybackBtn");
 const runSuiteBtn = document.getElementById("runSuiteBtn");
+const focusViewerBtn = document.getElementById("focusViewerBtn");
 const paletteBtn = document.getElementById("paletteBtn");
 const openRawBtn = document.getElementById("openRawBtn");
+const nextActionHint = document.getElementById("nextActionHint");
+
+const opsGoalSelect = document.getElementById("opsGoalSelect");
+const opsGoalBtn = document.getElementById("opsGoalBtn");
+const opsGoalHint = document.getElementById("opsGoalHint");
 
 const qaTuneBtn = document.getElementById("qaTuneBtn");
 const qaScenarioBtn = document.getElementById("qaScenarioBtn");
@@ -44,22 +51,44 @@ const nativeFsmPanel = document.getElementById("nativeFsmPanel");
 const nativeScenarioPanel = document.getElementById("nativeScenarioPanel");
 
 const fsmStepBtn = document.getElementById("fsmStepBtn");
+const fsmStep5Btn = document.getElementById("fsmStep5Btn");
 const fsmAutoBtn = document.getElementById("fsmAutoBtn");
 const fsmResetBtn = document.getElementById("fsmResetBtn");
+const fsmCopySnapshotBtn = document.getElementById("fsmCopySnapshotBtn");
 const fsmUseRecommendedBtn = document.getElementById("fsmUseRecommendedBtn");
+const fsmForceModeSelect = document.getElementById("fsmForceModeSelect");
+const fsmForceReasonInput = document.getElementById("fsmForceReasonInput");
+const fsmForceBtn = document.getElementById("fsmForceBtn");
 const fsmDtInput = document.getElementById("fsmDtInput");
 const fsmZoneSelect = document.getElementById("fsmZoneSelect");
 const fsmCommitToggle = document.getElementById("fsmCommitToggle");
 const fsmPersonPresent = document.getElementById("fsmPersonPresent");
 const fsmPersonConf = document.getElementById("fsmPersonConf");
-const fsmActivity = document.getElementById("fsmActivity");
-const fsmNovelty = document.getElementById("fsmNovelty");
-const fsmEnvDelta = document.getElementById("fsmEnvDelta");
+const fsmSearchRequested = document.getElementById("fsmSearchRequested");
+const fsmSearchComplete = document.getElementById("fsmSearchComplete");
+const fsmAssistComplete = document.getElementById("fsmAssistComplete");
+const fsmUserAck = document.getElementById("fsmUserAck");
+const fsmTaskActive = document.getElementById("fsmTaskActive");
+const fsmHomeRequested = document.getElementById("fsmHomeRequested");
+const fsmHomeCompleted = document.getElementById("fsmHomeCompleted");
+const fsmCancelRequested = document.getElementById("fsmCancelRequested");
+const fsmStartupComplete = document.getElementById("fsmStartupComplete");
+const fsmHealthDegraded = document.getElementById("fsmHealthDegraded");
 const fsmPlannerBreaker = document.getElementById("fsmPlannerBreaker");
 const fsmPerceptionDegraded = document.getElementById("fsmPerceptionDegraded");
 const fsmGraphNative = document.getElementById("fsmGraphNative");
 const fsmProposalTableBody = document.querySelector("#fsmProposalTable tbody");
 const fsmStatus = document.getElementById("fsmStatus");
+const fsmPresetBootBtn = document.getElementById("fsmPresetBootBtn");
+const fsmPresetIdleBtn = document.getElementById("fsmPresetIdleBtn");
+const fsmPresetSocialBtn = document.getElementById("fsmPresetSocialBtn");
+const fsmPresetSearchBtn = document.getElementById("fsmPresetSearchBtn");
+const fsmPresetTaskBtn = document.getElementById("fsmPresetTaskBtn");
+const fsmPresetHomeBtn = document.getElementById("fsmPresetHomeBtn");
+const fsmPresetRecoverBtn = document.getElementById("fsmPresetRecoverBtn");
+const fsmPresetFaultBtn = document.getElementById("fsmPresetFaultBtn");
+const fsmClearHistoryBtn = document.getElementById("fsmClearHistoryBtn");
+const fsmHistoryTableBody = document.querySelector("#fsmHistoryTable tbody");
 
 const scnPrimitiveSelect = document.getElementById("scnPrimitiveSelect");
 const scnStyleSelect = document.getElementById("scnStyleSelect");
@@ -91,16 +120,19 @@ const scnSweepTableBody = document.querySelector("#scnSweepTable tbody");
 const scnStatus = document.getElementById("scnStatus");
 
 const LAST_MODE_KEY = "lamp_sim_last_mode_v1";
+const FOCUS_VIEW_KEY = "lamp_sim_focus_view_v1";
 const SVG_NS = "http://www.w3.org/2000/svg";
 const NATIVE_MODES = new Set(["scenario_lab", "state_machine"]);
 const CONTINUOUS_PRIMITIVES = new Set(["hold", "breath"]);
 
 const FSM_NODE_LAYOUT = Object.freeze({
-  idle_presence: { x: 190, y: 300 },
-  scan_explore: { x: 420, y: 130 },
-  engage_track: { x: 670, y: 300 },
-  acknowledge: { x: 860, y: 130 },
-  recover_reset: { x: 420, y: 490 },
+  boot_awaken: { x: 140, y: 310 },
+  idle_presence: { x: 320, y: 310 },
+  social_interact: { x: 500, y: 180 },
+  search_assist: { x: 500, y: 450 },
+  task_lighting: { x: 690, y: 180 },
+  return_home: { x: 690, y: 450 },
+  recover_reset: { x: 880, y: 310 },
 });
 
 const MODES = Object.freeze({
@@ -130,12 +162,13 @@ const MODES = Object.freeze({
   },
   state_machine: {
     label: "State Machine",
-    summary: "Simulate mode transitions and inspect recommended primitive responses.",
+    summary: "Operate deterministic Behavior V4 macro-mode transitions with presets, force-mode controls, and transition logging.",
     steps: [
-      "Set signal inputs and health flags.",
-      "Step or auto-run transitions.",
-      "Verify expected mode and transition reason.",
-      "Cross-check allowed primitives in each mode.",
+      "Set V4 signals for person/search/task/home/health.",
+      "Step, step x5, or auto-run with dt control.",
+      "Use presets/force-mode controls for rapid incident drills.",
+      "Inspect transition log and recommended primitive.",
+      "Send recommended primitive into Scenario Lab.",
     ],
     buildSrc: () => "/tools/primitive_sim/web/state_machine.html?shell=1",
     rawSrc: "/tools/primitive_sim/web/state_machine.html",
@@ -182,6 +215,7 @@ const state = {
   activeMode: "studio",
   params: new URLSearchParams(window.location.search),
   navButtons: new Map(),
+  viewerFocus: false,
   paletteOpen: false,
   paletteCommands: [],
   filteredCommands: [],
@@ -196,6 +230,8 @@ const state = {
     autoRunning: false,
     autoTimer: null,
     inFlight: false,
+    history: [],
+    historyMax: 80,
   },
   scenario: {
     meta: null,
@@ -213,6 +249,45 @@ const MODE_PRIMARY_ACTION = Object.freeze({
   state_machine: { label: "Step FSM", command: "fsm.step" },
   joint_checker: { label: "Zero Pose", command: "joint.zero" },
   playback: { label: "Open Raw Playback", command: "shell.open_raw" },
+});
+
+const MODE_NEXT_HINT = Object.freeze({
+  studio: "Next action: run preview, then save baseline when motion looks correct.",
+  scenario_lab: "Next action: validate scenario, run it, then inspect metrics and trace.",
+  state_machine: "Next action: step FSM and send recommended primitive into Scenario Lab.",
+  joint_checker: "Next action: verify axis signs and limit behavior with direct sliders.",
+  playback: "Next action: scrub the trace and inspect primitive and mode transitions.",
+});
+
+const OPS_GOALS = Object.freeze({
+  tune_primitive: {
+    mode: "studio",
+    hint: "Goal: tune primitive params and save a stable baseline.",
+    status: "ops goal: tune primitive",
+  },
+  build_scenario: {
+    mode: "scenario_lab",
+    hint: "Goal: build scenario steps, run, and compare metrics.",
+    status: "ops goal: build scenario",
+  },
+  validate_state_machine: {
+    mode: "state_machine",
+    hint: "Goal: validate mode transitions and recommendation quality.",
+    status: "ops goal: validate state machine",
+  },
+  review_playback: {
+    mode: "playback",
+    hint: "Goal: review trace playback and verify operational behavior.",
+    status: "ops goal: review playback",
+  },
+});
+
+const GOAL_BY_MODE = Object.freeze({
+  studio: "tune_primitive",
+  scenario_lab: "build_scenario",
+  state_machine: "validate_state_machine",
+  playback: "review_playback",
+  joint_checker: "validate_state_machine",
 });
 
 function clamp(v, lo, hi) {
@@ -281,6 +356,22 @@ function loadPersistedMode() {
   }
 }
 
+function loadPersistedFocusView() {
+  try {
+    return window.localStorage.getItem(FOCUS_VIEW_KEY) === "1";
+  } catch (_err) {
+    return false;
+  }
+}
+
+function persistFocusView(enabled) {
+  try {
+    window.localStorage.setItem(FOCUS_VIEW_KEY, enabled ? "1" : "0");
+  } catch (_err) {
+    // ignore storage errors
+  }
+}
+
 function updateQuery(mode) {
   const next = new URLSearchParams(window.location.search);
   next.set("mode", mode);
@@ -298,15 +389,43 @@ function renderModeMeta() {
   modeBadge.textContent = `Mode: ${state.activeMode}`;
   modeTitle.textContent = cfg.label;
   modeSummary.textContent = cfg.summary;
+  nextActionHint.textContent = MODE_NEXT_HINT[state.activeMode] || MODE_NEXT_HINT.studio;
   rawModePath.textContent = buildRawModeSrc(state.activeMode);
   const primary = MODE_PRIMARY_ACTION[state.activeMode] || MODE_PRIMARY_ACTION.studio;
   modeActionBtn.textContent = primary.label;
+  if (state.activeMode === "scenario_lab") {
+    runAndPlaybackBtn.textContent = "Run Scenario + Playback";
+    runAndPlaybackBtn.disabled = false;
+  } else if (state.activeMode === "state_machine") {
+    runAndPlaybackBtn.textContent = "Step + Scenario + Playback";
+    runAndPlaybackBtn.disabled = false;
+  } else if (state.activeMode === "playback") {
+    runAndPlaybackBtn.textContent = "Open Raw Playback";
+    runAndPlaybackBtn.disabled = false;
+  } else {
+    runAndPlaybackBtn.textContent = "Run + Playback";
+    runAndPlaybackBtn.disabled = false;
+  }
   workflowSteps.innerHTML = "";
   cfg.steps.forEach((line) => {
     const li = document.createElement("li");
     li.textContent = line;
     workflowSteps.appendChild(li);
   });
+}
+
+function setViewerFocus(enabled, { persist = true } = {}) {
+  const on = Boolean(enabled);
+  state.viewerFocus = on;
+  document.querySelector(".shell-layout")?.classList.toggle("focus-view", on);
+  focusViewerBtn.textContent = on ? "Exit Focus" : "Focus Viewer";
+  if (persist) {
+    persistFocusView(on);
+  }
+  setStatus([
+    `shell mode: ${state.activeMode}`,
+    on ? "viewer focus: enabled" : "viewer focus: disabled",
+  ]);
 }
 
 function highlightNav() {
@@ -322,6 +441,41 @@ function showWorkspaceForMode(mode) {
   nativeScenarioPanel.classList.toggle("hidden", mode !== "scenario_lab");
 }
 
+function updateOpsGoalHint() {
+  const key = String(opsGoalSelect?.value || "tune_primitive");
+  const entry = OPS_GOALS[key] || OPS_GOALS.tune_primitive;
+  opsGoalHint.textContent = entry.hint;
+}
+
+async function applyOperationalGoal() {
+  const key = String(opsGoalSelect.value || "tune_primitive").trim();
+  const entry = OPS_GOALS[key] || OPS_GOALS.tune_primitive;
+
+  if (entry.mode === "playback" && !state.params.get("trace")) {
+    setStatus([
+      "ops goal: review playback",
+      "no playback trace is loaded; generating suite playback now.",
+    ]);
+    await runSuitePlayback();
+    updateOpsGoalHint();
+    return;
+  }
+
+  setMode(entry.mode);
+  setStatus([
+    `shell mode: ${state.activeMode}`,
+    String(entry.status || `ops goal: ${key}`),
+  ]);
+  updateOpsGoalHint();
+
+  if (entry.mode === "state_machine") {
+    await ensureFsmReady();
+    applyFsmPreset("idle");
+  } else if (entry.mode === "scenario_lab") {
+    await ensureScenarioReady();
+  }
+}
+
 function setMode(mode, { fromSuite = false } = {}) {
   const next = normalizeMode(mode);
   const prev = state.activeMode;
@@ -335,6 +489,11 @@ function setMode(mode, { fromSuite = false } = {}) {
   renderModeMeta();
   highlightNav();
   showWorkspaceForMode(next);
+  const goalToken = GOAL_BY_MODE[next];
+  if (goalToken && OPS_GOALS[goalToken]) {
+    opsGoalSelect.value = goalToken;
+  }
+  updateOpsGoalHint();
 
   const status = [`shell mode: ${next}`];
   if (isNativeMode(next)) {
@@ -457,6 +616,30 @@ async function execShellCommand(command) {
     openRawCurrentMode();
     return;
   }
+  if (command === "run.playback_from_mode") {
+    await runAndPlaybackForCurrentMode();
+    return;
+  }
+  if (command === "ops.goal_tune") {
+    opsGoalSelect.value = "tune_primitive";
+    await applyOperationalGoal();
+    return;
+  }
+  if (command === "ops.goal_scenario") {
+    opsGoalSelect.value = "build_scenario";
+    await applyOperationalGoal();
+    return;
+  }
+  if (command === "ops.goal_fsm") {
+    opsGoalSelect.value = "validate_state_machine";
+    await applyOperationalGoal();
+    return;
+  }
+  if (command === "ops.goal_playback") {
+    opsGoalSelect.value = "review_playback";
+    await applyOperationalGoal();
+    return;
+  }
   if (command === "fsm.step") {
     if (state.activeMode !== "state_machine") {
       setMode("state_machine");
@@ -465,12 +648,54 @@ async function execShellCommand(command) {
     await stepFsmOnce();
     return;
   }
+  if (command === "fsm.step5") {
+    if (state.activeMode !== "state_machine") {
+      setMode("state_machine");
+    }
+    await ensureFsmReady();
+    await stepFsmMany(5);
+    return;
+  }
   if (command === "fsm.reset") {
     if (state.activeMode !== "state_machine") {
       setMode("state_machine");
     }
     await ensureFsmReady();
     await resetFsm();
+    return;
+  }
+  if (command === "fsm.force_recover") {
+    if (state.activeMode !== "state_machine") {
+      setMode("state_machine");
+    }
+    await ensureFsmReady();
+    fsmForceModeSelect.value = "recover_reset";
+    fsmForceReasonInput.value = "ops_recover";
+    await forceFsmMode();
+    return;
+  }
+  if (command === "fsm.copy_snapshot") {
+    if (state.activeMode !== "state_machine") {
+      setMode("state_machine");
+    }
+    await ensureFsmReady();
+    await copyFsmSnapshot();
+    return;
+  }
+  if (command === "fsm.preset_idle") {
+    if (state.activeMode !== "state_machine") {
+      setMode("state_machine");
+    }
+    await ensureFsmReady();
+    applyFsmPreset("idle");
+    return;
+  }
+  if (command === "fsm.preset_social") {
+    if (state.activeMode !== "state_machine") {
+      setMode("state_machine");
+    }
+    await ensureFsmReady();
+    applyFsmPreset("social");
     return;
   }
   if (command === "fsm.send_recommended") {
@@ -559,6 +784,43 @@ async function runSuitePlayback() {
   }
 }
 
+async function runAndPlaybackForCurrentMode() {
+  if (state.activeMode === "playback") {
+    openRawCurrentMode();
+    return;
+  }
+
+  if (state.activeMode === "scenario_lab") {
+    await ensureScenarioReady();
+    await runScenario();
+    const trace = String(state.scenario.lastRun?.trace_url || "").trim();
+    if (!trace) {
+      throw new Error("scenario run did not produce trace_url");
+    }
+    openPlaybackTrace(trace);
+    return;
+  }
+
+  if (state.activeMode === "state_machine") {
+    await ensureFsmReady();
+    await stepFsmOnce();
+    await sendFsmRecommendationToScenario();
+    await runScenario();
+    const trace = String(state.scenario.lastRun?.trace_url || "").trim();
+    if (trace) {
+      openPlaybackTrace(trace);
+    } else {
+      await runSuitePlayback();
+    }
+    return;
+  }
+
+  if (state.activeMode === "studio") {
+    await execShellCommand("studio.run_preview");
+  }
+  await runSuitePlayback();
+}
+
 function openRawCurrentMode() {
   const raw = buildRawModeSrc(state.activeMode);
   window.open(raw, "_blank", "noopener,noreferrer");
@@ -596,6 +858,50 @@ function buildPaletteCommands() {
       detail: "Generate suite trace and open playback mode.",
       run: () => {
         void runSuitePlayback();
+      },
+    },
+    {
+      id: "run.playback_from_mode",
+      label: "Run: Current Mode + Playback",
+      detail: "Run the active mode workflow and open playback.",
+      run: () => {
+        void runAndPlaybackForCurrentMode();
+      },
+    },
+    {
+      id: "ops.goal_tune",
+      label: "Ops Goal: Tune Primitive",
+      detail: "Switch to Studio with tuning-oriented flow.",
+      run: () => {
+        opsGoalSelect.value = "tune_primitive";
+        void applyOperationalGoal();
+      },
+    },
+    {
+      id: "ops.goal_scenario",
+      label: "Ops Goal: Build Scenario",
+      detail: "Switch to Scenario Lab with composition flow.",
+      run: () => {
+        opsGoalSelect.value = "build_scenario";
+        void applyOperationalGoal();
+      },
+    },
+    {
+      id: "ops.goal_fsm",
+      label: "Ops Goal: Validate State Machine",
+      detail: "Switch to State Machine with operational signal presets.",
+      run: () => {
+        opsGoalSelect.value = "validate_state_machine";
+        void applyOperationalGoal();
+      },
+    },
+    {
+      id: "ops.goal_playback",
+      label: "Ops Goal: Review Playback",
+      detail: "Open existing playback or generate one if absent.",
+      run: () => {
+        opsGoalSelect.value = "review_playback";
+        void applyOperationalGoal();
       },
     },
     {
@@ -689,12 +995,57 @@ function buildPaletteCommands() {
       },
     },
     {
+      id: "fsm.step5",
+      label: "FSM: Step x5",
+      detail: "Execute five sequential update steps.",
+      run: () => {
+        setMode("state_machine");
+        queueCommand("fsm.step5", 120);
+      },
+    },
+    {
       id: "fsm.reset",
       label: "FSM: Reset",
       detail: "Reset state machine and tick counters.",
       run: () => {
         setMode("state_machine");
         queueCommand("fsm.reset", 120);
+      },
+    },
+    {
+      id: "fsm.force_recover",
+      label: "FSM: Force Recover",
+      detail: "Force transition into recover_reset mode.",
+      run: () => {
+        setMode("state_machine");
+        queueCommand("fsm.force_recover", 120);
+      },
+    },
+    {
+      id: "fsm.preset_idle",
+      label: "FSM: Preset Idle",
+      detail: "Apply idle signal preset for quick stepping.",
+      run: () => {
+        setMode("state_machine");
+        queueCommand("fsm.preset_idle", 120);
+      },
+    },
+    {
+      id: "fsm.preset_social",
+      label: "FSM: Preset Social",
+      detail: "Apply social-engage signal preset.",
+      run: () => {
+        setMode("state_machine");
+        queueCommand("fsm.preset_social", 120);
+      },
+    },
+    {
+      id: "fsm.copy_snapshot",
+      label: "FSM: Copy Snapshot",
+      detail: "Copy current FSM operational snapshot JSON.",
+      run: () => {
+        setMode("state_machine");
+        queueCommand("fsm.copy_snapshot", 120);
       },
     },
     {
@@ -729,6 +1080,12 @@ function buildPaletteCommands() {
       label: "Open: Raw Mode Page",
       detail: "Open current mode directly in a new tab.",
       run: () => openRawCurrentMode(),
+    },
+    {
+      id: "shell.focus_viewer",
+      label: "Shell: Toggle Focus Viewer",
+      detail: "Hide side panels and maximize the main workspace.",
+      run: () => setViewerFocus(!state.viewerFocus),
     },
   ];
 }
@@ -797,9 +1154,16 @@ function fsmReadSignals() {
   return {
     person_present: Boolean(fsmPersonPresent.checked),
     person_conf: clamp(finiteNumber(fsmPersonConf.value, 0), 0, 1),
-    activity_level: clamp(finiteNumber(fsmActivity.value, 0), 0, 1),
-    novelty: clamp(finiteNumber(fsmNovelty.value, 0), 0, 1),
-    env_delta: clamp(finiteNumber(fsmEnvDelta.value, 0), 0, 1),
+    search_requested: Boolean(fsmSearchRequested.checked),
+    search_complete: Boolean(fsmSearchComplete.checked),
+    assist_complete: Boolean(fsmAssistComplete.checked),
+    user_ack: Boolean(fsmUserAck.checked),
+    task_active: Boolean(fsmTaskActive.checked),
+    home_requested: Boolean(fsmHomeRequested.checked),
+    home_completed: Boolean(fsmHomeCompleted.checked),
+    cancel_requested: Boolean(fsmCancelRequested.checked),
+    startup_complete: Boolean(fsmStartupComplete.checked),
+    health_degraded: Boolean(fsmHealthDegraded.checked),
     planner_open_breaker: Boolean(fsmPlannerBreaker.checked),
     perception_degraded: Boolean(fsmPerceptionDegraded.checked),
   };
@@ -808,11 +1172,230 @@ function fsmReadSignals() {
 function fsmApplySignals(signals) {
   fsmPersonPresent.checked = Boolean(signals?.person_present);
   fsmPersonConf.value = clamp(finiteNumber(signals?.person_conf, 0), 0, 1).toFixed(2);
-  fsmActivity.value = clamp(finiteNumber(signals?.activity_level, 0), 0, 1).toFixed(2);
-  fsmNovelty.value = clamp(finiteNumber(signals?.novelty, 0), 0, 1).toFixed(2);
-  fsmEnvDelta.value = clamp(finiteNumber(signals?.env_delta, 0), 0, 1).toFixed(2);
+  fsmSearchRequested.checked = Boolean(signals?.search_requested);
+  fsmSearchComplete.checked = Boolean(signals?.search_complete);
+  fsmAssistComplete.checked = Boolean(signals?.assist_complete);
+  fsmUserAck.checked = Boolean(signals?.user_ack);
+  fsmTaskActive.checked = Boolean(signals?.task_active);
+  fsmHomeRequested.checked = Boolean(signals?.home_requested);
+  fsmHomeCompleted.checked = Boolean(signals?.home_completed);
+  fsmCancelRequested.checked = Boolean(signals?.cancel_requested);
+  fsmStartupComplete.checked = Boolean(signals?.startup_complete);
+  fsmHealthDegraded.checked = Boolean(signals?.health_degraded);
   fsmPlannerBreaker.checked = Boolean(signals?.planner_open_breaker);
   fsmPerceptionDegraded.checked = Boolean(signals?.perception_degraded);
+}
+
+function fsmPreset(name) {
+  const token = String(name || "").trim().toLowerCase();
+  if (token === "boot") {
+    return {
+      person_present: false,
+      person_conf: 0.0,
+      search_requested: false,
+      search_complete: false,
+      assist_complete: false,
+      user_ack: false,
+      task_active: false,
+      home_requested: false,
+      home_completed: false,
+      cancel_requested: false,
+      startup_complete: false,
+      health_degraded: false,
+      planner_open_breaker: false,
+      perception_degraded: false,
+    };
+  }
+  if (token === "idle") {
+    return {
+      person_present: false,
+      person_conf: 0.0,
+      search_requested: false,
+      search_complete: false,
+      assist_complete: false,
+      user_ack: false,
+      task_active: false,
+      home_requested: false,
+      home_completed: false,
+      cancel_requested: false,
+      startup_complete: true,
+      health_degraded: false,
+      planner_open_breaker: false,
+      perception_degraded: false,
+    };
+  }
+  if (token === "social") {
+    return {
+      person_present: true,
+      person_conf: 0.9,
+      search_requested: false,
+      search_complete: false,
+      assist_complete: false,
+      user_ack: true,
+      task_active: false,
+      home_requested: false,
+      home_completed: false,
+      cancel_requested: false,
+      startup_complete: true,
+      health_degraded: false,
+      planner_open_breaker: false,
+      perception_degraded: false,
+    };
+  }
+  if (token === "search") {
+    return {
+      person_present: true,
+      person_conf: 0.75,
+      search_requested: true,
+      search_complete: false,
+      assist_complete: false,
+      user_ack: false,
+      task_active: false,
+      home_requested: false,
+      home_completed: false,
+      cancel_requested: false,
+      startup_complete: true,
+      health_degraded: false,
+      planner_open_breaker: false,
+      perception_degraded: false,
+    };
+  }
+  if (token === "task") {
+    return {
+      person_present: false,
+      person_conf: 0.05,
+      search_requested: false,
+      search_complete: false,
+      assist_complete: false,
+      user_ack: false,
+      task_active: true,
+      home_requested: false,
+      home_completed: false,
+      cancel_requested: false,
+      startup_complete: true,
+      health_degraded: false,
+      planner_open_breaker: false,
+      perception_degraded: false,
+    };
+  }
+  if (token === "home") {
+    return {
+      person_present: false,
+      person_conf: 0.0,
+      search_requested: false,
+      search_complete: false,
+      assist_complete: false,
+      user_ack: false,
+      task_active: false,
+      home_requested: true,
+      home_completed: false,
+      cancel_requested: false,
+      startup_complete: true,
+      health_degraded: false,
+      planner_open_breaker: false,
+      perception_degraded: false,
+    };
+  }
+  if (token === "recover") {
+    return {
+      person_present: false,
+      person_conf: 0.0,
+      search_requested: false,
+      search_complete: false,
+      assist_complete: false,
+      user_ack: false,
+      task_active: false,
+      home_requested: false,
+      home_completed: false,
+      cancel_requested: false,
+      startup_complete: true,
+      health_degraded: true,
+      planner_open_breaker: false,
+      perception_degraded: false,
+    };
+  }
+  if (token === "fault") {
+    return {
+      person_present: false,
+      person_conf: 0.0,
+      search_requested: false,
+      search_complete: false,
+      assist_complete: false,
+      user_ack: false,
+      task_active: false,
+      home_requested: false,
+      home_completed: false,
+      cancel_requested: false,
+      startup_complete: true,
+      health_degraded: true,
+      planner_open_breaker: true,
+      perception_degraded: true,
+    };
+  }
+  return fsmPreset("idle");
+}
+
+function applyFsmPreset(name) {
+  const token = String(name || "").trim().toLowerCase() || "idle";
+  fsmApplySignals(fsmPreset(token));
+  fsmSetStatus(`Applied preset: ${token}`);
+  setStatus([`shell mode: ${state.activeMode}`, `fsm preset: ${token}`]);
+}
+
+function clearFsmHistory() {
+  state.fsm.history = [];
+  renderFsmHistory();
+}
+
+function appendFsmHistory(result, source = "step") {
+  const decision = result?.mode_decision || {};
+  const rec = result?.recommended || {};
+  const row = {
+    tick: Number(result?.tick_index || 0),
+    source: String(source || "step"),
+    from: String(decision.from || "?"),
+    to: String(decision.to || "?"),
+    transitioned: Boolean(decision.transitioned),
+    reason: String(decision.reason || ""),
+    primitive: String(rec.primitive || ""),
+    style: String(rec.style || ""),
+    now_s: Number(result?.now_s || 0),
+  };
+  state.fsm.history.unshift(row);
+  const maxRows = Math.max(10, Number(state.fsm.historyMax || 80));
+  if (state.fsm.history.length > maxRows) {
+    state.fsm.history.length = maxRows;
+  }
+  renderFsmHistory();
+}
+
+function renderFsmHistory() {
+  if (!fsmHistoryTableBody) {
+    return;
+  }
+  fsmHistoryTableBody.innerHTML = "";
+  const rows = Array.isArray(state.fsm.history) ? state.fsm.history : [];
+  rows.forEach((row) => {
+    const tr = document.createElement("tr");
+
+    const tickTd = document.createElement("td");
+    tickTd.textContent = `${row.tick} (${row.source})`;
+
+    const transitionTd = document.createElement("td");
+    transitionTd.textContent = `${row.from} -> ${row.to}${row.transitioned ? "" : " [held]"}`;
+
+    const reasonTd = document.createElement("td");
+    reasonTd.textContent = row.reason;
+
+    const recTd = document.createElement("td");
+    recTd.textContent = `${row.primitive || "-"}${row.style ? ` (${row.style})` : ""}`;
+
+    tr.appendChild(tickTd);
+    tr.appendChild(transitionTd);
+    tr.appendChild(reasonTd);
+    tr.appendChild(recTd);
+    fsmHistoryTableBody.appendChild(tr);
+  });
 }
 
 function fsmNodePosition(nodeId) {
@@ -995,6 +1578,7 @@ function renderFsmSnapshot(snapshot) {
   renderFsmProposals([]);
   fsmSetStatus([
     `mode: ${mode}`,
+    `active_skill: ${String(snapshot?.active_skill || "(none)")}`,
     `tick: ${Number(snapshot?.tick_index || 0)}`,
     `now_s: ${rounded(snapshot?.now_s || 0, 3)}`,
     `no_commit_s: ${rounded(snapshot?.no_commit_s || 0, 3)}`,
@@ -1011,6 +1595,7 @@ function renderFsmStepResult(result) {
   const recText = rec ? `${rec.primitive} (${rounded(rec.score, 2)})` : "none";
   fsmSetStatus([
     `mode: ${mode || "n/a"}`,
+    `active_skill: ${String(result?.active_skill || "(none)")}`,
     `tick: ${Number(result?.tick_index || 0)}`,
     `transition: ${decision.from || "?"} -> ${decision.to || "?"} (${decision.reason || "n/a"})${decision.transitioned ? "" : " [held]"}`,
     `dt_s: ${rounded(result?.dt_s || 0, 3)}`,
@@ -1018,6 +1603,7 @@ function renderFsmStepResult(result) {
     `no_commit_s: ${rounded(result?.no_commit_s || 0, 3)}`,
     `zone_hint: ${String(result?.zone_hint || "(none)")}`,
     `recommended: ${recText}`,
+    `recommended_style: ${String(rec?.style || "(none)")}`,
     `allowed_primitives: ${(result?.allowed_primitives || []).join(", ") || "(none)"}`,
     `signals: ${JSON.stringify(result?.signals || {})}`,
   ]);
@@ -1050,6 +1636,7 @@ async function stepFsmOnce() {
     const result = await apiPost("/api/state_machine/step", payload);
     state.fsm.lastResult = result;
     renderFsmStepResult(result);
+    appendFsmHistory(result, "step");
     setStatus([
       `shell mode: ${state.activeMode}`,
       `fsm: ${result?.mode_decision?.from || "?"} -> ${result?.mode_decision?.to || "?"}`,
@@ -1063,6 +1650,92 @@ async function stepFsmOnce() {
     state.fsm.inFlight = false;
     fsmStepBtn.disabled = false;
   }
+}
+
+async function stepFsmMany(count) {
+  const n = Math.max(1, Math.floor(Number(count) || 1));
+  for (let i = 0; i < n; i += 1) {
+    if (state.activeMode !== "state_machine") {
+      break;
+    }
+    await stepFsmOnce();
+  }
+}
+
+async function forceFsmMode() {
+  if (state.fsm.inFlight) {
+    return;
+  }
+  state.fsm.inFlight = true;
+  fsmForceBtn.disabled = true;
+  const mode = String(fsmForceModeSelect.value || "").trim();
+  if (!mode) {
+    state.fsm.inFlight = false;
+    fsmForceBtn.disabled = false;
+    throw new Error("select a force mode first");
+  }
+  try {
+    const reason = String(fsmForceReasonInput.value || "").trim() || "ops_force";
+    const dt = clamp(finiteNumber(fsmDtInput.value, 0.35), 0.0, 10.0);
+    const payload = {
+      mode,
+      reason,
+      dt_s: dt,
+      commit: Boolean(fsmCommitToggle.checked),
+      zone_hint: String(fsmZoneSelect.value || ""),
+      signals: fsmReadSignals(),
+    };
+    const result = await apiPost("/api/state_machine/force", payload);
+    state.fsm.lastResult = result;
+    renderFsmStepResult(result);
+    appendFsmHistory(result, "force");
+    setStatus([
+      `shell mode: ${state.activeMode}`,
+      `fsm force: ${mode}`,
+      `reason: ${reason}`,
+    ]);
+  } finally {
+    state.fsm.inFlight = false;
+    fsmForceBtn.disabled = false;
+  }
+}
+
+function fsmSnapshotForOps() {
+  return {
+    exported_at_utc: new Date().toISOString(),
+    mode: state.fsm.lastResult?.mode_decision?.to || state.fsm.meta?.state?.mode || "unknown",
+    signals: fsmReadSignals(),
+    last_result: state.fsm.lastResult || null,
+    transition_history: state.fsm.history || [],
+  };
+}
+
+async function copyTextToClipboard(text) {
+  const token = String(text || "");
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(token);
+    return;
+  }
+  const area = document.createElement("textarea");
+  area.value = token;
+  area.setAttribute("readonly", "true");
+  area.style.position = "fixed";
+  area.style.opacity = "0";
+  area.style.pointerEvents = "none";
+  document.body.appendChild(area);
+  area.select();
+  document.execCommand("copy");
+  area.remove();
+}
+
+async function copyFsmSnapshot() {
+  const payload = prettyJson(fsmSnapshotForOps());
+  await copyTextToClipboard(payload);
+  showToast("FSM snapshot copied", "ok");
+  setStatus([
+    `shell mode: ${state.activeMode}`,
+    "fsm snapshot copied to clipboard",
+  ]);
 }
 
 async function scheduleFsmAutoRun() {
@@ -1095,6 +1768,8 @@ async function resetFsm() {
   const snapshot = res?.state || meta?.state || {};
   state.fsm.meta = meta;
   state.fsm.lastResult = null;
+  clearFsmHistory();
+  fsmApplySignals(meta.default_signals || {});
   drawFsmGraph(meta.graph || {});
   renderFsmSnapshot(snapshot);
   setStatus([
@@ -1117,6 +1792,7 @@ async function ensureFsmReady(force = false) {
       fsmApplySignals(meta.default_signals || {});
       drawFsmGraph(meta.graph || {});
       renderFsmSnapshot(meta.state || {});
+      clearFsmHistory();
       fsmSetStatus([
         `State machine ready.`,
         `config_path: ${String(meta.config_path || "(unknown)")}`,
@@ -1888,6 +2564,21 @@ function bindUi() {
     void runSuitePlayback();
   });
 
+  focusViewerBtn.addEventListener("click", () => {
+    setViewerFocus(!state.viewerFocus);
+  });
+
+  runAndPlaybackBtn.addEventListener("click", () => {
+    runAndPlaybackBtn.disabled = true;
+    void runAndPlaybackForCurrentMode()
+      .catch((err) => {
+        showToast(`Run + playback failed: ${err}`, "bad", 3600);
+      })
+      .finally(() => {
+        runAndPlaybackBtn.disabled = false;
+      });
+  });
+
   paletteBtn.addEventListener("click", () => {
     openPalette();
   });
@@ -1945,9 +2636,27 @@ function bindUi() {
   qaStateBtn.addEventListener("click", () => setMode("state_machine"));
   qaJointBtn.addEventListener("click", () => setMode("joint_checker"));
 
+  opsGoalSelect.addEventListener("change", () => {
+    updateOpsGoalHint();
+  });
+  opsGoalBtn.addEventListener("click", () => {
+    void applyOperationalGoal().catch((err) => {
+      setStatus([
+        `shell mode: ${state.activeMode}`,
+        `ops goal failed: ${err.message || err}`,
+      ]);
+      showToast(`Ops goal failed: ${err}`, "bad", 3600);
+    });
+  });
+
   fsmStepBtn.addEventListener("click", () => {
     void stepFsmOnce().catch((err) => {
       showToast(`FSM step failed: ${err}`, "bad", 3600);
+    });
+  });
+  fsmStep5Btn.addEventListener("click", () => {
+    void stepFsmMany(5).catch((err) => {
+      showToast(`FSM step x5 failed: ${err}`, "bad", 3600);
     });
   });
   fsmAutoBtn.addEventListener("click", () => {
@@ -1965,12 +2674,33 @@ function bindUi() {
       showToast(`FSM reset failed: ${err}`, "bad", 3600);
     });
   });
+  fsmForceBtn.addEventListener("click", () => {
+    void forceFsmMode().catch((err) => {
+      fsmSetStatus(`force mode failed: ${err.message || err}`);
+      showToast(`FSM force mode failed: ${err}`, "bad", 3600);
+    });
+  });
+  fsmCopySnapshotBtn.addEventListener("click", () => {
+    void copyFsmSnapshot().catch((err) => {
+      fsmSetStatus(`copy snapshot failed: ${err.message || err}`);
+      showToast(`FSM snapshot copy failed: ${err}`, "bad", 3600);
+    });
+  });
   fsmUseRecommendedBtn.addEventListener("click", () => {
     void sendFsmRecommendationToScenario().catch((err) => {
       fsmSetStatus(`handoff failed: ${err.message || err}`);
       showToast(`FSM handoff failed: ${err}`, "bad", 3600);
     });
   });
+  fsmPresetBootBtn.addEventListener("click", () => applyFsmPreset("boot"));
+  fsmPresetIdleBtn.addEventListener("click", () => applyFsmPreset("idle"));
+  fsmPresetSocialBtn.addEventListener("click", () => applyFsmPreset("social"));
+  fsmPresetSearchBtn.addEventListener("click", () => applyFsmPreset("search"));
+  fsmPresetTaskBtn.addEventListener("click", () => applyFsmPreset("task"));
+  fsmPresetHomeBtn.addEventListener("click", () => applyFsmPreset("home"));
+  fsmPresetRecoverBtn.addEventListener("click", () => applyFsmPreset("recover"));
+  fsmPresetFaultBtn.addEventListener("click", () => applyFsmPreset("fault"));
+  fsmClearHistoryBtn.addEventListener("click", () => clearFsmHistory());
 
   scnPrimitiveSelect.addEventListener("change", () => {
     populateScenarioBuilderFromPrimitive();
@@ -2074,6 +2804,10 @@ function bindUi() {
       setMode("joint_checker");
     } else if (ev.key.toLowerCase() === "r") {
       void runSuitePlayback();
+    } else if (ev.key.toLowerCase() === "p") {
+      runAndPlaybackBtn.click();
+    } else if (ev.key.toLowerCase() === "v") {
+      setViewerFocus(!state.viewerFocus);
     } else if (ev.key.toLowerCase() === "o") {
       openRawCurrentMode();
     }
@@ -2097,6 +2831,7 @@ function initialMode() {
   state.filteredCommands = state.paletteCommands.slice();
   initNav();
   bindUi();
+  setViewerFocus(loadPersistedFocusView(), { persist: false });
   const mode = initialMode();
   setMode(mode);
   showToast("Lamp Sim shell ready", "ok");

@@ -31,7 +31,9 @@ from tools.telemetry.mac_viewer import (
     _normalize_jetson_dir,
     _paths_equivalent,
     _resolve_live_save_session_dir,
+    _resolve_capture_output_dir,
     _run_curation_export,
+    _render,
     _write_viewer_summary,
 )
 from tools.telemetry.capture import CaptureConfig, SessionCaptureWriter
@@ -41,6 +43,7 @@ from tools.telemetry.doctor import _check_session_dir
 from tools.telemetry.integrity import build_integrity_report, verify_integrity_report, write_integrity_report
 from tools.telemetry.replay import SessionReplayReader
 from tools.telemetry.reasoning import format_reasoning_snippet, normalize_reasoning_message, redact_reasoning_text
+from tools.telemetry.mode_health_fsm import ModeHealthFSM, ingest_mode_event
 from tools.telemetry.quality import evaluate_quality_gate, load_quality_report
 from tools.telemetry.run_report import build_run_report
 from tools.telemetry.pipeline import _build_parser as _build_pipeline_parser
@@ -156,10 +159,26 @@ def test_mode_defaults_apply_curate_profile():
     assert args.no_video is True
     assert args.quality_gate == "strict"
     assert args.index_mode == "sqlite"
-    assert args.pack == ["behavior_v2_debug"]
+    assert args.pack == ["behavior_v4_debug"]
     assert "annotations" in args.panel
     assert "status:parse_fail" in args.query
 
+
+def test_mode_defaults_focus_overrides_pack_and_query():
+    parser = _build_parser()
+    args = parser.parse_args(["--focus", "hardware"])
+    notes = _apply_mode_defaults(args, parser)
+    assert args.pack == ["hardware_safety"]
+    assert str(args.query).startswith("source:tegrastats|journal")
+    assert any("focus=hardware" in note for note in notes)
+
+
+def test_mode_defaults_curate_ignores_non_behavior_focus():
+    parser = _build_parser()
+    args = parser.parse_args(["--mode", "curate", "--replay", "logs/telemetry/session", "--focus", "perception"])
+    notes = _apply_mode_defaults(args, parser)
+    assert args.pack == ["behavior_v4_debug"]
+    assert any("ignored in curate mode" in note for note in notes)
 
 def test_pipeline_parser_compile_command():
     parser = _build_pipeline_parser()
@@ -575,7 +594,7 @@ def test_behavior_reasoning_normalization_and_joined_index(tmp_path):
     rows = load_reasoning_trace_index(str(session_dir))
     assert rows
     env_rows = [row for row in rows if row.get("component") == "env_processor"]
-    planner_rows = [row for row in rows if row.get("component") == "planner"]
+    planner_rows = [row for row in rows if row.get("component") == "planner_v4"]
     assert env_rows
     assert planner_rows
     assert env_rows[0].get("perception_zone_hint") == "desk"
@@ -753,23 +772,123 @@ def test_reasoning_normalization_behavior_trace_event():
         "source": "behavior_trace_log",
         "ts_wall_s": 123.9,
         "payload": {
-            "mode": "engage",
-            "decision": {"committed": False, "reason": "planner_timeout"},
-            "signals": {"zone_hint": "left", "env_delta": 0.72},
+            "mode": "social_interact",
+            "mode_transition": {
+                "transitioned": True,
+                "from": "idle_presence",
+                "to": "social_interact",
+                "reason": "person_detected",
+            },
+            "active_skill": "greet_user",
             "current_action": {"primitive": "hold", "confidence": 0.61},
-            "top_candidates": [{"primitive": "glance", "intent": "scan", "utility": 0.44}],
+            "planner": {
+                "enabled": True,
+                "inflight": False,
+                "pending": True,
+                "last_latency_ms": 88.0,
+                "last_parse_stage": "json_schema",
+                "last_error": "timeout",
+                "next_allowed_in_s": 0.6,
+            },
+            "guard": {
+                "accepted": False,
+                "fallback": True,
+                "reason": "skill_not_allowed",
+                "skill": "observe_settle",
+                "primitive": "hold",
+            },
         },
     }
     out = normalize_reasoning_message(msg)
     assert out is not None
     assert out.source == "behavior_trace_log"
-    assert out.phase == "engage"
-    assert out.status == "no_commit"
+    assert out.phase == "social_interact"
+    assert out.status == "fallback"
     assert out.component == "arbiter"
-    assert out.target_zone == "left"
-    assert out.delta_score == 0.72
+    assert out.mode == "social_interact"
+    assert out.active_skill == "greet_user"
+    assert out.guard_fallback is True
+    assert out.guard_reason == "skill_not_allowed"
     assert out.primitive == "hold"
 
+
+
+
+def test_mode_health_fsm_ingest_mode_event_parses_boolish_strings():
+    fsm = ModeHealthFSM(churn_window_s=10.0, transitioning_hold_s=1.0, churn_threshold=3)
+
+    snap_false = ingest_mode_event(
+        fsm,
+        {
+            "ts_wall_s": 1.0,
+            "mode": "idle_presence",
+            "mode_transitioned": "false",
+            "guard_fallback": "false",
+            "mode_transition_reason": "",
+            "planner_last_error": "",
+        },
+    )
+    assert snap_false.state == "stable"
+    assert snap_false.transition_count_window == 0
+
+    snap_true = ingest_mode_event(
+        fsm,
+        {
+            "ts_wall_s": 2.0,
+            "mode": "social_interact",
+            "mode_transitioned": "true",
+            "guard_fallback": "0",
+            "mode_transition_reason": "person_present_engage",
+            "planner_last_error": "",
+        },
+    )
+    assert snap_true.state in {"transitioning", "churn"}
+    assert snap_true.transition_count_window >= 1
+
+def test_mode_health_fsm_reports_transitioning_and_churn():
+    fsm = ModeHealthFSM(churn_window_s=10.0, transitioning_hold_s=1.0, churn_threshold=3)
+
+    snap_boot = fsm.ingest(
+        ts_wall_s=1.0,
+        mode="boot_awaken",
+        transitioned=False,
+        transition_reason="startup",
+    )
+    assert snap_boot.state == "boot"
+
+    snap_a = fsm.ingest(
+        ts_wall_s=2.0,
+        mode="idle_presence",
+        transitioned=True,
+        transition_reason="startup_complete",
+    )
+    assert snap_a.state == "transitioning"
+
+    _ = fsm.ingest(
+        ts_wall_s=3.0,
+        mode="social_interact",
+        transitioned=True,
+        transition_reason="person_present_engage",
+    )
+    snap_churn = fsm.ingest(
+        ts_wall_s=4.0,
+        mode="search_assist",
+        transitioned=True,
+        transition_reason="search_requested",
+    )
+    assert snap_churn.state == "churn"
+    assert snap_churn.transition_count_window >= 3
+    assert snap_churn.churn_score >= 1.0
+    assert fsm.transition_reason_counts().get("search_requested", 0) == 1
+
+    snap_string_false = fsm.ingest(
+        ts_wall_s=5.0,
+        mode="idle_presence",
+        transitioned=False,
+        transition_reason="",
+        guard_fallback=False,
+    )
+    assert snap_string_false.state in {"stable", "transitioning", "churn"}
 
 def test_reasoning_redaction_and_snippet():
     raw = "authorization=Bearer abc.def.ghi token=secretvalue1234567890"
@@ -902,9 +1021,23 @@ def test_trace_graph_ingests_behavior_trace_events():
             "source": "behavior_trace_log",
             "ts_wall_s": 30.0,
             "payload": {
-                "mode": "engage",
-                "decision": {"committed": True, "reason": "commit_remote"},
-                "top_candidates": [{"primitive": "move_to", "intent": "orient", "utility": 0.88}],
+                "mode": "social_interact",
+                "active_skill": "greet_user",
+                "mode_transition": {
+                    "transitioned": True,
+                    "from": "idle_presence",
+                    "to": "social_interact",
+                    "reason": "person_detected",
+                },
+                "current_action": {"primitive": "hold", "confidence": 0.72},
+                "planner": {
+                    "enabled": True,
+                    "inflight": False,
+                    "pending": False,
+                    "last_latency_ms": 55.0,
+                    "last_parse_stage": "json_schema",
+                },
+                "guard": {"accepted": True, "fallback": False, "reason": "guard_ok", "primitive": "hold"},
             },
         }
     )
@@ -1009,6 +1142,201 @@ def test_query_session_db_supports_latency_ts_and_sort(tmp_path):
     assert out_ts["events"][0]["req_id"] == 2
     out_or = query_session_db(str(session_dir), query="kind:event status:ok|parse_fail", limit=10)
     assert len(out_or["events"]) == 2
+
+
+def test_query_session_db_supports_v4_mode_guard_filters(tmp_path):
+    session_dir = tmp_path / "session"
+    writer = SessionCaptureWriter(CaptureConfig(directory=str(session_dir), frames_mode="off", max_seconds=0.0))
+    writer.write(
+        {
+            "type": "event",
+            "source": "behavior_trace_log",
+            "ts_wall_s": 2.0,
+            "payload": {
+                "mode": "social_interact",
+                "active_skill": "greet_user",
+                "mode_transition": {
+                    "transitioned": True,
+                    "from": "idle_presence",
+                    "to": "social_interact",
+                    "reason": "person_detected",
+                },
+                "current_action": {"primitive": "hold", "confidence": 0.66},
+                "planner": {
+                    "enabled": True,
+                    "inflight": False,
+                    "pending": True,
+                    "last_latency_ms": 90.0,
+                    "last_parse_stage": "json_schema",
+                    "last_error": "timeout",
+                },
+                "guard": {
+                    "accepted": False,
+                    "fallback": True,
+                    "reason": "skill_not_allowed",
+                    "skill": "observe_settle",
+                    "primitive": "hold",
+                },
+            },
+        }
+    )
+    writer.close()
+
+    out = query_session_db(
+        str(session_dir),
+        query="kind:joined mode:social_interact skill:greet_user guard:fallback parse_stage:json_schema planner_error:timeout",
+        limit=10,
+    )
+    joined = out.get("joined")
+    assert isinstance(joined, list)
+    assert joined
+    row = joined[0]
+    assert row.get("mode") == "social_interact"
+    assert row.get("active_skill") == "greet_user"
+    assert row.get("guard_fallback") == 1
+
+
+
+def test_query_session_db_supports_v4_transition_and_guard_reason_filters(tmp_path):
+    session_dir = tmp_path / "session"
+    writer = SessionCaptureWriter(CaptureConfig(directory=str(session_dir), frames_mode="off", max_seconds=0.0))
+    writer.write(
+        {
+            "type": "event",
+            "source": "behavior_trace_log",
+            "ts_wall_s": 3.0,
+            "payload": {
+                "request_id": 17,
+                "mode": "social_interact",
+                "active_skill": "greet_user",
+                "mode_transition": {
+                    "transitioned": True,
+                    "from": "idle_presence",
+                    "to": "social_interact",
+                    "reason": "person_detected",
+                },
+                "current_action": {"primitive": "hold", "confidence": 0.66},
+                "planner": {
+                    "enabled": True,
+                    "inflight": False,
+                    "pending": True,
+                    "last_latency_ms": 85.0,
+                    "last_parse_stage": "json_schema",
+                    "last_error": "timeout",
+                },
+                "guard": {
+                    "accepted": False,
+                    "fallback": True,
+                    "reason": "skill_not_allowed",
+                    "skill": "observe_settle",
+                    "primitive": "hold",
+                },
+            },
+        }
+    )
+    writer.close()
+
+    out = query_session_db(
+        str(session_dir),
+        query="kind:joined transition_from:idle_presence transition_to:social_interact guard_reason:skill_not",
+        limit=10,
+    )
+    joined = out.get("joined")
+    assert isinstance(joined, list)
+    assert joined
+    row = joined[0]
+    assert row.get("mode_transition_from") == "idle_presence"
+    assert row.get("mode_transition_to") == "social_interact"
+    assert "skill_not" in str(row.get("guard_reason") or "")
+
+    out_transitioned = query_session_db(
+        str(session_dir),
+        query="kind:joined transitioned:true transition_to:social_interact",
+        limit=10,
+    )
+    assert out_transitioned.get("joined")
+
+
+def test_render_v4_health_panel_summarizes_reasoning_events():
+    parser = _build_parser()
+    args = parser.parse_args([])
+    _apply_mode_defaults(args, parser)
+    args.panel = ["v4_health"]
+
+    state = DashboardState(host="jetson")
+    state.configure_panels(["v4_health"], focus_panel="v4_health")
+
+    state.apply(
+        {
+            "source": "behavior_trace_log",
+            "ts_wall_s": 1.0,
+            "payload": {
+                "mode": "social_interact",
+                "active_skill": "greet_user",
+                "mode_transition": {"transitioned": True, "from": "idle_presence", "to": "social_interact"},
+                "planner": {"last_parse_stage": "json_schema", "last_error": "timeout"},
+                "guard": {"accepted": False, "fallback": True, "reason": "skill_not_allowed"},
+            },
+        }
+    )
+    state.apply(
+        {
+            "source": "behavior_trace_log",
+            "ts_wall_s": 2.0,
+            "payload": {
+                "mode": "idle_presence",
+                "active_skill": "observe_settle",
+                "mode_transition": {"transitioned": True, "from": "social_interact", "to": "idle_presence"},
+                "planner": {"last_parse_stage": "json_schema"},
+                "guard": {"accepted": True, "fallback": False, "reason": "guard_ok"},
+            },
+        }
+    )
+
+    rendered = _render(state, now_wall_s=time.time(), args=args)
+    assert "V4 Health" in rendered
+    assert "decisions=2" in rendered
+    assert "committed=1" in rendered
+    assert "fallback=1" in rendered
+    assert "guard_reason_top=" in rendered
+    assert "transition_to_top=" in rendered
+    assert "fsm_state=" in rendered
+    assert "mode_state_top=" in rendered
+    assert "transition_reason_top=" in rendered
+
+def test_case_detail_db_includes_mode_context(tmp_path):
+    session_dir = tmp_path / "session"
+    writer = SessionCaptureWriter(CaptureConfig(directory=str(session_dir), frames_mode="off", max_seconds=0.0))
+    writer.write(
+        {
+            "type": "event",
+            "source": "behavior_trace_log",
+            "ts_wall_s": 2.0,
+            "payload": {
+                "mode": "social_interact",
+                "active_skill": "greet_user",
+                "mode_transition": {
+                    "transitioned": True,
+                    "from": "idle_presence",
+                    "to": "social_interact",
+                    "reason": "person_detected",
+                },
+                "current_action": {"primitive": "hold", "confidence": 0.66},
+                "planner": {"enabled": True, "last_parse_stage": "json_schema", "last_error": "timeout"},
+                "guard": {"accepted": False, "fallback": True, "reason": "skill_not_allowed", "primitive": "hold"},
+            },
+        }
+    )
+    writer.close()
+
+    queried = query_cases_db(str(session_dir), query="", limit=10)
+    assert queried["cases"]
+    case_id = str(queried["cases"][0].get("case_id") or "")
+    detail = query_case_detail_db(str(session_dir), case_id=case_id, event_limit=20)
+    contexts = detail.get("contexts") if isinstance(detail.get("contexts"), dict) else {}
+    mode_ctx = contexts.get("mode_context") if isinstance(contexts.get("mode_context"), dict) else {}
+    assert mode_ctx.get("mode") == "social_interact"
+    assert mode_ctx.get("active_skill") == "greet_user"
 
 
 def test_annotations_append_and_load(tmp_path):
@@ -1167,6 +1495,60 @@ def test_dataset_export_profiles_emit_manifest(tmp_path):
     assert manifest["profile"] == "strict"
     assert manifest["row_granularity"] == "case"
 
+
+
+def test_dataset_export_manifest_tracks_v4_distributions(tmp_path):
+    session_dir = tmp_path / "session"
+    writer = SessionCaptureWriter(CaptureConfig(directory=str(session_dir), frames_mode="off", max_seconds=0.0))
+    writer.write(
+        {
+            "type": "event",
+            "source": "behavior_trace_log",
+            "ts_wall_s": 12.0,
+            "payload": {
+                "request_id": 33,
+                "mode": "social_interact",
+                "active_skill": "greet_user",
+                "mode_transition": {
+                    "transitioned": True,
+                    "from": "idle_presence",
+                    "to": "social_interact",
+                    "reason": "person_detected",
+                },
+                "current_action": {"primitive": "hold", "confidence": 0.62},
+                "planner": {
+                    "enabled": True,
+                    "inflight": False,
+                    "pending": True,
+                    "last_latency_ms": 95.0,
+                    "last_parse_stage": "json_schema",
+                    "last_error": "timeout",
+                },
+                "guard": {
+                    "accepted": False,
+                    "fallback": True,
+                    "reason": "skill_not_allowed",
+                    "skill": "observe_settle",
+                    "primitive": "hold",
+                },
+            },
+        }
+    )
+    writer.close()
+
+    out = export_dataset_rows(str(session_dir), profile="fast")
+    assert out["row_count"] >= 1
+
+    manifest = json.loads((session_dir / "dataset_manifest.json").read_text(encoding="utf-8"))
+    assert manifest["planner_parse_stage_counts"].get("json_schema", 0) >= 1
+    assert manifest["guard_reason_counts"].get("skill_not_allowed", 0) >= 1
+    assert manifest["mode_transition_to_counts"].get("social_interact", 0) >= 1
+    assert manifest["mode_fsm_state_counts"].get("transitioning", 0) >= 1
+    assert manifest["mode_transition_reason_counts"].get("person_detected", 0) >= 1
+
+    rows = (session_dir / "dataset_rows.jsonl").read_text(encoding="utf-8").strip().splitlines()
+    exported = json.loads(rows[0])
+    assert exported.get("mode_fsm_state") in {"transitioning", "fallback_active", "planner_blocked", "churn", "stable"}
 
 def test_dataset_export_includes_annotation_linked_rows(tmp_path):
     session_dir = tmp_path / "session"
@@ -1391,6 +1773,26 @@ def test_resolve_live_save_session_dir_preserves_existing():
     assert note == ""
 
 
+def test_resolve_capture_output_dir_suffixes_when_artifacts_present(tmp_path):
+    session_dir = tmp_path / "session"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / "events.jsonl").write_text('{"ok":true}\n', encoding="utf-8")
+    out, note = _resolve_capture_output_dir(str(session_dir), now_wall_s=1700000000.0)
+    assert out != str(session_dir)
+    assert "contains capture artifacts" in note
+
+
+def test_resolve_capture_output_dir_avoids_replay_dir(tmp_path):
+    replay_dir = tmp_path / "session"
+    replay_dir.mkdir(parents=True, exist_ok=True)
+    out, note = _resolve_capture_output_dir(
+        str(replay_dir),
+        now_wall_s=1700000000.0,
+        avoid_paths=[str(replay_dir)],
+    )
+    assert out != str(replay_dir)
+    assert "matches replay dir" in note
+
 def test_paths_equivalent_detects_same_directory(tmp_path):
     target = tmp_path / "session"
     target.mkdir(parents=True, exist_ok=True)
@@ -1593,6 +1995,98 @@ def test_build_run_report_aggregates_runs_and_summary_fallback(tmp_path):
     assert curate_only["mode_counts"] == {"curate": 1}
     assert curate_only["quality_gate_fail_rate"] == 1.0
 
+
+
+def test_build_run_report_includes_dataset_v4_manifest_stats(tmp_path):
+    session_dir = tmp_path / "session"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / "viewer_summary.json").write_text(
+        json.dumps(
+            {
+                "run_id": "run-1",
+                "mode": "curate",
+                "exit_code": 0,
+                "ended_at_wall_s": 5.0,
+                "quality_score": 91.0,
+                "quality_gate_passed": True,
+                "case_source": "sqlite.cases.v4",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (session_dir / "dataset_manifest.json").write_text(
+        json.dumps(
+            {
+                "row_count": 20,
+                "planner_failure_ratio": 0.2,
+                "guard_fallback_ratio": 0.25,
+                "transition_instability_ratio": 0.1,
+                "planner_parse_stage_counts": {"json_schema": 12, "llm_parse": 2},
+                "guard_reason_counts": {"skill_not_allowed": 4},
+                "mode_transition_to_counts": {"social_interact": 8},
+                "mode_fsm_state_counts": {"stable": 18, "churn": 2},
+                "mode_transition_reason_counts": {"person_present_engage": 5},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = build_run_report(session_dirs=[str(session_dir)])
+    dataset = report.get("dataset_v4") if isinstance(report.get("dataset_v4"), dict) else {}
+    assert dataset.get("sessions_with_manifest") == 1
+    assert dataset.get("rows_total") == 20
+    assert dataset.get("planner_failure_ratio_p50") == 0.2
+    assert dataset.get("guard_fallback_ratio_p50") == 0.25
+    assert dataset.get("transition_instability_ratio_p50") == 0.1
+    assert dataset.get("planner_parse_stage_counts", {}).get("json_schema") == 12
+    assert dataset.get("guard_reason_counts", {}).get("skill_not_allowed") == 4
+    assert dataset.get("mode_transition_to_counts", {}).get("social_interact") == 8
+    assert dataset.get("mode_fsm_state_counts", {}).get("churn") == 2
+    assert dataset.get("mode_transition_reason_counts", {}).get("person_present_engage") == 5
+    assert dataset.get("mode_churn_ratio_global") == 0.1
+    latest = report.get("latest_run") if isinstance(report.get("latest_run"), dict) else {}
+    assert latest.get("dataset_row_count") == 20
+    assert latest.get("dataset_planner_failure_ratio") == 0.2
+    assert latest.get("dataset_mode_churn_ratio") == 0.1
+
+
+def test_build_run_report_alerts_dataset_v4_ratios_high(tmp_path):
+    session_dir = tmp_path / "session"
+    session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / "viewer_summary.json").write_text(
+        json.dumps(
+            {
+                "run_id": "run-1",
+                "mode": "curate",
+                "exit_code": 0,
+                "ended_at_wall_s": 7.0,
+                "quality_score": 88.0,
+                "quality_gate_passed": True,
+                "case_source": "sqlite.cases.v4",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (session_dir / "dataset_manifest.json").write_text(
+        json.dumps(
+            {
+                "row_count": 30,
+                "planner_failure_ratio": 0.5,
+                "guard_fallback_ratio": 0.6,
+                "transition_instability_ratio": 0.35,
+                "mode_fsm_state_counts": {"churn": 8, "stable": 22},
+                "mode_transition_reason_counts": {"search_requested": 6},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    report = build_run_report(session_dirs=[str(session_dir)])
+    alerts = report.get("alerts") if isinstance(report.get("alerts"), list) else []
+    assert "latest_dataset_planner_failure_ratio_high:0.500" in alerts
+    assert "latest_dataset_guard_fallback_ratio_high:0.600" in alerts
+    assert "latest_dataset_transition_instability_ratio_high:0.350" in alerts
+    assert "latest_dataset_mode_churn_high:0.267" in alerts
 
 def test_build_run_report_alerts_stream_health_latest(tmp_path):
     session_dir = tmp_path / "session"

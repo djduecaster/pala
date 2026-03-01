@@ -19,6 +19,7 @@ from ..types import (
     NodCommand,
     BreathCommand,
     OrientToZoneCommand,
+    ScanSweepCommand,
 )
 from ..types.style_profiles import default_style_profiles
 
@@ -59,6 +60,12 @@ class TrajectoryExecutor:
         self._active_target: Optional[List[float]] = None
         self._active_timeout_s: Optional[float] = None
         self._active_reached_s: Optional[float] = None
+
+        self._scan_waypoints: Optional[List[float]] = None
+        self._scan_index: int = 0
+        self._scan_hold_until_s: Optional[float] = None
+        self._scan_returning: bool = False
+
         self._last_terminal_action_id: Optional[str] = None
         self._state = ControlState(
             active_kind=None,
@@ -108,6 +115,9 @@ class TrajectoryExecutor:
             rate = command.rate_rad_s * style["rate_scale"]
         elif kind == PrimitiveKind.ORIENT_TO_ZONE and isinstance(command, OrientToZoneCommand):
             target = list(self._active_target or self._current)
+            rate = command.rate_rad_s * style["rate_scale"]
+        elif kind == PrimitiveKind.SCAN_SWEEP and isinstance(command, ScanSweepCommand):
+            target, done = self._scan_sweep_target(command, now)
             rate = command.rate_rad_s * style["rate_scale"]
         elif kind == PrimitiveKind.GLANCE and isinstance(command, GlanceCommand):
             target = self._glance_target(command, elapsed, style)
@@ -169,6 +179,7 @@ class TrajectoryExecutor:
         self._active_target = None
         self._active_timeout_s = None
         self._active_reached_s = None
+        self._clear_scan_state()
         self._state = ControlState(
             active_kind=action.primitive,
             started_monotonic_s=now,
@@ -204,6 +215,24 @@ class TrajectoryExecutor:
             if len(target) > 0:
                 target[0] = zone_to_yaw[command.zone]
             self._active_target = target
+        elif action.primitive == PrimitiveKind.SCAN_SWEEP and isinstance(command, ScanSweepCommand):
+            if len(self._current) == 0:
+                self._finish_active(
+                    status=ExecutionStatus.REJECTED,
+                    reason="scan_sweep requires yaw joint",
+                )
+                return
+            self._scan_waypoints = self._build_scan_waypoints(command)
+            if not self._scan_waypoints:
+                self._finish_active(
+                    status=ExecutionStatus.REJECTED,
+                    reason="scan_sweep has no feasible waypoints",
+                )
+                return
+            self._scan_index = 0
+            self._scan_hold_until_s = None
+            self._scan_returning = False
+            self._active_timeout_s = max(0.1, command.timeout_s)
 
     def _apply_timeout(self, now: float) -> None:
         if self._active_action is None or self._active_timeout_s is None or self._active_start_s is None:
@@ -220,6 +249,81 @@ class TrajectoryExecutor:
         if self._active_reached_s is None:
             self._active_reached_s = now
         return (now - self._active_reached_s) >= max(0.0, command.dwell_s)
+
+    def _scan_sweep_target(self, command: ScanSweepCommand, now: float) -> tuple[List[float], bool]:
+        target = list(self._active_base)
+        if len(target) == 0:
+            return list(self._current), True
+
+        waypoints = self._scan_waypoints or []
+        if not waypoints:
+            target[0] = 0.0
+            return target, True
+
+        if self._scan_returning:
+            target[0] = 0.0
+            reached_center = abs(self._current[0] - 0.0) <= 0.02
+            return target, reached_center
+
+        idx = max(0, min(self._scan_index, len(waypoints) - 1))
+        target[0] = waypoints[idx]
+        reached = abs(self._current[0] - waypoints[idx]) <= 0.02
+        if not reached:
+            self._scan_hold_until_s = None
+            return target, False
+
+        if self._scan_hold_until_s is None:
+            self._scan_hold_until_s = now + max(0.0, command.dwell_s)
+            return target, False
+
+        if now < self._scan_hold_until_s:
+            return target, False
+
+        self._scan_hold_until_s = None
+        if idx + 1 < len(waypoints):
+            self._scan_index = idx + 1
+            return target, False
+
+        if command.return_to_center:
+            self._scan_returning = True
+            return target, False
+
+        return target, True
+
+    def _build_scan_waypoints(self, command: ScanSweepCommand) -> List[float]:
+        if len(self._limits) == 0:
+            return []
+
+        yaw_min = float(self._limits[0][0])
+        yaw_max = float(self._limits[0][1])
+        if yaw_min > yaw_max:
+            yaw_min, yaw_max = yaw_max, yaw_min
+
+        margin = max(0.0, command.edge_margin_rad)
+        left = yaw_min + margin
+        right = yaw_max - margin
+        if left > right:
+            center = 0.5 * (yaw_min + yaw_max)
+            left = center
+            right = center
+
+        sweep_range = max(0.0, right - left)
+
+        positions = int(command.positions)
+        if positions <= 0:
+            fov_rad = math.radians(max(1.0, command.camera_hfov_deg))
+            overlap = max(0.0, min(0.95, command.overlap))
+            effective_step = max(1e-3, fov_rad * (1.0 - overlap))
+            positions = max(2, int(math.ceil(sweep_range / effective_step)) + 1)
+
+        if positions % 2 == 0:
+            positions += 1
+
+        if positions <= 1 or sweep_range <= 1e-6:
+            return [max(left, min(right, 0.0))]
+
+        step = sweep_range / float(positions - 1)
+        return [left + (step * i) for i in range(positions)]
 
     def _glance_target(self, command: GlanceCommand, elapsed: float, style: Dict[str, float]) -> List[float]:
         dur = max(0.01, command.duration_s * style["duration_scale"])
@@ -281,6 +385,12 @@ class TrajectoryExecutor:
     def _within_tol(target: List[float], current: List[float], tol: float = 0.02) -> bool:
         return all(abs(t - c) <= tol for t, c in zip(target, current))
 
+    def _clear_scan_state(self) -> None:
+        self._scan_waypoints = None
+        self._scan_index = 0
+        self._scan_hold_until_s = None
+        self._scan_returning = False
+
     def _finish_active(self, *, status: ExecutionStatus, reason: Optional[str]) -> None:
         terminal_id = None if self._active_action is None else self._active_action.action_id
         self._state.status = status
@@ -291,6 +401,7 @@ class TrajectoryExecutor:
         self._active_target = None
         self._active_timeout_s = None
         self._active_reached_s = None
+        self._clear_scan_state()
         if terminal_id is not None:
             self._last_terminal_action_id = terminal_id
 

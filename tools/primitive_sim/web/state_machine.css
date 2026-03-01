@@ -40,17 +40,20 @@
 }
 
 .state-machine-page.embedded-shell .layout {
-  height: auto;
-  min-height: auto;
+  height: 100dvh;
+  min-height: 100dvh;
   padding: 8px;
+  grid-template-columns: minmax(420px, 1.15fr) minmax(340px, 1fr);
+  grid-template-rows: 1fr;
 }
 
 .state-machine-page.embedded-shell #fsmGraph {
-  max-height: 50vh;
+  max-height: none;
 }
 
 .state-machine-page.embedded-shell .control-card {
-  max-height: 50vh;
+  max-height: none;
+  min-height: 0;
 }
 
 .signal-grid {
@@ -92,15 +95,24 @@
   font-size: 0.79rem;
 }
 
+#historyTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.79rem;
+}
+
 #proposalTable th,
-#proposalTable td {
+#proposalTable td,
+#historyTable th,
+#historyTable td {
   text-align: left;
   padding: 6px;
   border-bottom: 1px solid #1e3842;
   vertical-align: top;
 }
 
-#proposalTable th {
+#proposalTable th,
+#historyTable th {
   color: #a2cbc4;
   font-weight: 600;
 }
@@ -168,5 +180,12 @@
 
   .state-machine-page .control-card {
     max-height: none;
+  }
+}
+
+@media (max-width: 1260px) {
+  .state-machine-page.embedded-shell .layout {
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(320px, 52dvh) minmax(0, 1fr);
   }
 }

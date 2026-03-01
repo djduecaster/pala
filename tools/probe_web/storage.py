@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 from uuid import uuid4
 
-from .models import EnvProbeRun
+from .models import BehaviorProbeRun
 
 
 def ensure_logs_root(logs_root: Path) -> Path:
@@ -34,7 +34,7 @@ def write_bytes(path: Path, data: bytes) -> None:
     path.write_bytes(data)
 
 
-def save_run(run_dir: Path, run: EnvProbeRun) -> Dict[str, Any]:
+def save_run(run_dir: Path, run: BehaviorProbeRun) -> Dict[str, Any]:
     write_json(run_dir / "run_full.json", run.to_dict())
     write_json(run_dir / "run_config.json", run.params)
     write_json(run_dir / "inputs_manifest.json", run.images)
@@ -64,47 +64,21 @@ def save_run(run_dir: Path, run: EnvProbeRun) -> Dict[str, Any]:
             "parsed_output": run.parsed_output,
         },
     )
+    write_json(run_dir / "guard_result.json", run.guard_result or {})
+    write_json(run_dir / "final_action.json", run.final_action or {})
     if isinstance(run.effective_inputs, dict):
         write_json(run_dir / "effective_inputs.json", run.effective_inputs)
+    if isinstance(run.fsm_before, dict):
+        write_json(run_dir / "fsm_before.json", run.fsm_before)
+    if isinstance(run.fsm_after, dict):
+        write_json(run_dir / "fsm_after.json", run.fsm_after)
 
-    if isinstance(run.planner_phase, dict):
-        write_json(
-            run_dir / "planner_packet_view.json",
-            {
-                "compact": run.planner_phase.get("packet_compact", []),
-                "expanded": run.planner_phase.get("packet_expanded", []),
-                "message_structure": run.planner_phase.get("message_structure", []),
-            },
-        )
-        write_json(
-            run_dir / "planner_request_payload_redacted.json",
-            run.planner_phase.get("request_payload_redacted", {}),
-        )
-        write_json(
-            run_dir / "planner_response_raw.json",
-            {
-                "response_meta": run.planner_phase.get("response_meta", {}),
-                "raw_content": run.planner_phase.get("raw_content"),
-                "reasoning_content": run.planner_phase.get("reasoning_content"),
-            },
-        )
-        write_json(
-            run_dir / "planner_parsed_output.json",
-            {
-                "executed": bool(run.planner_phase.get("executed", False)),
-                "parse_ok": bool(run.planner_phase.get("parse_ok", False)),
-                "parse_stage": run.planner_phase.get("parse_stage"),
-                "parse_error": run.planner_phase.get("parse_error"),
-                "parsed_output": run.planner_phase.get("parsed_output"),
-                "skip_reason": run.planner_phase.get("skip_reason"),
-            },
-        )
-
+    guard = run.guard_result or {}
+    final_action = run.final_action or {}
     summary = {
         "run_id": run.run_id,
         "created_at_utc": run.created_at_utc,
         "mode": run.mode,
-        "chain_status": run.chain_status,
         "parse_ok": run.parse_ok,
         "parse_stage": run.parse_stage,
         "parse_error": run.parse_error,
@@ -114,12 +88,10 @@ def save_run(run_dir: Path, run: EnvProbeRun) -> Dict[str, Any]:
         "provider": run.params.get("provider"),
         "model": run.params.get("model"),
         "image_count": len(run.images),
-        "planner_executed": bool((run.planner_phase or {}).get("executed", False)),
-        "planner_http_status": (run.planner_phase or {}).get("response_meta", {}).get("http_status"),
-        "planner_parse_ok": (run.planner_phase or {}).get("parse_ok"),
-        "summary_short": None
-        if not isinstance(run.parsed_output, dict)
-        else run.parsed_output.get("summary_short"),
+        "guard_reason": guard.get("reason"),
+        "guard_accepted": guard.get("accepted"),
+        "guard_used_fallback": guard.get("used_fallback"),
+        "final_primitive": final_action.get("primitive"),
     }
     write_json(run_dir / "summary.json", summary)
     return summary
@@ -185,12 +157,12 @@ def load_run(logs_root: Path, run_id: str) -> Dict[str, Any] | None:
     packet_view = _load("packet_view.json") or {}
     response_raw = _load("response_raw.json") or {}
     parsed_output = _load("parsed_output.json") or {}
-    effective_inputs = _load("effective_inputs.json") or {}
-    planner_packet_view = _load("planner_packet_view.json") or {}
-    planner_response_raw = _load("planner_response_raw.json") or {}
-    planner_parsed_output = _load("planner_parsed_output.json") or {}
-    planner_request_payload = _load("planner_request_payload_redacted.json") or {}
     summary = _load("summary.json") or {}
+    effective_inputs = _load("effective_inputs.json") or {}
+    guard_result = _load("guard_result.json") or {}
+    final_action = _load("final_action.json") or {}
+    fsm_before = _load("fsm_before.json") or {}
+    fsm_after = _load("fsm_after.json") or {}
 
     return {
         "run_id": token,
@@ -201,10 +173,10 @@ def load_run(logs_root: Path, run_id: str) -> Dict[str, Any] | None:
         "packet_view": packet_view,
         "response_raw": response_raw,
         "parsed": parsed_output,
-        "effective_inputs": effective_inputs,
-        "planner_packet_view": planner_packet_view,
-        "planner_response_raw": planner_response_raw,
-        "planner_parsed": planner_parsed_output,
-        "planner_request_payload": planner_request_payload,
         "summary": summary,
+        "effective_inputs": effective_inputs,
+        "guard_result": guard_result,
+        "final_action": final_action,
+        "fsm_before": fsm_before,
+        "fsm_after": fsm_after,
     }

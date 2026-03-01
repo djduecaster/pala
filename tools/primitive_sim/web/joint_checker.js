@@ -22,6 +22,11 @@ const midBtn = document.getElementById("midBtn");
 const copyBtn = document.getElementById("copyBtn");
 const runSuiteBtn = document.getElementById("runSuiteBtn");
 const suiteStatus = document.getElementById("suiteStatus");
+const zoomOutBtn = document.getElementById("zoomOutBtn");
+const zoomInBtn = document.getElementById("zoomInBtn");
+const orbitLeftBtn = document.getElementById("orbitLeftBtn");
+const orbitRightBtn = document.getElementById("orbitRightBtn");
+const resetViewBtn = document.getElementById("resetViewBtn");
 
 function inEmbeddedShell() {
   return pageParams.get("shell") === "1" && window.top && window.top !== window;
@@ -250,6 +255,23 @@ function makeCamera() {
   const right = norm(cross(forward, [0, 1, 0]));
   const up = norm(cross(right, forward));
   return { camPos, forward, right, up };
+}
+
+function adjustCameraDistance(delta) {
+  const next = state.cameraDistance + Number(delta || 0);
+  state.cameraDistance = clamp(next, 2.2, 6.0);
+  drawScene();
+}
+
+function adjustCameraOrbit(delta) {
+  state.cameraOrbit += Number(delta || 0);
+  drawScene();
+}
+
+function resetCameraView() {
+  state.cameraOrbit = -0.64;
+  state.cameraDistance = 3.75;
+  drawScene();
 }
 
 function projectPoint(p, camera) {
@@ -679,9 +701,27 @@ function buildJointSliders() {
       setJointAngle(i, degToRad(Number(degInput.value)));
     });
 
+    const minusBtn = document.createElement("button");
+    minusBtn.type = "button";
+    minusBtn.className = "step-btn";
+    minusBtn.textContent = "-";
+    minusBtn.addEventListener("click", () => {
+      setJointAngle(i, Number(state.jointAngles[i] || 0) - SLIDER_STEP_RAD);
+    });
+
+    const plusBtn = document.createElement("button");
+    plusBtn.type = "button";
+    plusBtn.className = "step-btn";
+    plusBtn.textContent = "+";
+    plusBtn.addEventListener("click", () => {
+      setJointAngle(i, Number(state.jointAngles[i] || 0) + SLIDER_STEP_RAD);
+    });
+
     row.appendChild(label);
     row.appendChild(range);
+    row.appendChild(minusBtn);
     row.appendChild(degInput);
+    row.appendChild(plusBtn);
 
     const meta = document.createElement("div");
     meta.className = "joint-slider-meta";
@@ -802,6 +842,21 @@ function bindUi() {
   runSuiteBtn.addEventListener("click", () => {
     runSuitePlayback();
   });
+  zoomOutBtn.addEventListener("click", () => {
+    adjustCameraDistance(0.18);
+  });
+  zoomInBtn.addEventListener("click", () => {
+    adjustCameraDistance(-0.18);
+  });
+  orbitLeftBtn.addEventListener("click", () => {
+    adjustCameraOrbit(0.1);
+  });
+  orbitRightBtn.addEventListener("click", () => {
+    adjustCameraOrbit(-0.1);
+  });
+  resetViewBtn.addEventListener("click", () => {
+    resetCameraView();
+  });
 
   canvas.addEventListener("pointerdown", (ev) => {
     state.drag.active = true;
@@ -815,8 +870,7 @@ function bindUi() {
     }
     const dx = ev.clientX - state.drag.lastX;
     state.drag.lastX = ev.clientX;
-    state.cameraOrbit -= dx * 0.006;
-    drawScene();
+    adjustCameraOrbit(-dx * 0.006);
   });
 
   function endDrag(ev) {
@@ -830,9 +884,7 @@ function bindUi() {
   canvas.addEventListener("pointercancel", endDrag);
   canvas.addEventListener("wheel", (ev) => {
     ev.preventDefault();
-    const next = state.cameraDistance + Math.sign(ev.deltaY) * 0.16;
-    state.cameraDistance = clamp(next, 2.2, 6.0);
-    drawScene();
+    adjustCameraDistance(Math.sign(ev.deltaY) * 0.16);
   }, { passive: false });
 
   window.addEventListener("keydown", (ev) => {
@@ -855,6 +907,26 @@ function bindUi() {
     if (!ev.metaKey && !ev.ctrlKey && !ev.altKey && key === "c") {
       ev.preventDefault();
       copyAnglesVector();
+      return;
+    }
+    if (key === "=" || key === "+") {
+      ev.preventDefault();
+      adjustCameraDistance(-0.18);
+      return;
+    }
+    if (key === "-" || key === "_") {
+      ev.preventDefault();
+      adjustCameraDistance(0.18);
+      return;
+    }
+    if (key === "[" && !ev.metaKey && !ev.ctrlKey && !ev.altKey) {
+      ev.preventDefault();
+      adjustCameraOrbit(0.1);
+      return;
+    }
+    if (key === "]" && !ev.metaKey && !ev.ctrlKey && !ev.altKey) {
+      ev.preventDefault();
+      adjustCameraOrbit(-0.1);
     }
   });
 

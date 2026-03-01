@@ -15,7 +15,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, Deque, Dict, List, Mapping, Optional
+from typing import Any, Deque, Dict, List, Mapping, Optional, Sequence
 
 from PIL import Image, ImageDraw
 
@@ -34,6 +34,7 @@ from tools.telemetry.capture import CaptureConfig, SessionCaptureWriter
 from tools.telemetry.dataset_export import export_dataset_rows
 from tools.telemetry.protocol import decode_message
 from tools.telemetry.lamp_viz import draw_lamp_panel
+from tools.telemetry.mode_health_fsm import ModeHealthFSM
 from tools.telemetry.quality import evaluate_quality_gate, load_quality_report
 from tools.telemetry.reasoning import ReasoningEvent, format_reasoning_snippet, normalize_reasoning_message
 from tools.telemetry.replay import SessionReplayReader
@@ -329,23 +330,7 @@ class DashboardState:
         if event is None:
             return
         self.reasoning_seq_counter += 1
-        # Keep seq in-band using phase prefix so rendering can still show it.
-        enriched = ReasoningEvent(
-            source=event.source,
-            ts_wall_s=event.ts_wall_s,
-            req_id=event.req_id,
-            phase=f"{event.phase}",
-            status=event.status,
-            latency_ms=event.latency_ms,
-            primitive=event.primitive,
-            confidence=event.confidence,
-            target_zone=event.target_zone,
-            model=event.model,
-            provider=event.provider,
-            snippet=event.snippet,
-            severity=event.severity,
-        )
-        self.reasoning_events.append(enriched)
+        self.reasoning_events.append(event)
         if self.reasoning_selected_seq is None:
             self.reasoning_selected_seq = self.reasoning_seq_counter
 
@@ -538,7 +523,7 @@ class ModeConfig:
 MODE_CONFIGS: Dict[str, ModeConfig] = {
     "live": ModeConfig(
         pack="reasoning_live",
-        panels=("summary", "trace_list", "reasoning_stream", "case_list", "case_detail", "quality", "video"),
+        panels=("summary", "trace_list", "reasoning_stream", "planner", "arbiter", "mode", "v4_health", "case_list", "case_detail", "quality", "video"),
         quality_gate="warn",
         index_mode="auto",
         no_video=False,
@@ -550,6 +535,10 @@ MODE_CONFIGS: Dict[str, ModeConfig] = {
             "trace_list",
             "trace_detail",
             "reasoning_stream",
+            "planner",
+            "arbiter",
+            "mode",
+            "v4_health",
             "case_list",
             "case_detail",
             "query",
@@ -561,14 +550,50 @@ MODE_CONFIGS: Dict[str, ModeConfig] = {
         no_video=False,
     ),
     "curate": ModeConfig(
-        pack="behavior_v2_debug",
-        panels=("summary", "trace_list", "trace_detail", "case_list", "case_detail", "query", "quality", "annotations"),
-        default_query="kind:joined severity:error|warning status:parse_fail|timeout|no_commit sort:severity",
+        pack="behavior_v4_debug",
+        panels=("summary", "trace_list", "trace_detail", "planner", "arbiter", "mode", "v4_health", "case_list", "case_detail", "query", "quality", "annotations"),
+        default_query="kind:joined severity:error|warning status:parse_fail|timeout|planner_error|fallback sort:severity",
         quality_gate="strict",
         index_mode="sqlite",
         no_video=True,
     ),
 }
+
+FOCUS_PACKS: Dict[str, str] = {
+    "runtime": "runtime_core",
+    "reasoning": "reasoning_live",
+    "perception": "perception_debug",
+    "planner": "planner_debug",
+    "memory": "memory_debug",
+    "hardware": "hardware_safety",
+    "cosmos": "cosmos_io",
+    "behavior": "behavior_v4_debug",
+}
+
+FOCUS_DEFAULT_QUERIES: Dict[str, str] = {
+    "reasoning": "kind:joined status:parse_fail|timeout|planner_error|fallback sort:severity",
+    "perception": "source:perception_log|video_frame severity:warning|error sort:severity",
+    "planner": "source:actions_log|timeline_log status:parse_fail|planner_error|timeout sort:severity",
+    "memory": "source:memory_log|timeline_log severity:warning|error sort:severity",
+    "hardware": "source:tegrastats|journal severity:warning|error sort:severity",
+    "cosmos": "kind:joined component:planner_v4|arbiter severity:warning|error sort:severity",
+    "behavior": "kind:joined component:env_processor|planner_v4|arbiter severity:warning|error sort:severity",
+}
+
+
+def _apply_focus_defaults(args: argparse.Namespace, *, mode: str) -> Optional[str]:
+    focus = str(getattr(args, "focus", "auto") or "auto").strip().lower()
+    if focus in {"", "auto"}:
+        return None
+    pack = FOCUS_PACKS.get(focus)
+    if not pack:
+        return None
+    if mode == "curate" and focus != "behavior":
+        return f"focus={focus} ignored in curate mode"
+    args.pack = [pack]
+    if (not str(args.query or "").strip()) and FOCUS_DEFAULT_QUERIES.get(focus):
+        args.query = FOCUS_DEFAULT_QUERIES[focus]
+    return f"focus={focus} pack={pack}"
 
 
 def _cycle_reasoning_filter(state: DashboardState) -> None:
@@ -1397,6 +1422,265 @@ def _render_trace_detail(lines: List[str], state: DashboardState, args: argparse
     lines.append("")
 
 
+
+def _case_contexts(state: DashboardState) -> Dict[str, Any]:
+    selected = state.selected_timeline_row()
+    case_id = selected.case_id if selected is not None else ""
+    detail = state.case_detail if state.case_detail_case_id == case_id else None
+    if isinstance(detail, dict):
+        contexts = detail.get("contexts")
+        if isinstance(contexts, dict):
+            return contexts
+    return {}
+
+
+def _ratio_percent(numer: int, denom: int) -> str:
+    base = max(0, int(denom))
+    if base <= 0:
+        return "0.0%"
+    return f"{(100.0 * float(max(0, int(numer))) / float(base)):.1f}%"
+
+
+def _top_counter_text(counter: Mapping[str, int], *, max_items: int = 4) -> str:
+    rows = [
+        (str(name).strip(), int(count))
+        for name, count in counter.items()
+        if str(name).strip() and int(count) > 0
+    ]
+    if not rows:
+        return "-"
+    rows.sort(key=lambda item: (-item[1], item[0]))
+    return ", ".join(f"{name}:{count}" for name, count in rows[: max(1, int(max_items))])
+
+
+def _summarize_v4_health(state: DashboardState) -> Dict[str, Any]:
+    v4_event_count = 0
+    decision_events = 0
+    committed = 0
+    fallback = 0
+    planner_error = 0
+    parse_fail = 0
+
+    parse_stage_counts: Dict[str, int] = {}
+    guard_reason_counts: Dict[str, int] = {}
+    transition_to_counts: Dict[str, int] = {}
+    skill_counts: Dict[str, int] = {}
+
+    first_ts: Optional[float] = None
+    last_ts: Optional[float] = None
+
+    mode_health_fsm = ModeHealthFSM()
+    mode_state_counts: Dict[str, int] = {}
+
+    for _, event in state._iter_reasoning_with_seq():
+        component = str(event.component or "").strip().lower()
+        status = str(event.status or "").strip().lower()
+        mode = str(event.mode or "").strip().lower()
+        active_skill = str(event.active_skill or "").strip().lower()
+        parse_stage = str(event.planner_last_parse_stage or "").strip().lower()
+        guard_reason = str(event.guard_reason or "").strip().lower()
+        transition_to = str(event.mode_transition_to or "").strip().lower()
+
+        is_v4 = bool(
+            component in {"arbiter", "planner_v4", "planner", "env_processor"}
+            or mode
+            or event.active_skill
+            or parse_stage
+            or guard_reason
+            or transition_to
+            or event.mode_transition_from
+        )
+        if not is_v4:
+            continue
+
+        v4_event_count += 1
+        ts = event.ts_wall_s
+        if ts is not None:
+            ts_val = float(ts)
+            first_ts = ts_val if first_ts is None else min(first_ts, ts_val)
+            last_ts = ts_val if last_ts is None else max(last_ts, ts_val)
+
+        if active_skill:
+            skill_counts[active_skill] = skill_counts.get(active_skill, 0) + 1
+        if parse_stage:
+            parse_stage_counts[parse_stage] = parse_stage_counts.get(parse_stage, 0) + 1
+        if guard_reason:
+            guard_reason_counts[guard_reason] = guard_reason_counts.get(guard_reason, 0) + 1
+        if transition_to:
+            transition_to_counts[transition_to] = transition_to_counts.get(transition_to, 0) + 1
+
+        if status == "parse_fail":
+            parse_fail += 1
+
+        is_planner_related = bool(component in {"arbiter", "planner_v4", "planner"} or parse_stage or event.planner_error)
+        if is_planner_related and (event.planner_error or status in {"planner_error", "parse_fail", "timeout"}):
+            planner_error += 1
+
+        is_decision = bool(component == "arbiter" or (event.guard_accepted is not None) or (event.guard_fallback is not None))
+        if is_decision:
+            decision_events += 1
+            if (event.guard_accepted is True) or (status == "committed"):
+                committed += 1
+            if (event.guard_fallback is True) or (status == "fallback"):
+                fallback += 1
+
+        snapshot = mode_health_fsm.ingest(
+            ts_wall_s=event.ts_wall_s,
+            mode=event.mode or "",
+            transitioned=bool(event.mode_transitioned),
+            transition_reason=event.mode_transition_reason or "",
+            planner_error=event.planner_error or "",
+            guard_fallback=bool(event.guard_fallback),
+        )
+        mode_state_counts[snapshot.state] = mode_state_counts.get(snapshot.state, 0) + 1
+
+    window_s: Optional[float] = None
+    if first_ts is not None and last_ts is not None:
+        window_s = max(0.0, float(last_ts) - float(first_ts))
+
+    latest_health = mode_health_fsm.last_snapshot
+    return {
+        "v4_event_count": v4_event_count,
+        "decision_events": decision_events,
+        "committed": committed,
+        "fallback": fallback,
+        "planner_error": planner_error,
+        "parse_fail": parse_fail,
+        "window_s": window_s,
+        "parse_stage_counts": parse_stage_counts,
+        "guard_reason_counts": guard_reason_counts,
+        "transition_to_counts": transition_to_counts,
+        "mode_counts": mode_health_fsm.mode_counts(),
+        "skill_counts": skill_counts,
+        "mode_state_counts": mode_state_counts,
+        "mode_transition_reason_counts": mode_health_fsm.transition_reason_counts(),
+        "mode_health_state": latest_health.state,
+        "mode_health_mode": latest_health.mode,
+        "mode_churn_score": latest_health.churn_score,
+        "mode_transition_count_window": latest_health.transition_count_window,
+    }
+
+
+def _render_v4_health_panel(lines: List[str], state: DashboardState) -> None:
+    lines.append(f"{_focus_prefix(state, 'v4_health')}V4 Health")
+    health = _summarize_v4_health(state)
+    events = int(health.get("v4_event_count", 0) or 0)
+    if events <= 0:
+        lines.append("  no v4 reasoning events")
+        lines.append("")
+        return
+
+    decisions = int(health.get("decision_events", 0) or 0)
+    committed = int(health.get("committed", 0) or 0)
+    fallback = int(health.get("fallback", 0) or 0)
+    planner_err = int(health.get("planner_error", 0) or 0)
+    parse_fail = int(health.get("parse_fail", 0) or 0)
+
+    lines.append(
+        "  "
+        f"events={events} decisions={decisions} committed={committed} "
+        f"fallback={fallback} planner_error={planner_err} parse_fail={parse_fail}"
+    )
+    denom = decisions if decisions > 0 else events
+    lines.append(
+        "  "
+        f"commit_rate={_ratio_percent(committed, denom)} "
+        f"fallback_rate={_ratio_percent(fallback, denom)} "
+        f"planner_error_rate={_ratio_percent(planner_err, denom)}"
+    )
+
+    window_s = health.get("window_s")
+    window_text = f"{float(window_s):.1f}s" if isinstance(window_s, (int, float)) else "n/a"
+    lines.append(f"  window={window_text}")
+
+    fsm_state = str(health.get("mode_health_state") or "unknown")
+    fsm_mode = str(health.get("mode_health_mode") or "-")
+    churn_score = float(health.get("mode_churn_score", 0.0) or 0.0)
+    transition_count_window = int(health.get("mode_transition_count_window", 0) or 0)
+    lines.append(
+        "  "
+        f"fsm_state={fsm_state} mode={fsm_mode} churn_score={churn_score:.2f} "
+        f"transitions_in_window={transition_count_window}"
+    )
+
+    lines.append(
+        f"  mode_state_top={_shorten(_top_counter_text(health.get('mode_state_counts', {})), 180)}"
+    )
+    lines.append(
+        f"  transition_reason_top={_shorten(_top_counter_text(health.get('mode_transition_reason_counts', {})), 180)}"
+    )
+    lines.append(
+        f"  parse_stage_top={_shorten(_top_counter_text(health.get('parse_stage_counts', {})), 180)}"
+    )
+    lines.append(
+        f"  guard_reason_top={_shorten(_top_counter_text(health.get('guard_reason_counts', {})), 180)}"
+    )
+    lines.append(
+        f"  transition_to_top={_shorten(_top_counter_text(health.get('transition_to_counts', {})), 180)}"
+    )
+    lines.append(
+        f"  mode_top={_shorten(_top_counter_text(health.get('mode_counts', {})), 120)} "
+        f"skill_top={_shorten(_top_counter_text(health.get('skill_counts', {})), 120)}"
+    )
+    lines.append("")
+
+
+def _render_planner_panel(lines: List[str], state: DashboardState) -> None:
+    lines.append(f"{_focus_prefix(state, 'planner')}Planner")
+    contexts = _case_contexts(state)
+    planner = contexts.get("planner_context") if isinstance(contexts.get("planner_context"), dict) else {}
+    if not planner:
+        lines.append("  no planner context")
+        lines.append("")
+        return
+    lines.append(
+        f"  parse_stage={planner.get('planner_last_parse_stage') or '-'} error={_shorten(str(planner.get('planner_last_error') or '-'), 120)}"
+    )
+    lines.append(
+        f"  enabled={planner.get('planner_enabled')} inflight={planner.get('planner_inflight')} pending={planner.get('planner_pending')} next_allowed={planner.get('planner_next_allowed_in_s')}"
+    )
+    lines.append(
+        f"  mode={planner.get('mode') or '-'} skill={planner.get('active_skill') or '-'} lat_ms={planner.get('latency_ms')} status={planner.get('status') or '-'}"
+    )
+    lines.append("")
+
+
+def _render_arbiter_panel(lines: List[str], state: DashboardState) -> None:
+    lines.append(f"{_focus_prefix(state, 'arbiter')}Arbiter")
+    contexts = _case_contexts(state)
+    arbiter = contexts.get("arbiter_context") if isinstance(contexts.get("arbiter_context"), dict) else {}
+    if not arbiter:
+        lines.append("  no arbiter context")
+        lines.append("")
+        return
+    lines.append(
+        f"  accepted={arbiter.get('guard_accepted')} fallback={arbiter.get('guard_fallback')} reason={_shorten(str(arbiter.get('guard_reason') or '-'), 120)}"
+    )
+    lines.append(
+        f"  guard_skill={arbiter.get('guard_skill') or '-'} guard_primitive={arbiter.get('guard_primitive') or '-'}"
+    )
+    lines.append(
+        f"  mode={arbiter.get('mode') or '-'} skill={arbiter.get('active_skill') or '-'} status={arbiter.get('status') or '-'}"
+    )
+    lines.append("")
+
+
+def _render_mode_panel(lines: List[str], state: DashboardState) -> None:
+    lines.append(f"{_focus_prefix(state, 'mode')}Mode")
+    contexts = _case_contexts(state)
+    mode_ctx = contexts.get("mode_context") if isinstance(contexts.get("mode_context"), dict) else {}
+    if not mode_ctx:
+        lines.append("  no mode context")
+        lines.append("")
+        return
+    lines.append(f"  mode={mode_ctx.get('mode') or '-'} skill={mode_ctx.get('active_skill') or '-'}")
+    lines.append(
+        f"  transition={mode_ctx.get('transition_from') or '-'}->{mode_ctx.get('transition_to') or '-'} transitioned={mode_ctx.get('transitioned')}"
+    )
+    lines.append(f"  reason={_shorten(str(mode_ctx.get('transition_reason') or '-'), 160)}")
+    lines.append("")
+
+
 def _render_quality_panel(lines: List[str], state: DashboardState) -> None:
     lines.append(f"{_focus_prefix(state, 'quality')}Quality")
     report = state.quality_report
@@ -1554,6 +1838,24 @@ def _render_timeline_detail_panel(lines: List[str], state: DashboardState, args:
     if row.snippet:
         lines.append(f"  snippet={_shorten(row.snippet, 240)}")
 
+    contexts = detail.get("contexts") if isinstance(detail.get("contexts"), dict) else {}
+    planner_ctx = contexts.get("planner_context") if isinstance(contexts.get("planner_context"), dict) else {}
+    arbiter_ctx = contexts.get("arbiter_context") if isinstance(contexts.get("arbiter_context"), dict) else {}
+    mode_ctx = contexts.get("mode_context") if isinstance(contexts.get("mode_context"), dict) else {}
+    if planner_ctx:
+        lines.append(
+            f"  planner=parse:{planner_ctx.get('planner_last_parse_stage') or '-'} err={_shorten(str(planner_ctx.get('planner_last_error') or '-'), 90)}"
+        )
+    if arbiter_ctx:
+        lines.append(
+            f"  arbiter=accepted:{arbiter_ctx.get('guard_accepted')} fallback:{arbiter_ctx.get('guard_fallback')} reason={_shorten(str(arbiter_ctx.get('guard_reason') or '-'), 90)}"
+        )
+    if mode_ctx:
+        lines.append(
+            f"  mode={mode_ctx.get('mode') or '-'} skill={mode_ctx.get('active_skill') or '-'} "
+            f"transition={mode_ctx.get('transition_from') or '-'}->{mode_ctx.get('transition_to') or '-'}"
+        )
+
     max_rows = max(3, int(args.max_log_lines))
     if events:
         lines.append("  recent_events:")
@@ -1674,6 +1976,7 @@ def _build_viewer_summary(
         "schema_version": int(TELEMETRY_SCHEMA_VERSION_V3),
         "run_id": f"{int(ended_wall_s * 1000)}-{os.getpid()}",
         "mode": str(mode or "live"),
+        "mode_profile": str(state.active_preset or mode or "live"),
         "started_at_wall_s": float(state.started_wall_s),
         "ended_at_wall_s": ended_wall_s,
         "session_duration_s": round(duration_s, 3),
@@ -1795,6 +2098,63 @@ def _resolve_live_save_session_dir(
     return auto_dir, f"curation enabled; auto save_session={auto_dir}"
 
 
+_CAPTURE_MARKER_FILES = (
+    "events.jsonl",
+    "manifest.json",
+    "index.json",
+    "reasoning_index.json",
+    "trace_index.json",
+    "session.db",
+)
+
+
+def _session_dir_has_capture_artifacts(path: str) -> bool:
+    root = _expand_local_path(path)
+    if not root or (not os.path.isdir(root)):
+        return False
+    for name in _CAPTURE_MARKER_FILES:
+        candidate = os.path.join(root, name)
+        if os.path.isfile(candidate):
+            return True
+    return False
+
+
+def _suffix_session_dir(path: str, *, now_wall_s: Optional[float] = None) -> str:
+    base = _expand_local_path(path)
+    ts = time.localtime(time.time() if now_wall_s is None else float(now_wall_s))
+    stamp = time.strftime("%Y%m%d_%H%M%S", ts)
+    prefix = f"{base}_{stamp}"
+    candidate = prefix
+    idx = 1
+    while os.path.exists(candidate):
+        candidate = f"{prefix}_{idx:02d}"
+        idx += 1
+    return candidate
+
+
+def _resolve_capture_output_dir(
+    path: str,
+    *,
+    now_wall_s: Optional[float] = None,
+    avoid_paths: Sequence[str] = (),
+) -> tuple[str, str]:
+    root = _expand_local_path(path)
+    if not root:
+        return "", ""
+    reasons: List[str] = []
+    for avoid in avoid_paths:
+        if avoid and _paths_equivalent(root, avoid):
+            reasons.append("matches replay dir")
+            break
+    if _session_dir_has_capture_artifacts(root):
+        reasons.append("contains capture artifacts")
+    if not reasons:
+        return root, ""
+    target = _suffix_session_dir(root, now_wall_s=now_wall_s)
+    reason_text = ", ".join(reasons)
+    return target, f"save_session {reason_text}; using {target}"
+
+
 def _render(state: DashboardState, *, now_wall_s: float, args: argparse.Namespace) -> str:
     lines = []
     if _panel_enabled(args, "summary"):
@@ -1832,6 +2192,17 @@ def _render(state: DashboardState, *, now_wall_s: float, args: argparse.Namespac
             f"count={len(state.trace_records)} selected={(selected_trace.trace_id if selected_trace else 'n/a')} "
             f"pinned={(state.trace_pinned_id or 'none')}"
         )
+        v4_health = _summarize_v4_health(state)
+        if int(v4_health.get("v4_event_count", 0) or 0) > 0:
+            decisions = int(v4_health.get("decision_events", 0) or 0)
+            denom = decisions if decisions > 0 else int(v4_health.get("v4_event_count", 0) or 0)
+            lines.append(
+                "V4: "
+                f"decisions={decisions} committed={v4_health.get('committed', 0)} "
+                f"fallback={v4_health.get('fallback', 0)} planner_error={v4_health.get('planner_error', 0)} "
+                f"commit_rate={_ratio_percent(int(v4_health.get('committed', 0) or 0), denom)} "
+                f"fsm={v4_health.get('mode_health_state', 'unknown')}"
+            )
         if state.quality_report is not None:
             lines.append(
                 "Quality: "
@@ -1864,6 +2235,18 @@ def _render(state: DashboardState, *, now_wall_s: float, args: argparse.Namespac
 
     if _panel_enabled(args, "trace_detail"):
         _render_trace_detail(lines, state, args)
+
+    if _panel_enabled(args, "planner"):
+        _render_planner_panel(lines, state)
+
+    if _panel_enabled(args, "arbiter"):
+        _render_arbiter_panel(lines, state)
+
+    if _panel_enabled(args, "mode"):
+        _render_mode_panel(lines, state)
+
+    if _panel_enabled(args, "v4_health"):
+        _render_v4_health_panel(lines, state)
 
     if _panel_enabled(args, "quality"):
         _render_quality_panel(lines, state)
@@ -1931,6 +2314,12 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--jetson-dir", default="~/pala", help="Project directory on Jetson.")
     parser.add_argument("--replay", default="", help="Replay a local telemetry session directory.")
     parser.add_argument("--save-session", default="", help="Write local capture bundle directory.")
+    parser.add_argument(
+        "--focus",
+        choices=["auto", "runtime", "reasoning", "perception", "planner", "memory", "hardware", "cosmos", "behavior"],
+        default="auto",
+        help="Signal focus profile for stream filtering (live/replay).",
+    )
     parser.add_argument("--query", default="", help="Indexed telemetry query expression.")
     parser.add_argument("--index-mode", choices=["auto", "off", "sqlite"], default="auto", help=hidden)
     parser.add_argument("--quality-gate", choices=["off", "warn", "strict"], default="warn")
@@ -2037,6 +2426,9 @@ def _apply_mode_defaults(args: argparse.Namespace, parser: argparse.ArgumentPars
         args.index_mode = cfg.index_mode
     if cfg.no_video:
         args.no_video = True
+    focus_note = _apply_focus_defaults(args, mode=mode)
+    if focus_note:
+        notes.append(focus_note)
     return notes
 
 
@@ -2062,7 +2454,11 @@ def main() -> int:
     signal.signal(signal.SIGTERM, _stop_handler)
 
     state = DashboardState(host=args.jetson_host, max_frame_bytes=max(0, int(args.max_frame_bytes)))
-    state.active_preset = str(args.mode or "live")
+    state.active_preset = (
+        f"{str(args.mode or 'live')}:{str(args.focus or 'auto')}"
+        if str(args.focus or "auto") != "auto"
+        else str(args.mode or "live")
+    )
     state.configure_panels(args.panel, focus_panel=str(args.focus_panel or ""))
     state.query_text = str(args.query or "").strip()
     if "trace_list" in args.panel:
@@ -2110,12 +2506,17 @@ def main() -> int:
         save_session_dir=str(args.save_session or ""),
         curate_on_exit=bool(args.curate_on_exit),
     )
+    capture_dir_note = ""
     if save_session_dir:
+        save_session_dir, capture_dir_note = _resolve_capture_output_dir(
+            save_session_dir,
+            avoid_paths=(replay_dir,) if replay_mode else (),
+        )
         args.save_session = save_session_dir
-    if replay_mode and save_session_dir and _paths_equivalent(save_session_dir, replay_dir):
-        parser.error("--save-session must differ from --replay to avoid overwriting replay data")
     if save_session_note:
         state.logs.append(save_session_note)
+    if capture_dir_note:
+        state.logs.append(capture_dir_note)
     if save_session_dir:
         state.annotation_session_dir = save_session_dir
         for row in load_annotations(save_session_dir, limit=120):

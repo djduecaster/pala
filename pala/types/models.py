@@ -45,6 +45,7 @@ class PrimitiveKind(str, Enum):
     NOD = "nod"
     BREATH = "breath"
     ORIENT_TO_ZONE = "orient_to_zone"
+    SCAN_SWEEP = "scan_sweep"
 
 
 @dataclass(frozen=True)
@@ -104,6 +105,18 @@ class OrientToZoneCommand:
     rate_rad_s: float = 1.4
 
 
+@dataclass(frozen=True)
+class ScanSweepCommand:
+    positions: int = 0
+    camera_hfov_deg: float = 70.42
+    overlap: float = 0.2
+    dwell_s: float = 0.2
+    rate_rad_s: float = 1.4
+    edge_margin_rad: float = 0.05
+    return_to_center: bool = True
+    timeout_s: float = 8.0
+
+
 PrimitiveCommand = Union[
     HoldCommand,
     HomeCommand,
@@ -113,6 +126,7 @@ PrimitiveCommand = Union[
     NodCommand,
     BreathCommand,
     OrientToZoneCommand,
+    ScanSweepCommand,
 ]
 
 
@@ -245,6 +259,38 @@ def command_from_dict(kind: PrimitiveKind, payload: Mapping[str, Any]) -> Primit
             amp_rad=_as_float(payload.get("amp_rad", 0.25), "amp_rad"),
             rate_rad_s=_as_float(payload.get("rate_rad_s", 1.4), "rate_rad_s"),
         )
+    if kind == PrimitiveKind.SCAN_SWEEP:
+        positions = _as_int(payload.get("positions", 0), "positions")
+        if positions < 0:
+            raise ValueError("positions must be >= 0")
+        camera_hfov_deg = _as_float(payload.get("camera_hfov_deg", 70.42), "camera_hfov_deg")
+        if camera_hfov_deg <= 0.0:
+            raise ValueError("camera_hfov_deg must be > 0")
+        overlap = _as_float(payload.get("overlap", 0.2), "overlap")
+        if overlap < 0.0 or overlap >= 0.95:
+            raise ValueError("overlap must be in [0.0, 0.95)")
+        dwell_s = _as_float(payload.get("dwell_s", 0.2), "dwell_s")
+        if dwell_s < 0.0:
+            raise ValueError("dwell_s must be >= 0")
+        rate_rad_s = _as_float(payload.get("rate_rad_s", 1.4), "rate_rad_s")
+        if rate_rad_s <= 0.0:
+            raise ValueError("rate_rad_s must be > 0")
+        edge_margin_rad = _as_float(payload.get("edge_margin_rad", 0.05), "edge_margin_rad")
+        if edge_margin_rad < 0.0:
+            raise ValueError("edge_margin_rad must be >= 0")
+        timeout_s = _as_float(payload.get("timeout_s", 8.0), "timeout_s")
+        if timeout_s <= 0.0:
+            raise ValueError("timeout_s must be > 0")
+        return ScanSweepCommand(
+            positions=positions,
+            camera_hfov_deg=camera_hfov_deg,
+            overlap=overlap,
+            dwell_s=dwell_s,
+            rate_rad_s=rate_rad_s,
+            edge_margin_rad=edge_margin_rad,
+            return_to_center=_coerce_bool(payload.get("return_to_center", True), default=True),
+            timeout_s=timeout_s,
+        )
     raise ValueError(f"Unsupported primitive kind: {kind.value}")
 
 
@@ -364,4 +410,5 @@ _COMMAND_BY_KIND = {
     PrimitiveKind.NOD: NodCommand,
     PrimitiveKind.BREATH: BreathCommand,
     PrimitiveKind.ORIENT_TO_ZONE: OrientToZoneCommand,
+    PrimitiveKind.SCAN_SWEEP: ScanSweepCommand,
 }

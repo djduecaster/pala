@@ -1,0 +1,20 @@
+<h3>Scenario Presets</h3>
+<p class="muted small">One-click setup for common FSM + packet tuning scenarios.</p>
+{% if preset_status %}
+  <div class="notice"><strong>{{ preset_status }}</strong></div>
+{% endif %}
+<div class="preset-grid">
+  {% for preset in scenario_presets %}
+    <form
+      class="preset-card"
+      hx-post="/probe/v4/presets/apply"
+      hx-target="#preset-panel"
+      hx-swap="innerHTML"
+    >
+      <input type="hidden" name="preset_id" value="{{ preset.id }}" />
+      <div class="preset-title">{{ preset.title }}</div>
+      <div class="muted small">{{ preset.description }}</div>
+      <button type="submit" class="btn-secondary">Apply Preset</button>
+    </form>
+  {% endfor %}
+</div>

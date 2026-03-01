@@ -1,6 +1,6 @@
-# PALA Probe Web
+# PALA Probe Web (Behavior V4)
 
-Web sidecar for inspecting env packets and env→planner chained probes with ordered 4-image uploads.
+Web sidecar for inspecting single-call Behavior V4 model packets and testing the deterministic mode FSM simulator.
 
 ## Run
 
@@ -14,31 +14,37 @@ Open: `http://127.0.0.1:8787`
 
 - `PALA_COSMOS_API_KEY`
 
-Optional overrides in UI:
+## Main capabilities
 
-- provider/model/base URL
-- timeout, env max tokens, planner max tokens
-- temperature, top_p, presence_penalty (env and planner)
-- env contract, policy fields, planner prompt
-- inter-frame spacing
-- planner max proposals and planner env-context toggle
-- planner system prompt, planner image indices, context/user-text overrides
-- full planner payload override JSON
-
-Modes:
-- `Run Env Probe`: env-only packet/request.
-- `Run Env, Preview Planner Inputs`: runs env and prepares full planner packet for inspection.
-- `Run Planner From Prepared Env`: executes planner against a prepared env run id.
-- `Run Env + Planner`: one-shot chained execution.
-
-Use the `Input/Output Help` overlay in the header for a full contract summary of env and planner inputs/outputs.
+- Ordered 4-image upload packet with preview and reordering.
+- Full Behavior V4 packet inspection:
+  - model target/knobs
+  - policy fields
+  - auto/effective context
+  - response format schema
+  - full redacted payload
+- Result diagnostics:
+  - raw content
+  - parsed decision
+  - parser stage/error
+  - guard result and committed action
+- Deterministic mode FSM simulator panel:
+  - step with signals
+  - force mode transitions
+  - reset and inspect snapshots
+- Scenario presets panel:
+  - one-click FSM+packet setup for social greeting, search assist, and recover-reset tuning
+- Run compare panel:
+  - compare two prior runs for parse outcomes, guard reasons, final primitives, latency, and token deltas
+- Base UX improvements:
+  - sticky run action bar + run-state status
+  - JSON validate/format helpers for override fields
+  - local form persistence between refreshes
 
 ## Artifacts
 
 Runs are saved under:
 
-- `logs/probe_web/<run_id>/`
+- `logs/probe_web_v4/<run_id>/`
 
-with config, packet view, response outputs, parsed output, and packet images.
-
-For chained runs (`Env + Planner` mode), planner request/response artifacts and effective input snapshots are saved in the same run folder.
+with config, packet views, response outputs, parsed output, guard/final action files, FSM snapshots, and packet images.

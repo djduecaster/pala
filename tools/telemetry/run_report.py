@@ -11,6 +11,7 @@ from .storage_sqlite import resolve_session_db_path
 
 VIEWER_SUMMARY_PATH = "viewer_summary.json"
 VIEWER_RUNS_PATH = "viewer_runs.jsonl"
+DATASET_MANIFEST_PATH = "dataset_manifest.json"
 SESSION_MARKER_FILES = (VIEWER_RUNS_PATH, VIEWER_SUMMARY_PATH, "manifest.json", "events.jsonl")
 
 
@@ -124,6 +125,66 @@ def _as_float(value: Any) -> Optional[float]:
     return None
 
 
+
+def _as_counter_map(value: Any) -> Dict[str, int]:
+    if not isinstance(value, Mapping):
+        return {}
+    out: Dict[str, int] = {}
+    for key, raw in value.items():
+        name = str(key or "").strip()
+        if not name:
+            continue
+        if isinstance(raw, (int, float)):
+            count = int(raw)
+        else:
+            continue
+        if count <= 0:
+            continue
+        out[name] = count
+    return out
+
+
+def _merge_counter(dst: Dict[str, int], src: Mapping[str, int]) -> None:
+    for key, value in src.items():
+        name = str(key or "").strip()
+        if not name:
+            continue
+        count = int(value)
+        if count <= 0:
+            continue
+        dst[name] = dst.get(name, 0) + count
+
+
+def _load_dataset_manifest_stats(session_dir: str) -> Optional[Dict[str, Any]]:
+    root = _expand_path(session_dir)
+    if not root:
+        return None
+    manifest_path = os.path.join(root, DATASET_MANIFEST_PATH)
+    if not os.path.exists(manifest_path):
+        return None
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as fh:
+            obj = json.load(fh)
+    except Exception:
+        return None
+    if not isinstance(obj, dict):
+        return None
+    row_count = obj.get("row_count")
+    row_count_val = int(row_count) if isinstance(row_count, (int, float)) else 0
+    return {
+        "path": manifest_path,
+        "row_count": max(0, row_count_val),
+        "planner_failure_ratio": _as_float(obj.get("planner_failure_ratio")),
+        "guard_fallback_ratio": _as_float(obj.get("guard_fallback_ratio")),
+        "transition_instability_ratio": _as_float(obj.get("transition_instability_ratio")),
+        "planner_parse_stage_counts": _as_counter_map(obj.get("planner_parse_stage_counts")),
+        "guard_reason_counts": _as_counter_map(obj.get("guard_reason_counts")),
+        "mode_transition_to_counts": _as_counter_map(obj.get("mode_transition_to_counts")),
+        "mode_fsm_state_counts": _as_counter_map(obj.get("mode_fsm_state_counts")),
+        "mode_transition_reason_counts": _as_counter_map(obj.get("mode_transition_reason_counts")),
+    }
+
+
 def _safe_ratio(numer: int, denom: int) -> Optional[float]:
     if denom <= 0:
         return None
@@ -176,6 +237,16 @@ def _load_case_stats(session_dir: str) -> Optional[Dict[str, Any]]:
             else:
                 reviewed_cases = 0
                 decision_counts = {}
+            if "case_labels" in tables:
+                label_counts = {
+                    str(row[0]): int(row[1])
+                    for row in conn.execute(
+                        "SELECT label, COUNT(*) FROM case_labels GROUP BY label"
+                    ).fetchall()
+                    if row and row[0] is not None
+                }
+            else:
+                label_counts = {}
     except Exception:
         return None
     return {
@@ -183,6 +254,7 @@ def _load_case_stats(session_dir: str) -> Optional[Dict[str, Any]]:
         "total_cases": max(0, int(total_cases)),
         "reviewed_cases": max(0, int(reviewed_cases)),
         "decision_counts": decision_counts,
+        "label_counts": label_counts,
     }
 
 
@@ -190,6 +262,7 @@ def _build_alerts(
     rows: Sequence[Tuple[str, Dict[str, Any]]],
     *,
     latest_case_stats: Optional[Mapping[str, Any]] = None,
+    latest_dataset_stats: Optional[Mapping[str, Any]] = None,
 ) -> List[str]:
     if not rows:
         return []
@@ -222,6 +295,39 @@ def _build_alerts(
             coverage = float(reviewed_cases) / float(total_cases)
             if coverage < 0.15:
                 alerts.append(f"latest_case_review_coverage_low:{coverage:.3f}")
+        labels = latest_case_stats.get("label_counts") if isinstance(latest_case_stats.get("label_counts"), Mapping) else {}
+        planner_fail = int(labels.get("planner_transport_error", 0) or 0)
+        guard_fallback = int(labels.get("guard_fallback", 0) or 0)
+        transition_churn = int(labels.get("mode_transition_churn", 0) or 0)
+        if total_cases > 0 and planner_fail > 0:
+            rate = float(planner_fail) / float(total_cases)
+            if rate >= 0.25:
+                alerts.append(f"latest_planner_failure_high:{rate:.3f}")
+        if total_cases > 0 and guard_fallback > 0:
+            rate = float(guard_fallback) / float(total_cases)
+            if rate >= 0.35:
+                alerts.append(f"latest_guard_fallback_high:{rate:.3f}")
+        if transition_churn > 0:
+            alerts.append(f"latest_transition_churn_cases:{transition_churn}")
+
+    if isinstance(latest_dataset_stats, Mapping):
+        planner_fail_ratio = _as_float(latest_dataset_stats.get("planner_failure_ratio"))
+        guard_fallback_ratio = _as_float(latest_dataset_stats.get("guard_fallback_ratio"))
+        transition_ratio = _as_float(latest_dataset_stats.get("transition_instability_ratio"))
+        if planner_fail_ratio is not None and planner_fail_ratio >= 0.35:
+            alerts.append(f"latest_dataset_planner_failure_ratio_high:{planner_fail_ratio:.3f}")
+        if guard_fallback_ratio is not None and guard_fallback_ratio >= 0.45:
+            alerts.append(f"latest_dataset_guard_fallback_ratio_high:{guard_fallback_ratio:.3f}")
+        if transition_ratio is not None and transition_ratio >= 0.30:
+            alerts.append(f"latest_dataset_transition_instability_ratio_high:{transition_ratio:.3f}")
+
+        row_count = int(latest_dataset_stats.get("row_count", 0) or 0)
+        fsm_counts = _as_counter_map(latest_dataset_stats.get("mode_fsm_state_counts"))
+        churn_rows = int(fsm_counts.get("churn", 0) or 0)
+        if row_count > 0 and churn_rows > 0:
+            churn_ratio = float(churn_rows) / float(row_count)
+            if churn_ratio >= 0.20:
+                alerts.append("latest_dataset_mode_churn_high:{:.3f}".format(churn_ratio))
 
     latest_transport_peak = _as_float(latest.get("transport_queue_peak_utilization"))
     if latest_transport_peak is not None and latest_transport_peak >= 0.85:
@@ -288,11 +394,15 @@ def build_run_report(
     rows: List[Tuple[str, Dict[str, Any]]] = []
     mode_filter_norm = str(mode_filter or "").strip().lower()
     case_stats_by_session: Dict[str, Dict[str, Any]] = {}
+    dataset_stats_by_session: Dict[str, Dict[str, Any]] = {}
 
     for session_dir in session_dirs:
         case_stats = _load_case_stats(session_dir)
         if isinstance(case_stats, dict):
             case_stats_by_session[session_dir] = case_stats
+        dataset_stats = _load_dataset_manifest_stats(session_dir)
+        if isinstance(dataset_stats, dict):
+            dataset_stats_by_session[session_dir] = dataset_stats
         runs = _load_session_runs(session_dir)
         if not runs:
             continue
@@ -396,6 +506,17 @@ def build_run_report(
     total_cases = 0
     reviewed_cases = 0
     case_decision_counts: Dict[str, int] = {}
+    case_label_counts: Dict[str, int] = {}
+
+    dataset_rows_total = 0
+    dataset_planner_failure_ratios: List[float] = []
+    dataset_guard_fallback_ratios: List[float] = []
+    dataset_transition_instability_ratios: List[float] = []
+    dataset_parse_stage_counts: Dict[str, int] = {}
+    dataset_guard_reason_counts: Dict[str, int] = {}
+    dataset_transition_to_counts: Dict[str, int] = {}
+    dataset_mode_fsm_state_counts: Dict[str, int] = {}
+    dataset_transition_reason_counts: Dict[str, int] = {}
     for case_stats in case_stats_by_session.values():
         total_cases += int(case_stats.get("total_cases", 0) or 0)
         reviewed_cases += int(case_stats.get("reviewed_cases", 0) or 0)
@@ -404,12 +525,36 @@ def build_run_report(
             for key, value in decisions.items():
                 label = str(key)
                 case_decision_counts[label] = case_decision_counts.get(label, 0) + int(value or 0)
+        labels = case_stats.get("label_counts")
+        if isinstance(labels, dict):
+            for key, value in labels.items():
+                label = str(key)
+                case_label_counts[label] = case_label_counts.get(label, 0) + int(value or 0)
+
+    for dataset_stats in dataset_stats_by_session.values():
+        dataset_rows_total += int(dataset_stats.get("row_count", 0) or 0)
+        planner_ratio = _as_float(dataset_stats.get("planner_failure_ratio"))
+        guard_ratio = _as_float(dataset_stats.get("guard_fallback_ratio"))
+        transition_ratio = _as_float(dataset_stats.get("transition_instability_ratio"))
+        if planner_ratio is not None:
+            dataset_planner_failure_ratios.append(max(0.0, planner_ratio))
+        if guard_ratio is not None:
+            dataset_guard_fallback_ratios.append(max(0.0, guard_ratio))
+        if transition_ratio is not None:
+            dataset_transition_instability_ratios.append(max(0.0, transition_ratio))
+        _merge_counter(dataset_parse_stage_counts, _as_counter_map(dataset_stats.get("planner_parse_stage_counts")))
+        _merge_counter(dataset_guard_reason_counts, _as_counter_map(dataset_stats.get("guard_reason_counts")))
+        _merge_counter(dataset_transition_to_counts, _as_counter_map(dataset_stats.get("mode_transition_to_counts")))
+        _merge_counter(dataset_mode_fsm_state_counts, _as_counter_map(dataset_stats.get("mode_fsm_state_counts")))
+        _merge_counter(dataset_transition_reason_counts, _as_counter_map(dataset_stats.get("mode_transition_reason_counts")))
 
     latest = None
     latest_case_stats: Optional[Dict[str, Any]] = None
+    latest_dataset_stats: Optional[Dict[str, Any]] = None
     if rows:
         latest_session, latest_run = rows[-1]
         latest_case_stats = case_stats_by_session.get(latest_session)
+        latest_dataset_stats = dataset_stats_by_session.get(latest_session)
         latest = {
             "session_dir": latest_session,
             "run_id": latest_run.get("run_id"),
@@ -439,6 +584,15 @@ def build_run_report(
             latest["case_review_coverage"] = (
                 (float(latest_reviewed) / float(latest_total)) if latest_total > 0 else None
             )
+        if isinstance(latest_dataset_stats, dict):
+            latest["dataset_row_count"] = int(latest_dataset_stats.get("row_count", 0) or 0)
+            latest["dataset_planner_failure_ratio"] = _as_float(latest_dataset_stats.get("planner_failure_ratio"))
+            latest["dataset_guard_fallback_ratio"] = _as_float(latest_dataset_stats.get("guard_fallback_ratio"))
+            latest["dataset_transition_instability_ratio"] = _as_float(latest_dataset_stats.get("transition_instability_ratio"))
+            latest_fsm_counts = _as_counter_map(latest_dataset_stats.get("mode_fsm_state_counts"))
+            churn_rows = int(latest_fsm_counts.get("churn", 0) or 0)
+            latest_rows = int(latest_dataset_stats.get("row_count", 0) or 0)
+            latest["dataset_mode_churn_ratio"] = (float(churn_rows) / float(latest_rows)) if latest_rows > 0 else None
 
     avg_duration = None
     if duration_values:
@@ -446,7 +600,7 @@ def build_run_report(
     avg_quality = None
     if quality_score_values:
         avg_quality = sum(quality_score_values) / len(quality_score_values)
-    alerts = _build_alerts(rows, latest_case_stats=latest_case_stats)
+    alerts = _build_alerts(rows, latest_case_stats=latest_case_stats, latest_dataset_stats=latest_dataset_stats)
     quality_failed = max(0, quality_known - quality_passed)
     curation_failed = max(0, curation_known - curation_ok)
     sessions_without_runs = sorted(path for path in session_dirs if path not in sessions_with_runs)
@@ -520,6 +674,23 @@ def build_run_report(
             "reviewed_cases": int(reviewed_cases),
             "review_coverage": (float(reviewed_cases) / float(total_cases)) if total_cases > 0 else None,
             "decision_counts": case_decision_counts,
+            "label_counts": case_label_counts,
+        },
+        "dataset_v4": {
+            "sessions_with_manifest": len(dataset_stats_by_session),
+            "rows_total": int(dataset_rows_total),
+            "planner_failure_ratio_p50": _percentile(dataset_planner_failure_ratios, 50.0),
+            "planner_failure_ratio_p95": _percentile(dataset_planner_failure_ratios, 95.0),
+            "guard_fallback_ratio_p50": _percentile(dataset_guard_fallback_ratios, 50.0),
+            "guard_fallback_ratio_p95": _percentile(dataset_guard_fallback_ratios, 95.0),
+            "transition_instability_ratio_p50": _percentile(dataset_transition_instability_ratios, 50.0),
+            "transition_instability_ratio_p95": _percentile(dataset_transition_instability_ratios, 95.0),
+            "planner_parse_stage_counts": dataset_parse_stage_counts,
+            "guard_reason_counts": dataset_guard_reason_counts,
+            "mode_transition_to_counts": dataset_transition_to_counts,
+            "mode_fsm_state_counts": dataset_mode_fsm_state_counts,
+            "mode_transition_reason_counts": dataset_transition_reason_counts,
+            "mode_churn_ratio_global": (float(dataset_mode_fsm_state_counts.get("churn", 0)) / float(dataset_rows_total)) if dataset_rows_total > 0 else None,
         },
         "alerts": alerts,
         "alerts_count": len(alerts),
@@ -620,6 +791,16 @@ def main() -> int:
         f"total={cases.get('total_cases') if cases else None} "
         f"reviewed={cases.get('reviewed_cases') if cases else None} "
         f"coverage={cases.get('review_coverage') if cases else None}"
+    )
+    dataset_v4 = report.get("dataset_v4") if isinstance(report.get("dataset_v4"), dict) else {}
+    print(
+        "dataset_v4: "
+        f"sessions={dataset_v4.get('sessions_with_manifest') if dataset_v4 else None} "
+        f"rows_total={dataset_v4.get('rows_total') if dataset_v4 else None} "
+        f"planner_fail_p50={dataset_v4.get('planner_failure_ratio_p50') if dataset_v4 else None} "
+        f"guard_fallback_p50={dataset_v4.get('guard_fallback_ratio_p50') if dataset_v4 else None} "
+        f"transition_instability_p50={dataset_v4.get('transition_instability_ratio_p50') if dataset_v4 else None} "
+        f"mode_churn_global={dataset_v4.get('mode_churn_ratio_global') if dataset_v4 else None}"
     )
     latest = report.get("latest_run")
     if isinstance(latest, dict):

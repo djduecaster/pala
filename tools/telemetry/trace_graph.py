@@ -45,13 +45,16 @@ _WARN_HINTS = ("warn", "retry", "drop")
 _STATUS_RANK = {
     "unknown": 0,
     "ok": 1,
-    "warning": 2,
-    "stale": 3,
-    "timeout": 4,
-    "no_content": 5,
-    "invalid": 6,
-    "parse_fail": 7,
-    "error": 8,
+    "committed": 2,
+    "warning": 3,
+    "fallback": 4,
+    "stale": 5,
+    "timeout": 6,
+    "planner_error": 7,
+    "no_content": 8,
+    "invalid": 9,
+    "parse_fail": 10,
+    "error": 11,
 }
 _SEVERITY_RANK = {"info": 0, "warning": 1, "error": 2}
 
@@ -87,6 +90,12 @@ def _as_optional_str(value: Any) -> Optional[str]:
     return text or None
 
 
+def _as_optional_bool(value: Any) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+    return None
+
+
 def _truncate(text: str, max_len: int = 180) -> str:
     if len(text) <= max_len:
         return text
@@ -112,7 +121,7 @@ def _normalize_status(raw: Optional[str]) -> str:
     text = (raw or "").strip().lower()
     if not text:
         return "unknown"
-    for key in ("parse_fail", "no_content", "timeout", "stale", "invalid", "error"):
+    for key in ("committed", "fallback", "planner_error", "parse_fail", "no_content", "timeout", "stale", "invalid", "error"):
         if key in text:
             return key
     if text in {"ok", "success"}:
@@ -283,34 +292,39 @@ def _make_event_ref(msg: Dict[str, Any], event_index: int) -> Optional[TraceEven
             data = payload
         if not data:
             return None
-        decision = _as_dict(data.get("decision"))
+        planner = _as_dict(data.get("planner"))
+        guard = _as_dict(data.get("guard"))
         mode_transition = _as_dict(data.get("mode_transition"))
+        current_action = _as_dict(data.get("current_action"))
         req_id = _as_optional_int(data.get("request_id"))
         if req_id is None:
             req_id = _as_optional_int(data.get("req_id"))
         if req_id is None:
             req_id = _as_optional_int(data.get("id"))
-        phase = _as_optional_str(data.get("mode")) or _as_optional_str(mode_transition.get("to")) or "behavior_trace"
-        committed = decision.get("committed")
-        if isinstance(committed, bool):
-            status = "committed" if committed else "no_commit"
+        phase = _as_optional_str(mode_transition.get("to")) or _as_optional_str(data.get("mode")) or "behavior_trace"
+        guard_accepted = _as_optional_bool(guard.get("accepted"))
+        guard_fallback = _as_optional_bool(guard.get("fallback"))
+        planner_error = _as_optional_str(planner.get("last_error")) or _as_optional_str(data.get("planner_error"))
+        parse_stage = _as_optional_str(planner.get("last_parse_stage")) or _as_optional_str(data.get("parse_stage"))
+        if guard_accepted is True:
+            status = "committed"
+        elif guard_fallback is True:
+            status = "fallback"
+        elif planner_error:
+            status = "planner_error"
+        elif parse_stage and any(tok in parse_stage.lower() for tok in ("fail", "invalid", "error")):
+            status = "parse_fail"
         else:
-            status = _as_optional_str(decision.get("status")) or _as_optional_str(data.get("status")) or "trace"
-        latency_ms = _as_optional_float(data.get("latency_ms")) or _as_optional_float(data.get("duration_ms"))
-        summary = _as_optional_str(decision.get("reason")) or _as_optional_str(mode_transition.get("reason")) or ""
+            status = _as_optional_str(data.get("status")) or "trace"
+        latency_ms = _as_optional_float(planner.get("last_latency_ms"))
+        if latency_ms is None:
+            latency_ms = _as_optional_float(data.get("latency_ms")) or _as_optional_float(data.get("duration_ms"))
+        summary = _as_optional_str(guard.get("reason")) or planner_error or _as_optional_str(mode_transition.get("reason")) or ""
         if not summary:
-            top = data.get("top_candidates")
-            if isinstance(top, list) and top and isinstance(top[0], dict):
-                top0 = top[0]
-                primitive = _as_optional_str(top0.get("primitive"))
-                intent = _as_optional_str(top0.get("intent"))
-                utility = _as_optional_float(top0.get("utility"))
-                parts = [part for part in [primitive, intent] if part]
-                if utility is not None:
-                    parts.append(f"utility={utility:.3f}")
-                summary = " ".join(parts)
-        if not summary:
-            summary = _as_optional_str(data.get("mode")) or "behavior_trace"
+            mode = _as_optional_str(data.get("mode")) or "-"
+            skill = _as_optional_str(data.get("active_skill")) or "-"
+            primitive = _as_optional_str(current_action.get("primitive")) or _as_optional_str(guard.get("primitive")) or "-"
+            summary = f"mode={mode} skill={skill} action={primitive}"
     else:
         return None
 

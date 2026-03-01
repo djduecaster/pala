@@ -19,25 +19,34 @@ const statusBox = document.getElementById("statusBox");
 const transitionText = document.getElementById("transitionText");
 const allowedText = document.getElementById("allowedText");
 const proposalTableBody = document.querySelector("#proposalTable tbody");
+const historyTableBody = document.querySelector("#historyTable tbody");
+const clearHistoryBtn = document.getElementById("clearHistoryBtn");
 
 const stepBtn = document.getElementById("stepBtn");
 const stepCommitBtn = document.getElementById("stepCommitBtn");
 const step5Btn = document.getElementById("step5Btn");
 const autoBtn = document.getElementById("autoBtn");
+const forceBtn = document.getElementById("forceBtn");
 const resetBtn = document.getElementById("resetBtn");
 const dtInput = document.getElementById("dtInput");
 const commitToggle = document.getElementById("commitToggle");
 const zoneHintSelect = document.getElementById("zoneHintSelect");
+const forceModeSelect = document.getElementById("forceModeSelect");
+const forceReasonInput = document.getElementById("forceReasonInput");
 
 const personPresentInput = document.getElementById("personPresentInput");
 const personConfRange = document.getElementById("personConfRange");
 const personConfInput = document.getElementById("personConfInput");
-const activityRange = document.getElementById("activityRange");
-const activityInput = document.getElementById("activityInput");
-const noveltyRange = document.getElementById("noveltyRange");
-const noveltyInput = document.getElementById("noveltyInput");
-const envDeltaRange = document.getElementById("envDeltaRange");
-const envDeltaInput = document.getElementById("envDeltaInput");
+const searchRequestedInput = document.getElementById("searchRequestedInput");
+const searchCompleteInput = document.getElementById("searchCompleteInput");
+const assistCompleteInput = document.getElementById("assistCompleteInput");
+const userAckInput = document.getElementById("userAckInput");
+const taskActiveInput = document.getElementById("taskActiveInput");
+const homeRequestedInput = document.getElementById("homeRequestedInput");
+const homeCompletedInput = document.getElementById("homeCompletedInput");
+const cancelRequestedInput = document.getElementById("cancelRequestedInput");
+const startupCompleteInput = document.getElementById("startupCompleteInput");
+const healthDegradedInput = document.getElementById("healthDegradedInput");
 const plannerBreakerInput = document.getElementById("plannerBreakerInput");
 const perceptionDegradedInput = document.getElementById("perceptionDegradedInput");
 
@@ -67,11 +76,13 @@ function navigateViewerUrl(url) {
 }
 
 const NODE_LAYOUT = Object.freeze({
-  idle_presence: { x: 190, y: 300 },
-  scan_explore: { x: 420, y: 130 },
-  engage_track: { x: 670, y: 300 },
-  acknowledge: { x: 860, y: 130 },
-  recover_reset: { x: 420, y: 490 },
+  boot_awaken: { x: 140, y: 310 },
+  idle_presence: { x: 320, y: 310 },
+  social_interact: { x: 500, y: 180 },
+  search_assist: { x: 500, y: 450 },
+  task_lighting: { x: 690, y: 180 },
+  return_home: { x: 690, y: 450 },
+  recover_reset: { x: 880, y: 310 },
 });
 
 const state = {
@@ -81,6 +92,8 @@ const state = {
   autoRunning: false,
   autoTimer: null,
   inFlight: false,
+  history: [],
+  historyMax: 80,
 };
 
 function isEditableTarget(target) {
@@ -174,9 +187,16 @@ function readSignals() {
   return {
     person_present: personPresentInput.checked,
     person_conf: clamp(Number(personConfInput.value), 0, 1),
-    activity_level: clamp(Number(activityInput.value), 0, 1),
-    novelty: clamp(Number(noveltyInput.value), 0, 1),
-    env_delta: clamp(Number(envDeltaInput.value), 0, 1),
+    search_requested: searchRequestedInput.checked,
+    search_complete: searchCompleteInput.checked,
+    assist_complete: assistCompleteInput.checked,
+    user_ack: userAckInput.checked,
+    task_active: taskActiveInput.checked,
+    home_requested: homeRequestedInput.checked,
+    home_completed: homeCompletedInput.checked,
+    cancel_requested: cancelRequestedInput.checked,
+    startup_complete: startupCompleteInput.checked,
+    health_degraded: healthDegradedInput.checked,
     planner_open_breaker: plannerBreakerInput.checked,
     perception_degraded: perceptionDegradedInput.checked,
   };
@@ -189,17 +209,16 @@ function applySignals(signals) {
   personConfRange.value = String(personConf);
   personConfInput.value = personConf.toFixed(2);
 
-  const activity = clamp(Number(signals.activity_level || 0), 0, 1);
-  activityRange.value = String(activity);
-  activityInput.value = activity.toFixed(2);
-
-  const novelty = clamp(Number(signals.novelty || 0), 0, 1);
-  noveltyRange.value = String(novelty);
-  noveltyInput.value = novelty.toFixed(2);
-
-  const envDelta = clamp(Number(signals.env_delta || 0), 0, 1);
-  envDeltaRange.value = String(envDelta);
-  envDeltaInput.value = envDelta.toFixed(2);
+  searchRequestedInput.checked = Boolean(signals.search_requested);
+  searchCompleteInput.checked = Boolean(signals.search_complete);
+  assistCompleteInput.checked = Boolean(signals.assist_complete);
+  userAckInput.checked = Boolean(signals.user_ack);
+  taskActiveInput.checked = Boolean(signals.task_active);
+  homeRequestedInput.checked = Boolean(signals.home_requested);
+  homeCompletedInput.checked = Boolean(signals.home_completed);
+  cancelRequestedInput.checked = Boolean(signals.cancel_requested);
+  startupCompleteInput.checked = Boolean(signals.startup_complete);
+  healthDegradedInput.checked = Boolean(signals.health_degraded);
 
   plannerBreakerInput.checked = Boolean(signals.planner_open_breaker);
   perceptionDegradedInput.checked = Boolean(signals.perception_degraded);
@@ -211,9 +230,16 @@ function applySignalPreset(name) {
     applySignals({
       person_present: false,
       person_conf: 0.0,
-      activity_level: 0.08,
-      novelty: 0.06,
-      env_delta: 0.05,
+      search_requested: false,
+      search_complete: false,
+      assist_complete: false,
+      user_ack: false,
+      task_active: false,
+      home_requested: false,
+      home_completed: false,
+      cancel_requested: false,
+      startup_complete: true,
+      health_degraded: false,
       planner_open_breaker: false,
       perception_degraded: false,
     });
@@ -222,9 +248,16 @@ function applySignalPreset(name) {
     applySignals({
       person_present: true,
       person_conf: 0.72,
-      activity_level: 0.34,
-      novelty: 0.2,
-      env_delta: 0.14,
+      search_requested: false,
+      search_complete: false,
+      assist_complete: false,
+      user_ack: true,
+      task_active: false,
+      home_requested: false,
+      home_completed: false,
+      cancel_requested: false,
+      startup_complete: true,
+      health_degraded: false,
       planner_open_breaker: false,
       perception_degraded: false,
     });
@@ -233,9 +266,16 @@ function applySignalPreset(name) {
     applySignals({
       person_present: true,
       person_conf: 0.94,
-      activity_level: 0.72,
-      novelty: 0.55,
-      env_delta: 0.32,
+      search_requested: false,
+      search_complete: false,
+      assist_complete: false,
+      user_ack: true,
+      task_active: true,
+      home_requested: false,
+      home_completed: false,
+      cancel_requested: false,
+      startup_complete: true,
+      health_degraded: false,
       planner_open_breaker: false,
       perception_degraded: false,
     });
@@ -244,9 +284,16 @@ function applySignalPreset(name) {
     applySignals({
       person_present: false,
       person_conf: 0.0,
-      activity_level: 0.12,
-      novelty: 0.12,
-      env_delta: 0.86,
+      search_requested: false,
+      search_complete: false,
+      assist_complete: false,
+      user_ack: false,
+      task_active: false,
+      home_requested: false,
+      home_completed: false,
+      cancel_requested: false,
+      startup_complete: true,
+      health_degraded: true,
       planner_open_breaker: false,
       perception_degraded: false,
     });
@@ -255,9 +302,16 @@ function applySignalPreset(name) {
     applySignals({
       person_present: false,
       person_conf: 0.0,
-      activity_level: 0.05,
-      novelty: 0.05,
-      env_delta: 0.2,
+      search_requested: false,
+      search_complete: false,
+      assist_complete: false,
+      user_ack: false,
+      task_active: false,
+      home_requested: false,
+      home_completed: false,
+      cancel_requested: false,
+      startup_complete: true,
+      health_degraded: true,
       planner_open_breaker: true,
       perception_degraded: true,
     });
@@ -444,6 +498,60 @@ function renderProposals(rows) {
   });
 }
 
+function clearHistory() {
+  state.history = [];
+  renderHistory();
+}
+
+function appendHistory(result, source = "step") {
+  const decision = result?.mode_decision || {};
+  const rec = result?.recommended || {};
+  const row = {
+    tick: Number(result?.tick_index || 0),
+    source: String(source || "step"),
+    from: String(decision.from || "?"),
+    to: String(decision.to || "?"),
+    transitioned: Boolean(decision.transitioned),
+    reason: String(decision.reason || ""),
+    recommended: String(rec.primitive || ""),
+    style: String(rec.style || ""),
+  };
+  state.history.unshift(row);
+  const maxRows = Math.max(10, Number(state.historyMax || 80));
+  if (state.history.length > maxRows) {
+    state.history.length = maxRows;
+  }
+  renderHistory();
+}
+
+function renderHistory() {
+  if (!historyTableBody) {
+    return;
+  }
+  historyTableBody.innerHTML = "";
+  state.history.forEach((row) => {
+    const tr = document.createElement("tr");
+
+    const tickTd = document.createElement("td");
+    tickTd.textContent = `${row.tick} (${row.source})`;
+
+    const transitionTd = document.createElement("td");
+    transitionTd.textContent = `${row.from} -> ${row.to}${row.transitioned ? "" : " [held]"}`;
+
+    const reasonTd = document.createElement("td");
+    reasonTd.textContent = row.reason;
+
+    const recTd = document.createElement("td");
+    recTd.textContent = `${row.recommended || "-"}${row.style ? ` (${row.style})` : ""}`;
+
+    tr.appendChild(tickTd);
+    tr.appendChild(transitionTd);
+    tr.appendChild(reasonTd);
+    tr.appendChild(recTd);
+    historyTableBody.appendChild(tr);
+  });
+}
+
 function renderStepResult(result) {
   const decision = result.mode_decision || {};
   const mode = String(decision.to || "");
@@ -507,6 +615,7 @@ async function stepOnce() {
     };
     const result = await apiPost("/api/state_machine/step", payload);
     renderStepResult(result);
+    appendHistory(result, "step");
     notifyShell("ok", "FSM step complete", `${result.mode_decision?.from || "?"} -> ${result.mode_decision?.to || "?"}`);
   } catch (err) {
     statusBox.textContent = `step failed: ${err}`;
@@ -515,6 +624,42 @@ async function stepOnce() {
   } finally {
     state.inFlight = false;
     stepBtn.disabled = false;
+  }
+}
+
+async function forceMode() {
+  if (state.inFlight) {
+    return;
+  }
+  const mode = String(forceModeSelect.value || "").trim();
+  if (!mode) {
+    statusBox.textContent = "force failed: select a force mode first";
+    return;
+  }
+  const reason = String(forceReasonInput.value || "").trim() || "ops_force";
+  state.inFlight = true;
+  forceBtn.disabled = true;
+  try {
+    const dt = clamp(Number(dtInput.value), 0, 10.0);
+    dtInput.value = Number.isFinite(dt) ? dt.toFixed(2) : "0.35";
+    const payload = {
+      mode,
+      reason,
+      dt_s: Number(dtInput.value),
+      commit: Boolean(commitToggle.checked),
+      zone_hint: String(zoneHintSelect.value || ""),
+      signals: readSignals(),
+    };
+    const result = await apiPost("/api/state_machine/force", payload);
+    renderStepResult(result);
+    appendHistory(result, "force");
+    notifyShell("ok", "FSM force complete", `${result.mode_decision?.from || "?"} -> ${result.mode_decision?.to || "?"}`);
+  } catch (err) {
+    statusBox.textContent = `force failed: ${err}`;
+    notifyShell("bad", "FSM force failed", String(err));
+  } finally {
+    state.inFlight = false;
+    forceBtn.disabled = false;
   }
 }
 
@@ -559,6 +704,8 @@ async function resetStateMachine() {
   const meta = res?.meta || {};
   const snapshot = res?.state || meta?.state || {};
   state.meta = meta;
+  clearHistory();
+  applySignals(meta.default_signals || {});
   drawGraph(meta.graph || {});
   renderSnapshot(snapshot);
   notifyShell("ok", "FSM reset");
@@ -609,9 +756,6 @@ window.addEventListener("message", (event) => {
 
 function bindUi() {
   linkRangeAndInput(personConfRange, personConfInput);
-  linkRangeAndInput(activityRange, activityInput);
-  linkRangeAndInput(noveltyRange, noveltyInput);
-  linkRangeAndInput(envDeltaRange, envDeltaInput);
 
   stepBtn.addEventListener("click", () => {
     stepOnce();
@@ -645,6 +789,12 @@ function bindUi() {
     });
   });
 
+  if (forceBtn) {
+    forceBtn.addEventListener("click", () => {
+      forceMode();
+    });
+  }
+
   runSuiteBtn.addEventListener("click", () => {
     runSuitePlayback();
   });
@@ -663,6 +813,9 @@ function bindUi() {
   }
   if (presetFaultBtn) {
     presetFaultBtn.addEventListener("click", () => applySignalPreset("fault"));
+  }
+  if (clearHistoryBtn) {
+    clearHistoryBtn.addEventListener("click", () => clearHistory());
   }
 
   window.addEventListener("keydown", (ev) => {
@@ -701,6 +854,11 @@ function bindUi() {
       resetStateMachine().catch((err) => {
         statusBox.textContent = `reset failed: ${err}`;
       });
+      return;
+    }
+    if (!ev.metaKey && !ev.ctrlKey && !ev.altKey && key === "f") {
+      ev.preventDefault();
+      forceMode();
     }
   });
 }
@@ -714,6 +872,7 @@ async function init() {
     applySignals(meta.default_signals || {});
     drawGraph(meta.graph || {});
     renderSnapshot(meta.state || {});
+    renderHistory();
   } catch (err) {
     configPathEl.textContent = "Config: unavailable";
     statusBox.textContent = [

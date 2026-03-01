@@ -16,6 +16,7 @@
       <aside class="control-card">
         <header>
           <h1>PALA Lamp Sim - State Machine</h1>
+          <p class="muted">Behavior V4 macro-mode simulator with deterministic transitions and skill-scoped primitives.</p>
           <p id="configPath">Config: loading...</p>
           <p id="modeLabel">Mode: loading...</p>
         </header>
@@ -38,6 +39,7 @@
             <button id="stepCommitBtn" type="button">Step + Commit</button>
             <button id="step5Btn" type="button">Step x5</button>
             <button id="autoBtn" type="button">Auto Run</button>
+            <button id="forceBtn" type="button">Force Mode</button>
             <button id="resetBtn" type="button">Reset FSM</button>
             <label class="inline stack" for="dtInput">
               dt (s)
@@ -58,8 +60,25 @@
                 <option value="right">right</option>
               </select>
             </label>
+            <label class="inline stack" for="forceModeSelect">
+              Force mode
+              <select id="forceModeSelect">
+                <option value="">(none)</option>
+                <option value="boot_awaken">boot_awaken</option>
+                <option value="idle_presence">idle_presence</option>
+                <option value="social_interact">social_interact</option>
+                <option value="search_assist">search_assist</option>
+                <option value="task_lighting">task_lighting</option>
+                <option value="return_home">return_home</option>
+                <option value="recover_reset">recover_reset</option>
+              </select>
+            </label>
+            <label class="inline stack" for="forceReasonInput">
+              Force reason
+              <input id="forceReasonInput" type="text" value="ops_force">
+            </label>
           </div>
-          <p class="muted">Shortcuts: <kbd>s</kbd> step, <kbd>c</kbd> step+commit, <kbd>5</kbd> step x5, <kbd>a</kbd> auto run/stop, <kbd>x</kbd> reset.</p>
+          <p class="muted">Shortcuts: <kbd>s</kbd> step, <kbd>c</kbd> step+commit, <kbd>5</kbd> step x5, <kbd>f</kbd> force mode, <kbd>a</kbd> auto run/stop, <kbd>x</kbd> reset.</p>
         </section>
 
         <section class="group">
@@ -83,31 +102,53 @@
               <input id="personConfInput" type="number" min="0" max="1" step="0.01" value="0">
             </label>
 
-            <label class="signal-row" for="activityRange">
-              <span>Activity level</span>
-              <input id="activityRange" type="range" min="0" max="1" step="0.01" value="0">
-              <input id="activityInput" type="number" min="0" max="1" step="0.01" value="0">
+            <label class="inline" for="searchRequestedInput">
+              <input id="searchRequestedInput" type="checkbox">
+              search_requested
             </label>
-
-            <label class="signal-row" for="noveltyRange">
-              <span>Novelty</span>
-              <input id="noveltyRange" type="range" min="0" max="1" step="0.01" value="0">
-              <input id="noveltyInput" type="number" min="0" max="1" step="0.01" value="0">
+            <label class="inline" for="searchCompleteInput">
+              <input id="searchCompleteInput" type="checkbox">
+              search_complete
             </label>
-
-            <label class="signal-row" for="envDeltaRange">
-              <span>Env delta</span>
-              <input id="envDeltaRange" type="range" min="0" max="1" step="0.01" value="0">
-              <input id="envDeltaInput" type="number" min="0" max="1" step="0.01" value="0">
+            <label class="inline" for="assistCompleteInput">
+              <input id="assistCompleteInput" type="checkbox">
+              assist_complete
             </label>
-
+            <label class="inline" for="userAckInput">
+              <input id="userAckInput" type="checkbox">
+              user_ack
+            </label>
+            <label class="inline" for="taskActiveInput">
+              <input id="taskActiveInput" type="checkbox">
+              task_active
+            </label>
+            <label class="inline" for="homeRequestedInput">
+              <input id="homeRequestedInput" type="checkbox">
+              home_requested
+            </label>
+            <label class="inline" for="homeCompletedInput">
+              <input id="homeCompletedInput" type="checkbox">
+              home_completed
+            </label>
+            <label class="inline" for="cancelRequestedInput">
+              <input id="cancelRequestedInput" type="checkbox">
+              cancel_requested
+            </label>
+            <label class="inline" for="startupCompleteInput">
+              <input id="startupCompleteInput" type="checkbox">
+              startup_complete
+            </label>
+            <label class="inline" for="healthDegradedInput">
+              <input id="healthDegradedInput" type="checkbox">
+              health_degraded
+            </label>
             <label class="inline" for="plannerBreakerInput">
               <input id="plannerBreakerInput" type="checkbox">
-              Planner open breaker
+              legacy: planner_open_breaker
             </label>
             <label class="inline" for="perceptionDegradedInput">
               <input id="perceptionDegradedInput" type="checkbox">
-              Perception degraded
+              legacy: perception_degraded
             </label>
           </div>
         </section>
@@ -138,6 +179,24 @@
         <section class="group">
           <h2 class="group-title">Status</h2>
           <pre id="statusBox">Loading...</pre>
+        </section>
+
+        <section class="group">
+          <h2 class="group-title">Transition Log</h2>
+          <div class="row">
+            <button id="clearHistoryBtn" type="button">Clear Log</button>
+          </div>
+          <table id="historyTable">
+            <thead>
+              <tr>
+                <th>Tick</th>
+                <th>Transition</th>
+                <th>Reason</th>
+                <th>Recommended</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
         </section>
       </aside>
     </main>

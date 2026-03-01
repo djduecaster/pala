@@ -60,6 +60,13 @@ body {
   font-size: 0.9rem;
 }
 
+.sidebar-group label {
+  display: block;
+  margin: 0 0 6px 0;
+  color: var(--muted);
+  font-size: 0.79rem;
+}
+
 .sidebar-group.muted p {
   margin: 6px 0 0 0;
   color: var(--muted);
@@ -133,7 +140,7 @@ kbd {
   display: flex;
   justify-content: space-between;
   gap: 12px;
-  align-items: center;
+  align-items: flex-start;
 }
 
 .badge {
@@ -151,6 +158,12 @@ kbd {
   margin: 0;
   color: var(--muted);
   font-size: 0.86rem;
+}
+
+.muted-line {
+  margin: 6px 0 0 0;
+  color: var(--muted);
+  font-size: 0.8rem;
 }
 
 .topbar-actions {
@@ -192,7 +205,8 @@ kbd {
   overflow: hidden;
   background: #0a141a;
   position: relative;
-  min-height: min(52vh, 520px);
+  min-height: clamp(360px, 50vh, 560px);
+  max-height: clamp(360px, 50vh, 560px);
 }
 
 #modeFrame {
@@ -303,6 +317,7 @@ kbd {
 }
 
 #fsmProposalTable,
+#fsmHistoryTable,
 #scnHistoryTable,
 #scnSweepTable {
   width: 100%;
@@ -312,6 +327,8 @@ kbd {
 
 #fsmProposalTable th,
 #fsmProposalTable td,
+#fsmHistoryTable th,
+#fsmHistoryTable td,
 #scnHistoryTable th,
 #scnHistoryTable td,
 #scnSweepTable th,
@@ -323,6 +340,7 @@ kbd {
 }
 
 #fsmProposalTable th,
+#fsmHistoryTable th,
 #scnHistoryTable th,
 #scnSweepTable th {
   color: #a2cbc4;
@@ -385,6 +403,27 @@ kbd {
   display: grid;
   grid-template-rows: auto auto 1fr;
   gap: 10px;
+}
+
+.shell-layout.focus-view {
+  grid-template-columns: 1fr;
+}
+
+.shell-layout.focus-view .shell-sidebar {
+  display: none;
+}
+
+.shell-layout.focus-view .workspace {
+  grid-template-columns: 1fr;
+}
+
+.shell-layout.focus-view .workspace-inspector {
+  display: none;
+}
+
+.shell-layout.focus-view .workspace-stage {
+  min-height: clamp(460px, 78vh, 920px);
+  max-height: none;
 }
 
 .inspector-card {
@@ -556,13 +595,14 @@ kbd {
 @media (max-width: 1280px) {
   .workspace {
     grid-template-columns: 1fr;
-    grid-template-rows: minmax(320px, 52vh) minmax(0, 1fr);
+    grid-template-rows: minmax(300px, 40vh) minmax(0, 1fr);
   }
 }
 
 @media (max-height: 920px) {
   .workspace-stage {
-    min-height: min(48vh, 460px);
+    min-height: clamp(320px, 46vh, 500px);
+    max-height: clamp(320px, 46vh, 500px);
   }
 }
 

@@ -18,7 +18,8 @@ Telemetry remains a sidecar under `tools/telemetry` and does not change the core
   - `--index-mode auto|off|sqlite`
   - `--query '...'` + `--query-limit N`
   - `--quality-gate off|warn|strict`
-  - Core panels: `case_list`, `case_detail`, `quality`, `query`, `annotations`
+  - Core panels: `case_list`, `case_detail`, `v4_health`, `quality`, `query`, `annotations`
+  - `v4_health` now includes a small telemetry FSM (`stable|transitioning|churn|recovering|planner_blocked|fallback_active`).
 - Stream-health diagnostics in viewer summary panel:
   - RX rate (current + peak), agent transport queue pressure, local viewer queue pressure
   - reconnect counters (`total`, `stale`, `disconnect`, `start_fail`)
@@ -27,6 +28,8 @@ Telemetry remains a sidecar under `tools/telemetry` and does not change the core
   - `integrity.json` artifact checksums + replay verification
   - Optional live indexing (`--index-live-every N`) for long runs
 - Mode-driven viewer UX (`--mode live|replay|curate`) with compact primary CLI
+- Focus profiles (`--focus ...`) map directly to pack-level debug groups (reasoning/perception/planner/memory/hardware/cosmos/behavior)
+- Non-destructive capture target selection for `--save-session` (auto-suffix on collisions)
 - Bookmark annotations (`annotations.jsonl`) for post-training curation
 - Dataset export profiles (`fast|strict|hard_cases`)
 - One-click curation export on viewer exit (`--curate-on-exit`)
@@ -60,6 +63,7 @@ PALA_LOG_LEVEL=INFO uv run python -m pala.main
 cd /Users/djduecaster/development/pala
 UV_PYTHON=/opt/homebrew/bin/python3.10 uv run python -m tools.telemetry.mac_viewer \
   --mode live \
+  --focus reasoning \
   --jetson-host jetson
 ```
 
@@ -90,7 +94,7 @@ uv run python -m tools.telemetry.pipeline export \
 uv run python -m tools.telemetry.pipeline report --root logs/telemetry
 ```
 Report output now includes session coverage (`sessions_with_runs` vs `sessions_without_runs`) to catch missing run artifacts early.
-It also aggregates stream-health indicators (queue pressure peaks, reconnect churn, RX throughput peaks, and event-volume percentiles).
+It also aggregates stream-health indicators (queue pressure peaks, reconnect churn, RX throughput peaks, and event-volume percentiles) and dataset V4 curation signals (planner-failure/fallback/transition-instability ratios plus top parse stages/guard reasons/transition targets).
 For CI-style gating, fail when the latest run looks unhealthy:
 ```bash
 uv run python -m tools.telemetry.run_report --root logs/telemetry --strict
@@ -117,6 +121,7 @@ uv run python -m tools.telemetry.pipeline report --root logs/telemetry --strict
 - `dataset_rows.jsonl`: optional export output
 - `dataset_manifest.json`: profile/run summary for dataset export
   - includes `inclusion_reason_counts` (`hard_case`, `annotation`, `weak_label`, `baseline`)
+  - includes FSM rollups: `mode_fsm_state_counts`, `mode_transition_reason_counts`
 - `viewer_summary.json`: viewer exit summary (`run_id`, mode, query, drops, event counts, quality gate, curation result)
   - includes stream-health peaks (`transport_queue_peak_utilization`, `local_queue_peak_utilization`, `rx_rate_peak_5s`) and reconnect counters
   - includes `event_count_total` for low-activity detection on long live runs
@@ -146,8 +151,17 @@ Space-delimited tokens. Supported key filters:
 - `phase:<phase>`
 - `req:<id>`
 - `trace:<trace-id-fragment>`
-- `component:<env_processor|planner|...>` (for joined reasoning traces)
+- `component:<env_processor|planner_v4|arbiter|...>` (for joined reasoning traces)
 - `kind:<event|reasoning|trace|joined>`
+- `mode:<mode-name>`
+- `skill:<active-skill>`
+- `guard:<accepted|fallback|rejected|unknown>`
+- `parse_stage:<planner-parse-stage>`
+- `planner_error:<substring>`
+- `guard_reason:<substring>`
+- `transition_from:<mode-name>`
+- `transition_to:<mode-name>`
+- `transitioned:true|false`
 - `latency_ms>2000` / `latency_ms<500`
 - `duration_ms>1000` (trace duration)
 - `ts:[start,end]` (wall-clock timestamp range)
@@ -162,10 +176,11 @@ Example:
 --query 'kind:joined component:env_processor req:42'
 --query 'kind:event latency_ms>2000 sort:latency order:desc'
 --query 'kind:trace duration_ms>1000 severity:error'
+--query 'kind:joined transition_from:idle_presence transition_to:social_interact guard_reason:skill_not_allowed'
 ```
 
-## BehaviorV2 Sources (Jetson Agent)
-Agent tails BehaviorV2 logs directly:
+## Behavior V4 Sources (Jetson Agent)
+Agent tails Behavior V4 logs directly:
 - `--behavior-env-log` (default `logs/behavior_env.jsonl`)
 - `--behavior-planner-log` (default `logs/behavior_planner.jsonl`)
 - `--behavior-reasoning-log` (default `logs/behavior_reasoning.jsonl`)
@@ -178,6 +193,8 @@ Common mode workflow:
 - `--mode live`: stream from Jetson
 - `--mode replay`: inspect a saved session
 - `--mode curate`: replay + export dataset rows on exit
+- `--focus auto|runtime|reasoning|perception|planner|memory|hardware|cosmos|behavior`: apply a signal-pack profile without hand-tuning filters
+- `--save-session` is non-destructive: if target contains capture artifacts or matches `--replay`, viewer auto-suffixes a new session path
 
 ## Bookmarks / Annotations
 - Press `b` in viewer to bookmark the currently selected trace/reasoning context.

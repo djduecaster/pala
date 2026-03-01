@@ -22,6 +22,23 @@ class ReasoningEvent:
     severity: str
     component: Optional[str] = None
     delta_score: Optional[float] = None
+    mode: Optional[str] = None
+    active_skill: Optional[str] = None
+    guard_accepted: Optional[bool] = None
+    guard_fallback: Optional[bool] = None
+    guard_reason: Optional[str] = None
+    guard_skill: Optional[str] = None
+    guard_primitive: Optional[str] = None
+    planner_enabled: Optional[bool] = None
+    planner_inflight: Optional[bool] = None
+    planner_pending: Optional[bool] = None
+    planner_last_parse_stage: Optional[str] = None
+    planner_error: Optional[str] = None
+    planner_next_allowed_in_s: Optional[float] = None
+    mode_transition_from: Optional[str] = None
+    mode_transition_to: Optional[str] = None
+    mode_transition_reason: Optional[str] = None
+    mode_transitioned: Optional[bool] = None
 
 
 _SENSITIVE_PAIR_RE = re.compile(
@@ -36,6 +53,12 @@ def _as_dict(value: Any) -> Dict[str, Any]:
     if isinstance(value, dict):
         return value
     return {}
+
+
+def _as_optional_bool(value: Any) -> Optional[bool]:
+    if isinstance(value, bool):
+        return value
+    return None
 
 
 def _as_optional_int(value: Any) -> Optional[int]:
@@ -73,7 +96,7 @@ def _pick_first(values: list[Any], fn) -> Any:
 
 def _classify_severity(phase: str, status: str) -> str:
     text = f"{phase} {status}".lower()
-    if any(key in text for key in ("fail", "error", "invalid", "timeout", "stale", "no_content", "crash")):
+    if any(key in text for key in ("fail", "error", "invalid", "timeout", "stale", "no_content", "crash", "fallback", "reject")):
         return "error"
     if any(key in text for key in ("warn", "drop", "retry")):
         return "warning"
@@ -225,6 +248,8 @@ def normalize_reasoning_message(msg: Dict[str, Any]) -> Optional[ReasoningEvent]
             severity=_classify_severity(phase, status),
             component="env_processor",
             delta_score=_as_optional_float(data.get("delta_score")),
+            mode=_as_optional_str(data.get("mode")),
+            active_skill=_as_optional_str(data.get("active_skill")),
         )
 
     if source in {"behavior_planner_log", "behavior_planner"}:
@@ -234,9 +259,11 @@ def normalize_reasoning_message(msg: Dict[str, Any]) -> Optional[ReasoningEvent]
         if not data:
             return None
         decision = _decision_payload(data)
-        phase = _pick_first([data.get("phase"), data.get("stage"), data.get("module")], _as_optional_str) or "planner"
+        phase = _pick_first([data.get("phase"), data.get("stage"), data.get("module")], _as_optional_str) or "planner_v4"
         status = _pick_first([data.get("status"), data.get("parse_status"), data.get("result")], _as_optional_str) or "ok"
         command = _as_dict(decision.get("command"))
+        planner_error = _pick_first([data.get("error"), data.get("planner_error")], _as_optional_str)
+        parse_stage = _pick_first([data.get("parse_stage"), data.get("last_parse_stage")], _as_optional_str)
         return ReasoningEvent(
             source=source,
             ts_wall_s=ts_wall_s,
@@ -250,8 +277,12 @@ def normalize_reasoning_message(msg: Dict[str, Any]) -> Optional[ReasoningEvent]
             model=_pick_first([data.get("model"), data.get("model_name")], _as_optional_str),
             provider=_pick_first([data.get("provider"), data.get("vendor")], _as_optional_str),
             snippet=_extract_snippet(decision, data, msg_payload),
-            severity=_classify_severity(phase, status),
-            component="planner",
+            severity=_classify_severity(phase, f"{status} {planner_error or ''} {parse_stage or ''}"),
+            component=_pick_first([data.get("component"), data.get("module")], _as_optional_str) or "planner_v4",
+            mode=_as_optional_str(data.get("mode")),
+            active_skill=_as_optional_str(data.get("skill")),
+            planner_last_parse_stage=parse_stage,
+            planner_error=planner_error,
         )
 
     if source in {"behavior_reasoning_log", "behavior_reasoning"}:
@@ -276,7 +307,9 @@ def normalize_reasoning_message(msg: Dict[str, Any]) -> Optional[ReasoningEvent]
             provider=_pick_first([data.get("provider"), data.get("vendor")], _as_optional_str),
             snippet=_extract_snippet(data, data, msg_payload),
             severity=_classify_severity(phase, status),
-            component=_pick_first([data.get("component"), data.get("module")], _as_optional_str) or "reasoning",
+            component=_pick_first([data.get("component"), data.get("module")], _as_optional_str) or "planner_v4",
+            mode=_as_optional_str(data.get("mode")),
+            active_skill=_pick_first([data.get("skill"), data.get("active_skill")], _as_optional_str),
         )
 
     if source in {"behavior_trace_log", "behavior_trace"}:
@@ -285,46 +318,74 @@ def normalize_reasoning_message(msg: Dict[str, Any]) -> Optional[ReasoningEvent]
             data = msg_payload
         if not data:
             return None
-        decision = _as_dict(data.get("decision"))
+        planner = _as_dict(data.get("planner"))
+        guard = _as_dict(data.get("guard"))
         mode_transition = _as_dict(data.get("mode_transition"))
-        signals = _as_dict(data.get("signals"))
         current_action = _as_dict(data.get("current_action"))
-        committed = decision.get("committed")
-        if isinstance(committed, bool):
-            status = "committed" if committed else "no_commit"
+
+        mode = _as_optional_str(data.get("mode"))
+        active_skill = _pick_first([data.get("active_skill"), data.get("skill")], _as_optional_str)
+        planner_error = _pick_first([planner.get("last_error"), data.get("planner_error"), data.get("error")], _as_optional_str)
+        parse_stage = _pick_first([planner.get("last_parse_stage"), data.get("parse_stage")], _as_optional_str)
+        guard_reason = _pick_first([guard.get("reason"), data.get("guard_reason")], _as_optional_str)
+        guard_accepted = _as_optional_bool(guard.get("accepted"))
+        guard_fallback = _as_optional_bool(guard.get("fallback"))
+
+        if guard_accepted is True:
+            status = "committed"
+        elif guard_fallback is True:
+            status = "fallback"
+        elif planner_error:
+            status = "planner_error"
+        elif parse_stage and any(tok in parse_stage.lower() for tok in ("fail", "invalid", "error")):
+            status = "parse_fail"
         else:
-            status = _pick_first([decision.get("status"), data.get("status")], _as_optional_str) or "trace"
-        phase = _pick_first([data.get("mode"), mode_transition.get("to"), data.get("phase")], _as_optional_str) or "behavior_trace"
-        reason = _pick_first([decision.get("reason"), mode_transition.get("reason")], _as_optional_str) or ""
-        snippet = reason
-        top_candidates = data.get("top_candidates")
-        if not snippet and isinstance(top_candidates, list) and top_candidates and isinstance(top_candidates[0], dict):
-            top0 = top_candidates[0]
-            top_primitive = _as_optional_str(top0.get("primitive"))
-            top_intent = _as_optional_str(top0.get("intent"))
-            top_utility = _as_optional_float(top0.get("utility"))
-            parts = [part for part in [top_primitive, top_intent] if part]
-            if top_utility is not None:
-                parts.append(f"utility={top_utility:.3f}")
-            snippet = " ".join(parts)
+            status = _as_optional_str(data.get("status")) or "trace"
+
+        phase = _pick_first([mode_transition.get("to"), data.get("mode"), data.get("phase")], _as_optional_str) or "behavior_trace"
+
+        snippet = guard_reason or planner_error or _as_optional_str(mode_transition.get("reason")) or ""
         if not snippet:
-            snippet = _extract_snippet(data, decision, msg_payload)
+            snippet = _extract_snippet(data, planner, msg_payload)
+        if not snippet:
+            prim_text = _as_optional_str(current_action.get("primitive")) or "-"
+            snippet = f"mode={mode or '-'} skill={active_skill or '-'} action={prim_text}"
+
         return ReasoningEvent(
             source=source,
             ts_wall_s=ts_wall_s,
             req_id=_pick_first([data.get("request_id"), data.get("req_id"), data.get("id")], _as_optional_int),
             phase=phase,
             status=status,
-            latency_ms=_pick_first([data.get("latency_ms"), data.get("duration_ms")], _as_optional_float),
-            primitive=_pick_first([current_action.get("primitive"), decision.get("source")], _as_optional_str),
+            latency_ms=_pick_first(
+                [planner.get("last_latency_ms"), data.get("latency_ms"), data.get("duration_ms")],
+                _as_optional_float,
+            ),
+            primitive=_pick_first([guard.get("primitive"), current_action.get("primitive")], _as_optional_str),
             confidence=_as_optional_float(current_action.get("confidence")),
-            target_zone=_pick_first([signals.get("zone_hint"), data.get("target_zone")], _as_optional_str),
+            target_zone=_pick_first([data.get("target_zone"), data.get("zone_hint")], _as_optional_str),
             model=None,
             provider=None,
             snippet=snippet,
-            severity=_classify_severity(phase, f"{status} {reason}"),
+            severity=_classify_severity(phase, f"{status} {guard_reason or ''} {planner_error or ''}"),
             component="arbiter",
-            delta_score=_as_optional_float(signals.get("env_delta")),
+            mode=mode,
+            active_skill=active_skill,
+            guard_accepted=guard_accepted,
+            guard_fallback=guard_fallback,
+            guard_reason=guard_reason,
+            guard_skill=_as_optional_str(guard.get("skill")),
+            guard_primitive=_as_optional_str(guard.get("primitive")),
+            planner_enabled=_as_optional_bool(planner.get("enabled")),
+            planner_inflight=_as_optional_bool(planner.get("inflight")),
+            planner_pending=_as_optional_bool(planner.get("pending")),
+            planner_last_parse_stage=parse_stage,
+            planner_error=planner_error,
+            planner_next_allowed_in_s=_as_optional_float(planner.get("next_allowed_in_s")),
+            mode_transition_from=_as_optional_str(mode_transition.get("from")),
+            mode_transition_to=_as_optional_str(mode_transition.get("to")),
+            mode_transition_reason=_as_optional_str(mode_transition.get("reason")),
+            mode_transitioned=_as_optional_bool(mode_transition.get("transitioned")),
         )
 
     return None
