@@ -35,7 +35,6 @@ branch = true
 source = ["pala"]
 omit = [
     "pala/hardware/camera_gst.py",
-    "pala/perception/detector/deepstream_backend.py",
 ]
 
 [tool.coverage.report]

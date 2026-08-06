@@ -1,9 +1,9 @@
 import time
+
 import numpy as np
 
-from pala.perception.node import PerceptionNode
 from pala.perception.frame_source import FramePacket
-from pala.perception.detector.interface import Detection
+from pala.perception.node import PerceptionNode
 
 
 class _NoFrameSource:
@@ -31,35 +31,11 @@ class _OneFrameSource:
         return None
 
 
-def test_perception_no_frame_returns_quickly():
-    node = PerceptionNode(source=_NoFrameSource())
-    st = node.step()
-    assert st.debug.get("no_frame") is True
-    assert st.debug.get("num_detections") == 0
-    assert st.debug.get("detector_alive") is True
-    assert st.debug.get("used_fallback_bbox") is False
-
-
-def test_perception_stale_frame_fallback():
-    node = PerceptionNode(source=_OneFrameSource())
-    first = node.step()
-    assert first.debug.get("no_frame") is None
-    assert first.debug.get("num_detections") == 1
-    assert first.debug.get("detector_alive") is True
-    assert first.debug.get("used_fallback_bbox") is False
-
-    second = node.step()
-    assert second.debug.get("stale_frame") is True
-    assert second.debug.get("num_detections") == 1
-    assert second.debug.get("detector_alive") is True
-    assert second.debug.get("used_fallback_bbox") is False
-
-
 class _TwoFrameSource:
     def __init__(self):
         self._calls = 0
-        self._base = 1_000_000_000
-        self._delta = 50_000_000  # 50ms
+        self._base = time.monotonic_ns()
+        self._delta = 50_000_000
         self._frame = np.zeros((2, 2, 3), dtype=np.uint8)
 
     def get_latest(self, timeout_s: float = 0.01):
@@ -76,64 +52,39 @@ class _TwoFrameSource:
         return None
 
 
-def test_perception_fps_from_two_frames():
+def test_perception_no_frame_reports_capture_state():
+    node = PerceptionNode(source=_NoFrameSource())
+    state = node.step()
+
+    assert state.frame_id is None
+    assert state.is_new_frame is False
+    assert state.source_alive is True
+    assert state.debug == {"no_frame": True}
+
+
+def test_perception_reuses_last_frame_as_stale_state():
+    node = PerceptionNode(source=_OneFrameSource())
+    first = node.step()
+    second = node.step()
+
+    assert first.frame_id == 1
+    assert first.is_new_frame is True
+    assert first.debug == {}
+    assert second.frame_id == 1
+    assert second.is_new_frame is False
+    assert second.debug.get("stale_frame") is True
+    assert second.frame_age_ms is not None
+
+
+def test_perception_fps_and_frame_ids_advance_on_new_frames():
     node = PerceptionNode(source=_TwoFrameSource())
     first = node.step()
-    assert first.fps is None
     second = node.step()
+
+    assert first.frame_id == 1
+    assert second.frame_id == 2
     assert second.fps is not None
     assert abs(second.fps - 20.0) < 1.0
-
-
-def test_perception_zone_changes_in_dev(monkeypatch):
-    class _Det:
-        def __init__(self):
-            self._calls = 0
-
-        def detect(self, frame):
-            h, w = frame.shape[:2]
-            if self._calls == 0:
-                self._calls += 1
-                return [Detection(bbox_xyxy_px=(0, 0, w * 0.2, h * 0.4), conf=0.9, cls=0)]
-            self._calls += 1
-            return [Detection(bbox_xyxy_px=(w * 0.8, 0, w * 1.0, h * 0.4), conf=0.9, cls=0)]
-
-    node = PerceptionNode(detector=_Det())
-    first = node.step()
-    second = node.step()
-
-    assert first.primary_person is not None
-    assert second.primary_person is not None
-    assert first.debug.get("zone_hint") != second.debug.get("zone_hint")
-
-
-def test_perception_detector_error_sets_debug_and_uses_fallback():
-    class _ErrDet:
-        def detect(self, _frame):
-            raise RuntimeError("detector down")
-
-    node = PerceptionNode(detector=_ErrDet())
-    st = node.step()
-    assert st.debug.get("detector_alive") is False
-    assert st.debug.get("num_detections") == 0
-    assert st.debug.get("used_fallback_bbox") is True
-    assert "detector_error" in st.debug
-
-
-def test_perception_real_source_no_detection_reports_no_person():
-    class _NoDet:
-        def detect(self, _frame):
-            return []
-
-    node = PerceptionNode(source=_OneFrameSource(), detector=_NoDet())
-    st = node.step()
-    assert st.primary_person is None
-    assert st.primary_person_conf is None
-    assert st.debug.get("zone_hint") is None
-    assert st.debug.get("num_detections") == 0
-    assert st.debug.get("used_fallback_bbox") is False
-    assert st.latency_ms is not None
-    assert st.latency_ms >= 0.0
 
 
 def test_perception_source_error_is_reported_without_crashing():
@@ -144,48 +95,20 @@ def test_perception_source_error_is_reported_without_crashing():
         def shutdown(self) -> None:
             return None
 
-    node = PerceptionNode(source=_ErrSource())
-    st = node.step()
-    assert st.debug.get("no_frame") is True
-    assert st.debug.get("source_alive") is False
-    assert "source_error" in st.debug
-    assert "camera unavailable" in str(st.debug.get("source_error"))
+    state = PerceptionNode(source=_ErrSource()).step()
+
+    assert state.frame_id is None
+    assert state.source_alive is False
+    assert state.debug.get("no_frame") is True
+    assert "camera unavailable" in str(state.debug.get("source_error"))
 
 
-def test_perception_shutdown_calls_detector_and_source():
-    calls = {"source": 0, "detector": 0}
-
-    class _Source:
-        def shutdown(self) -> None:
-            calls["source"] += 1
-
-    class _Detector:
-        def detect(self, _frame):
-            return []
-
-        def shutdown(self) -> None:
-            calls["detector"] += 1
-
-    node = PerceptionNode(source=_Source(), detector=_Detector())
-    node.shutdown()
-    assert calls == {"source": 1, "detector": 1}
-
-
-def test_perception_shutdown_still_closes_source_if_detector_shutdown_fails():
-    calls = {"source": 0, "detector": 0}
+def test_perception_shutdown_closes_source():
+    calls = {"source": 0}
 
     class _Source:
         def shutdown(self) -> None:
             calls["source"] += 1
 
-    class _Detector:
-        def detect(self, _frame):
-            return []
-
-        def shutdown(self) -> None:
-            calls["detector"] += 1
-            raise RuntimeError("detector shutdown failure")
-
-    node = PerceptionNode(source=_Source(), detector=_Detector())
-    node.shutdown()
-    assert calls == {"source": 1, "detector": 1}
+    PerceptionNode(source=_Source()).shutdown()
+    assert calls == {"source": 1}

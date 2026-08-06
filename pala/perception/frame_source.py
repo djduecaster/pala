@@ -6,7 +6,6 @@ TODO: Port legacy capture pipeline from ../pala_old/pala_project/src/vision/capt
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
-import math
 import threading
 import time
 
@@ -26,22 +25,12 @@ class FrameSource:
 
 
 class DummyFrameSource(FrameSource):
-    def __init__(self, period_s: float = 6.0):
-        self._t0 = time.monotonic()
-        self._period = max(0.1, float(period_s))
-
     def get_packet(self) -> FramePacket:
         frame = np.zeros((90, 160, 3), dtype=np.uint8)
         return FramePacket(frame=frame, pts_ns=None, mono_ns=time.monotonic_ns())
 
     def get_timestamp(self) -> float:
         return time.monotonic()
-
-    def dummy_position(self) -> float:
-        # Oscillate between 0.2 and 0.8
-        t = time.monotonic() - self._t0
-        phase = (t / self._period) * 2.0 * math.pi
-        return 0.5 + 0.3 * math.sin(phase)
 
     def shutdown(self) -> None:
         pass

@@ -8,7 +8,6 @@ from pala.config.load import load_config
 def _base_lines() -> list[str]:
     return [
         "mode: dev",
-        "detector: dummy",
         "loop_rates:",
         "  perception_hz: 20",
         "  behavior_hz: 3",
@@ -57,10 +56,6 @@ def test_load_config_rejects_non_mapping_sections(tmp_path):
     with pytest.raises(ValueError, match="camera"):
         load_config(_write(tmp_path, "bad_camera.yaml", lines))
 
-    lines = _base_lines() + ["deepstream: []"]
-    with pytest.raises(ValueError, match="deepstream"):
-        load_config(_write(tmp_path, "bad_deepstream.yaml", lines))
-
     lines = _base_lines() + ["cosmos: []"]
     with pytest.raises(ValueError, match="cosmos"):
         load_config(_write(tmp_path, "bad_cosmos.yaml", lines))
@@ -68,7 +63,7 @@ def test_load_config_rejects_non_mapping_sections(tmp_path):
 
 def test_load_config_rejects_invalid_joint_contracts(tmp_path):
     lines = list(_base_lines())
-    lines[8] = "joint_names: [yaw, 7]"
+    lines[lines.index("joint_names: [yaw, pitch1, pitch2, roll, pitch3]")] = "joint_names: [yaw, 7]"
     with pytest.raises(ValueError, match="joint_names"):
         load_config(_write(tmp_path, "bad_joint_names.yaml", lines))
 
@@ -86,7 +81,7 @@ def test_load_config_rejects_invalid_joint_contracts(tmp_path):
 
 def test_load_config_rejects_bad_scalar_types(tmp_path):
     lines = _base_lines()
-    lines[7] = "deadman_timeout_ms: true"
+    lines[lines.index("deadman_timeout_ms: 250")] = "deadman_timeout_ms: true"
     with pytest.raises(ValueError, match="deadman_timeout_ms"):
         load_config(_write(tmp_path, "bad_deadman.yaml", lines))
 

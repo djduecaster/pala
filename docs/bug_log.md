@@ -1,6 +1,6 @@
 # Bug Log (Active Only)
 
-Last verified: 2026-03-01 (full repo sweep, additional pass)
+Last verified: 2026-08-05 (Phase 1/2 perception and behavior reset)
 
 Conventions:
 - Severity: `P1` high, `P2` medium, `P3` low.
@@ -11,19 +11,11 @@ Conventions:
 |---|---|---|---|---|
 | BUG-2026-02-22-001 | P2 | control | Executor preempts active action without honoring `cancel_current`, causing unintended primitive interruption. | `pala/control/executor.py:149` |
 | BUG-2026-02-22-002 | P2 | behavior/remote parsing | `_coerce_text()` inserts newlines when joining content chunks; this can corrupt JSON and cause parser failures. | `pala/behavior/model_clients/response_utils.py:78` |
-| BUG-2026-02-22-004 | P2 | perception | Real-camera transient detector misses provide no fallback person/zone signal, causing behavior instability. | `pala/perception/node.py:76` |
-| BUG-2026-02-22-008 | P2 | runtime mode wiring | `jetson_perception` mode still builds a dummy frame source path instead of camera-backed perception, so mode behavior does not match its name. | `pala/main.py:341`, `pala/main.py:343` |
 | BUG-2026-02-28-022 | P2 | config/control limits | Config loader accepts reversed joint limits (`min > max`), and control clamp then pins outputs to the lower-expression bound, producing deterministic wrong motion. | `pala/config/load.py:246`, `pala/control/executor.py:313` |
-| BUG-2026-03-01-027 | P1 | perception | On frame-source read errors after at least one good frame, perception reuses stale `_last_packet` and can emit phantom person state indefinitely. | `pala/perception/node.py:150`, `pala/perception/node.py:157` |
-| BUG-2026-03-01-028 | P1 | perception/deepstream | DeepStream callback assumes non-null batch meta; a null return from `gst_buffer_get_nvds_batch_meta` can raise and leave detection flow stale. | `pala/perception/detector/deepstream_backend.py:228` |
 | BUG-2026-03-01-029 | P2 | hardware/servo | Servo command-length mismatch is not validated; short lists silently skip channels and long lists can raise index errors in the hardware loop. | `pala/hardware/servo_pca9685.py:65` |
 | BUG-2026-03-01-030 | P2 | control/style profiles | Non-positive style `rate_scale` values are accepted; this can force zero step size and leave motion primitives running without progress. | `pala/control/executor.py:271`, `pala/control/executor.py:333` |
-| BUG-2026-03-01-031 | P2 | perception/bbox normalization | Detected boxes are normalized without bounds clamping; out-of-frame boxes can produce `BBoxNorm` values outside `[0, 1]`. | `pala/perception/node.py:180` |
 | BUG-2026-03-01-040 | P2 | config/runtime rates | Loop rates accept zero/negative values; rate limiter coerces them into near-frozen long periods, making loops appear hung. | `pala/config/load.py:230`, `pala/utils/timing.py:8` |
 | BUG-2026-03-01-041 | P1 | config/hardware safety | Negative `deadman_timeout_ms` is accepted; hardware deadman check then trips continuously and keeps outputs disabled. | `pala/config/load.py:237`, `pala/main.py:196`, `pala/main.py:203` |
-| BUG-2026-03-01-042 | P1 | behavior/planner integration | Async planner parse failures do not fail closed; policy keeps prior action active instead of committing guard fallback (inconsistent with `apply_model_output` parse-error path). | `pala/behavior/policy_v4.py:232`, `pala/behavior/policy_v4.py:623`, `pala/behavior/policy_v4.py:626`, `pala/behavior/policy_v4.py:659` |
-| BUG-2026-03-01-043 | P2 | behavior/staleness guard | Model staleness uses response latency as `model_age_s`, so old delayed decisions can be accepted as “fresh.” | `pala/behavior/policy_v4.py:631` |
-| BUG-2026-03-01-044 | P3 | behavior/mode FSM | In `SEARCH_ASSIST`, `search_complete` is evaluated before `cancel_requested`; simultaneous signals can ignore user cancel. | `pala/behavior/mode_fsm_v4.py:118`, `pala/behavior/mode_fsm_v4.py:125` |
 | BUG-2026-02-22-005 | P2 | telemetry/capture | Capture `close()` sets `_closed` before all artifact writes; failures can leave partial output and block retry close. | `tools/telemetry/capture.py:224`, `tools/telemetry/capture.py:230` |
 | BUG-2026-02-22-013 | P2 | telemetry/run-report | `--json` returns before strict-mode enforcement, so `--strict --json` exits `0` even when alerts exist, breaking CI/automation expectations. | `tools/telemetry/run_report.py:578`, `tools/telemetry/run_report.py:580`, `tools/telemetry/run_report.py:674` |
 | BUG-2026-02-22-014 | P2 | telemetry/doctor | Workspace checks are anchored to `os.getcwd()` instead of repository root; running from non-root directories can produce false missing-path failures. | `tools/telemetry/doctor.py:402` |
@@ -45,6 +37,7 @@ Conventions:
 | BUG-2026-03-01-047 | P3 | tools/model-provider-probe | `text_ping` readiness check matches substring `"READY"` and can false-positive on content like `"NOT READY"` or `"ALREADY"`. | `tools/model_provider_probe.py:349` |
 
 Notes:
+- Removed during the Phase 1/2 reset: detector-specific bugs `004`, `008`, `027`, `028`, and `031`; Behavior V4 bugs `042`, `043`, and `044`. The affected runtime paths no longer exist.
 - OBE cleanup this sweep: none of the currently active entries were overtaken by events.
 - `BUG-2026-02-28-021` moved out of active bugs: env-only mode/zone signals are currently an intentional hardening choice while remote env+planner paths are being tuned.
 - `BUG-2026-02-27-019` removed from active bugs: embedded-shell navigation now promotes mode links to `window.top`.

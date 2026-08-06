@@ -1,7 +1,7 @@
 import os
 import time
 
-from pala.config.load import LoopRates, LoggingConfig, CameraConfig, RobotConfig, DeepStreamConfig
+from pala.config.load import LoopRates, LoggingConfig, CameraConfig, RobotConfig
 import pala.main as pala_main
 from pala.types import HardwareCommand
 
@@ -23,7 +23,6 @@ def test_dev_runtime_emits_perception_and_action(monkeypatch):
 
     cfg = RobotConfig(
         mode="dev",
-        detector="dummy",
         loop_rates=LoopRates(perception_hz=20, behavior_hz=3, control_hz=80, hardware_hz=120),
         deadman_timeout_ms=250,
         joint_names=["yaw", "pitch1", "pitch2", "roll", "pitch3"],
@@ -35,7 +34,6 @@ def test_dev_runtime_emits_perception_and_action(monkeypatch):
             actions_jsonl="logs/actions.jsonl",
         ),
         camera=CameraConfig(device="/dev/video0", width=640, height=480, fps=30, pipeline=None),
-        deepstream=DeepStreamConfig(config_path=None, person_class_id=0, conf_threshold=None),
     )
 
     monkeypatch.setattr(pala_main, "load_config", lambda _path: cfg)
@@ -49,7 +47,7 @@ def test_dev_runtime_emits_perception_and_action(monkeypatch):
     result = pala_main.main()
     assert result == 0
 
-    assert any(getattr(st, "debug", {}).get("zone_hint") for st in perception_log.items)
+    assert any(getattr(st, "frame_id", None) for st in perception_log.items)
     assert any(
         isinstance(entry, dict)
         and "ts_wall_s" in entry
@@ -75,7 +73,6 @@ def test_hardware_respects_enable_false(monkeypatch):
 
     cfg = RobotConfig(
         mode="dev",
-        detector="dummy",
         loop_rates=LoopRates(perception_hz=20, behavior_hz=3, control_hz=80, hardware_hz=120),
         deadman_timeout_ms=250,
         joint_names=["yaw", "pitch1", "pitch2", "roll", "pitch3"],
@@ -87,7 +84,6 @@ def test_hardware_respects_enable_false(monkeypatch):
             actions_jsonl=None,
         ),
         camera=CameraConfig(device="/dev/video0", width=640, height=480, fps=30, pipeline=None),
-        deepstream=DeepStreamConfig(config_path=None, person_class_id=0, conf_threshold=None),
     )
 
     monkeypatch.setattr(pala_main, "load_config", lambda _path: cfg)
@@ -118,7 +114,6 @@ def test_runtime_fails_fast_on_hardware_thread_crash(monkeypatch):
 
     cfg = RobotConfig(
         mode="dev",
-        detector="dummy",
         loop_rates=LoopRates(perception_hz=20, behavior_hz=3, control_hz=80, hardware_hz=120),
         deadman_timeout_ms=250,
         joint_names=["yaw", "pitch1", "pitch2", "roll", "pitch3"],
@@ -130,7 +125,6 @@ def test_runtime_fails_fast_on_hardware_thread_crash(monkeypatch):
             actions_jsonl=None,
         ),
         camera=CameraConfig(device="/dev/video0", width=640, height=480, fps=30, pipeline=None),
-        deepstream=DeepStreamConfig(config_path=None, person_class_id=0, conf_threshold=None),
     )
 
     monkeypatch.setattr(pala_main, "load_config", lambda _path: cfg)
@@ -146,7 +140,6 @@ def test_main_joins_threads_before_resource_shutdown(monkeypatch):
 
     cfg = RobotConfig(
         mode="dev",
-        detector="dummy",
         loop_rates=LoopRates(perception_hz=20, behavior_hz=3, control_hz=80, hardware_hz=120),
         deadman_timeout_ms=250,
         joint_names=["yaw", "pitch1", "pitch2", "roll", "pitch3"],
@@ -154,7 +147,6 @@ def test_main_joins_threads_before_resource_shutdown(monkeypatch):
         servo_calibration={},
         logging=LoggingConfig(enabled=False, perception_jsonl=None, actions_jsonl=None),
         camera=CameraConfig(device="/dev/video0", width=640, height=480, fps=30, pipeline=None),
-        deepstream=DeepStreamConfig(config_path=None, person_class_id=0, conf_threshold=None),
     )
     monkeypatch.setattr(pala_main, "load_config", lambda _path: cfg)
     monkeypatch.setenv("PALA_MAX_RUNTIME_S", "0")
@@ -221,7 +213,7 @@ def test_main_joins_threads_before_resource_shutdown(monkeypatch):
             return self._alive
 
     monkeypatch.setattr(pala_main, "PerceptionNode", _FakePerceptionNode)
-    monkeypatch.setattr(pala_main, "BehaviorPolicy", _FakeBehaviorPolicy)
+    monkeypatch.setattr(pala_main, "HoldBehaviorPolicy", _FakeBehaviorPolicy)
     monkeypatch.setattr(pala_main, "_build_servo", lambda _cfg: _FakeServo())
     monkeypatch.setattr(pala_main, "_build_preview_tap", lambda _cfg: _FakePreviewTap())
     monkeypatch.setattr(pala_main.threading, "Thread", _FakeThread)

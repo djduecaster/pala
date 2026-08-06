@@ -8,18 +8,18 @@ Last updated: 2026-02-07
    - Verify deadman + commanded disable behavior on real hardware.
    - Add/confirm safe fallback behavior for stale/no-perception conditions.
 
-2. Perception truthfulness and Jetson detector tuning
-   - Make perception output explicit about detector state (`num_detections`, `used_fallback_bbox`, detector health).
-   - Tune DeepStream thresholds/FPS and document lighting sensitivity.
-   - Define acceptance criteria (example: fallback ratio under sustained subject presence).
+2. Perception capture truthfulness
+   - Validate camera frame IDs, frame age, source health, and FPS on Jetson.
+   - Keep local detection disabled until the direct vision-model loop is stable.
+   - Use `pala/perception/DEEPSTREAM_REINTRODUCTION.md` when local facts are added later.
 
 3. Control primitives and motion policy
    - Finalize primitive set for demo (`hold`, `glance`, `ack`, `breath`, optional `track`).
    - Add per-primitive constraints (rate/accel/safety gating).
 
 4. Behavior/planner reset
-   - TODO: define new behavior architecture from first principles.
-   - TODO: define new planner contract and execution semantics.
+   - Phase 1 and 2 complete: capture-only perception and V4 behavior removal.
+   - TODO: define the Phase 3 model decision contract and execution semantics.
 
 5. Cosmos integration via Brev
    - TODO: re-specify request/response contract after reset.
@@ -35,4 +35,5 @@ Last updated: 2026-02-07
 - Tests for safety invariants and contract validation.
 
 ## Suggested Next Step
-- Start with items 1 and 2 together: safe servo envelope + perception truthfulness.
+- Design Phase 3 before writing code: model authority, state ownership, decision
+  schema, skill completion semantics, and the smallest vertical slice.

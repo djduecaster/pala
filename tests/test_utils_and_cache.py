@@ -6,7 +6,6 @@ import numpy as np
 import pytest
 
 from pala.perception.frame_cache import LatestFrameCache
-from pala.perception.detector.jetson_backend import JetsonDetector
 from pala.utils import LatestValue, maybe_logger, stop_event
 import pala.utils.timing as timing
 
@@ -118,10 +117,3 @@ def test_maybe_logger_supports_filename_only_path(tmp_path, monkeypatch):
     path = tmp_path / "events.jsonl"
     assert path.exists()
     assert json.loads(path.read_text(encoding="utf-8").strip()) == {"ok": True}
-
-
-def test_jetson_detector_stub_raises_not_implemented():
-    detector = JetsonDetector()
-    frame = np.zeros((2, 2, 3), dtype=np.uint8)
-    with pytest.raises(NotImplementedError, match="not implemented"):
-        detector.detect(frame)

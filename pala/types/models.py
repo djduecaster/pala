@@ -8,31 +8,17 @@ from uuid import uuid4
 
 
 @dataclass
-class BBoxNorm:
-    """Normalized bbox in cx, cy, w, h (0..1)."""
-    cx: float
-    cy: float
-    w: float
-    h: float
-
-
-@dataclass
-class PointNorm:
-    """Normalized point in x, y (0..1)."""
-    x: float
-    y: float
-
-
-@dataclass
 class PerceptionState:
+    """Capture health and timing for the latest camera frame."""
+
     timestamp_monotonic_s: float
     timestamp_wall_s: Optional[float] = None
+    frame_id: Optional[int] = None
     fps: Optional[float] = None
     latency_ms: Optional[float] = None
-    primary_person: Optional[BBoxNorm] = None
-    primary_person_conf: Optional[float] = None
-    pointing_target: Optional[PointNorm] = None
-    pointing_conf: Optional[float] = None
+    frame_age_ms: Optional[float] = None
+    source_alive: bool = True
+    is_new_frame: bool = False
     debug: Dict[str, Any] = field(default_factory=dict)
 
 

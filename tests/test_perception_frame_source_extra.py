@@ -56,10 +56,8 @@ def test_frame_source_base_methods_raise_not_implemented():
 
 
 def test_dummy_and_camera_frame_source_timestamp_paths():
-    dummy = DummyFrameSource(period_s=0.25)
+    dummy = DummyFrameSource()
     assert isinstance(dummy.get_timestamp(), float)
-    pos = dummy.dummy_position()
-    assert 0.19 <= pos <= 0.81
     dummy.shutdown()
 
     camera = _StubCamera()

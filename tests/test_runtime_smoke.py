@@ -1,7 +1,7 @@
 import time
 
 import pala.main as pala_main
-from pala.config.load import LoopRates, LoggingConfig, CameraConfig, RobotConfig, DeepStreamConfig, load_config
+from pala.config.load import LoopRates, LoggingConfig, CameraConfig, RobotConfig, load_config
 
 
 class _CaptureLogger:
@@ -21,7 +21,6 @@ def test_runtime_starts_in_dev_mode(monkeypatch):
 
     cfg = RobotConfig(
         mode="dev",
-        detector="dummy",
         loop_rates=LoopRates(perception_hz=20, behavior_hz=3, control_hz=80, hardware_hz=120),
         deadman_timeout_ms=250,
         joint_names=["yaw", "pitch1", "pitch2", "roll", "pitch3"],
@@ -33,7 +32,6 @@ def test_runtime_starts_in_dev_mode(monkeypatch):
             actions_jsonl="logs/actions.jsonl",
         ),
         camera=CameraConfig(device="/dev/video0", width=640, height=480, fps=30, pipeline=None),
-        deepstream=DeepStreamConfig(config_path=None, person_class_id=0, conf_threshold=None),
     )
 
     monkeypatch.setattr(pala_main, "load_config", lambda _path: cfg)

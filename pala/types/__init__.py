@@ -1,6 +1,4 @@
 from .models import (
-    BBoxNorm,
-    PointNorm,
     PerceptionState,
     PrimitiveKind,
     HoldCommand,
@@ -22,8 +20,6 @@ from .models import (
 )
 
 __all__ = [
-    "BBoxNorm",
-    "PointNorm",
     "PerceptionState",
     "PrimitiveKind",
     "HoldCommand",

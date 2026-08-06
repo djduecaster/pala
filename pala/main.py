@@ -13,9 +13,8 @@ from .config import load_config
 from .types import PerceptionState, ActionPlan, HardwareCommand
 from .perception import PerceptionNode, LatestFrameCache
 from .perception.preview_tap import PreviewTapWriter
-from .perception.detector import DummyDetector, JetsonDetector, DeepStreamDetector
 from .perception.frame_source import DummyFrameSource, CameraFrameSource
-from .behavior import ActionGuardConfig, BehaviorPolicyV4 as BehaviorPolicy, BehaviorPolicyV4Config, ModeFsmV4Config
+from .behavior import HoldBehaviorPolicy
 from .control import TrajectoryExecutor
 from .control.primitives import PrimitiveKind, HoldCommand
 from .hardware import DummyServo, PCA9685Servo, ServoCalibration
@@ -41,15 +40,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     latest_perception = LatestValue[PerceptionState]()
     latest_action = LatestValue[ActionPlan]()
     latest_command = LatestValue[HardwareCommand]()
-    latest_control_state = LatestValue[object]()
     latest_frame = LatestFrameCache()
 
     # Nodes
-    perception = PerceptionNode(source=_build_frame_source(cfg), detector=_build_detector(cfg))
-    behavior = BehaviorPolicy(
-        config=_build_behavior_config(cfg, run_log_dir=run_log_dir),
-        frame_cache=latest_frame,
-    )
+    perception = PerceptionNode(source=_build_frame_source(cfg))
+    behavior = HoldBehaviorPolicy()
     executor = TrajectoryExecutor(cfg.joint_limits_rad, style_profiles=getattr(cfg, "style_profiles", None))
     servo = _build_servo(cfg)
     preview_tap = _build_preview_tap(cfg)
@@ -109,8 +104,13 @@ def main(argv: Optional[list[str]] = None) -> int:
 
             now = time.monotonic()
             if now - last_print >= 2.0:
-                zone = st.debug.get("zone_hint") if st.debug else None
-                logger.info("perception fps=%.1f zone=%s", st.fps or 0.0, zone)
+                logger.info(
+                    "perception fps=%.1f frame_id=%s age_ms=%.1f source_alive=%s",
+                    st.fps or 0.0,
+                    st.frame_id,
+                    st.frame_age_ms or 0.0,
+                    st.source_alive,
+                )
                 last_print = now
 
             rl.sleep()
@@ -119,12 +119,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     def behavior_loop() -> None:
         rl = RateLimiter(cfg.loop_rates.behavior_hz)
         last_action_id: Optional[str] = None
-        last_env_summary: Optional[str] = None
         while not stop.is_set():
             st, _ = latest_perception.get()
-            control_state, control_ts = latest_control_state.get()
-            if control_state is not None and control_ts is not None and hasattr(behavior, "set_control_state"):
-                behavior.set_control_state(control_state)
             action = behavior.step(st)
             ts = time.monotonic()
             latest_action.set(action, ts)
@@ -139,30 +135,14 @@ def main(argv: Optional[list[str]] = None) -> int:
                 )
 
             if action.action_id != last_action_id:
-                summary = _latest_env_summary(behavior)
-                if summary:
-                    logger.info(
-                        "decision primitive=%s style=%s conf=%.2f reason=%s env=%s",
-                        action.primitive.value,
-                        action.style,
-                        action.confidence,
-                        _short_text(action.explanation, max_chars=80),
-                        _short_text(summary, max_chars=110),
-                    )
-                else:
-                    logger.info(
-                        "decision primitive=%s style=%s conf=%.2f reason=%s",
-                        action.primitive.value,
-                        action.style,
-                        action.confidence,
-                        _short_text(action.explanation, max_chars=80),
-                    )
+                logger.info(
+                    "decision primitive=%s style=%s conf=%.2f reason=%s",
+                    action.primitive.value,
+                    action.style,
+                    action.confidence,
+                    _short_text(action.explanation, max_chars=80),
+                )
                 last_action_id = action.action_id
-
-            summary = _latest_env_summary(behavior)
-            if summary and summary != last_env_summary:
-                logger.info("env summary=%s", _short_text(summary, max_chars=140))
-                last_env_summary = summary
 
             rl.sleep()
 
@@ -186,7 +166,6 @@ def main(argv: Optional[list[str]] = None) -> int:
 
             cmd = executor.step(action, dt)
             latest_command.set(cmd, cmd.timestamp_monotonic_s)
-            latest_control_state.set(executor.control_state, now)
 
             rl.sleep()
 
@@ -338,8 +317,7 @@ def _build_servo(cfg) -> DummyServo:
 
 
 def _build_frame_source(cfg):
-    # TODO: Allow jetson_perception to use GStreamer camera with dummy control/servo.
-    if cfg.mode != "jetson_full":
+    if cfg.mode not in {"jetson_perception", "jetson_full"}:
         return DummyFrameSource()
 
     from .hardware.camera_gst import GStreamerCamera
@@ -352,61 +330,6 @@ def _build_frame_source(cfg):
         pipeline=cfg.camera.pipeline,
     )
     return CameraFrameSource(camera)
-
-
-def _build_detector(cfg):
-    if cfg.detector:
-        if cfg.detector == "deepstream":
-            if cfg.mode == "jetson_full":
-                preflight_error = _deepstream_preflight_error()
-                if preflight_error is not None:
-                    logger.warning(
-                        "DeepStream detector unavailable at startup (%s). "
-                        "Using no-op detector (zero local detections).",
-                        preflight_error,
-                    )
-                    return _NoopDetector(reason=preflight_error)
-            return DeepStreamDetector(
-                config_path=cfg.deepstream.config_path,
-                person_class_id=cfg.deepstream.person_class_id,
-                conf_threshold=cfg.deepstream.conf_threshold,
-            )
-        if cfg.detector == "jetson":
-            return JetsonDetector()
-        if cfg.detector == "dummy":
-            return DummyDetector()
-        raise ValueError(f"Unknown detector backend: {cfg.detector}")
-    if cfg.mode == "jetson_full":
-        return JetsonDetector()
-    return DummyDetector()
-
-
-class _NoopDetector:
-    """Fallback detector used when DeepStream dependencies are missing at startup."""
-
-    def __init__(self, *, reason: str):
-        self._reason = reason
-
-    def detect(self, _frame):
-        return []
-
-    def shutdown(self) -> None:
-        return None
-
-
-def _deepstream_preflight_error() -> Optional[str]:
-    try:
-        import gi
-
-        gi.require_version("Gst", "1.0")
-        from gi.repository import Gst  # noqa: F401
-    except Exception as exc:  # noqa: BLE001 - startup preflight diagnostics
-        return f"missing_gstreamer_bindings:{type(exc).__name__}:{exc}"
-    try:
-        import pyds  # noqa: F401
-    except Exception as exc:  # noqa: BLE001 - startup preflight diagnostics
-        return f"missing_pyds:{type(exc).__name__}:{exc}"
-    return None
 
 
 def _build_preview_tap(cfg) -> PreviewTapWriter:
@@ -451,26 +374,6 @@ def _build_preview_extra(cfg, cmd: Optional[HardwareCommand]) -> Optional[Dict[s
     }
 
 
-def _latest_env_summary(behavior: object) -> Optional[str]:
-    world_state = getattr(behavior, "world_state", None)
-    if world_state is None or not hasattr(world_state, "snapshot"):
-        return None
-    try:
-        snap = world_state.snapshot()
-    except Exception:  # noqa: BLE001 - best effort for logging only
-        return None
-    if not isinstance(snap, dict):
-        return None
-    env = snap.get("latest_env_snapshot")
-    if not isinstance(env, dict):
-        return None
-    summary = env.get("summary")
-    if summary is None:
-        return None
-    token = " ".join(str(summary).split()).strip()
-    return token if token else None
-
-
 def _short_text(value: Optional[str], *, max_chars: int) -> str:
     token = " ".join(str(value or "").split()).strip()
     if not token:
@@ -486,7 +389,6 @@ def _init_run_log_dir(cfg) -> Optional[str]:
         return None
     has_log_targets = bool(
         getattr(cfg.logging, "enabled", False)
-        or (getattr(cfg, "cosmos", None) is not None and getattr(cfg.cosmos, "enabled", False))
     )
     if not has_log_targets:
         return None
@@ -508,94 +410,6 @@ def _scope_log_path(path: Optional[str], run_log_dir: Optional[str]) -> Optional
     if not filename:
         return path
     return os.path.join(run_log_dir, filename)
-
-
-def _build_behavior_config(cfg, *, run_log_dir: Optional[str] = None) -> BehaviorPolicyV4Config:
-    cosmos = getattr(cfg, "cosmos", None)
-    if cosmos is None:
-        return BehaviorPolicyV4Config(remote_enabled=False)
-
-    base_url = os.getenv("PALA_COSMOS_BASE_URL") or cosmos.base_url
-    api_key = os.getenv("PALA_COSMOS_API_KEY")
-    remote_provider = os.getenv("PALA_MODEL_PROVIDER") or getattr(cosmos, "provider", "auto")
-    provider_token = str(remote_provider or "auto").strip().lower()
-    base_token = str(base_url or "").strip().lower()
-    if provider_token == "auto" and (
-        "generativelanguage.googleapis.com" in base_token or "/v1beta/openai" in base_token
-    ):
-        provider_token = "gemini"
-    model = os.getenv("PALA_COSMOS_MODEL") or cosmos.model
-    planner_prompt = os.getenv("PALA_COSMOS_PROMPT") or cosmos.planner_prompt
-
-    planner_log_path = _scope_log_path(
-        str(getattr(cosmos, "behavior_planner_log_path", "logs/behavior_planner.jsonl")),
-        run_log_dir,
-    )
-    reasoning_log_path = _scope_log_path(
-        str(getattr(cosmos, "behavior_reasoning_log_path", "logs/behavior_reasoning.jsonl")),
-        run_log_dir,
-    )
-    trace_log_path = _scope_log_path(
-        str(getattr(cosmos, "behavior_trace_log_path", "logs/behavior_trace.jsonl")),
-        run_log_dir,
-    )
-    planner_hz_cfg = float(getattr(cosmos, "planner_hz", 0.5))
-    remote_enabled = bool(cosmos.enabled)
-
-    return BehaviorPolicyV4Config(
-        remote_enabled=remote_enabled,
-        base_url=None if base_url in (None, "") else str(base_url),
-        remote_provider=provider_token,
-        api_key=None if api_key in (None, "") else str(api_key),
-        model=str(model),
-        request_timeout_ms=int(getattr(cosmos, "request_timeout_ms", 6000)),
-        error_backoff_s=float(getattr(cosmos, "behavior_error_backoff_s", 1.5)),
-        client_error_backoff_s=float(getattr(cosmos, "behavior_client_error_backoff_s", 5.0)),
-        planner_hz=planner_hz_cfg,
-        max_frame_age_ms=int(getattr(cosmos, "max_frame_age_ms", 500)),
-        frame_max_width=int(getattr(cosmos, "summary_max_width", 320)),
-        frame_jpeg_quality=int(getattr(cosmos, "summary_jpeg_quality", 55)),
-        planner_include_latest_frame=bool(getattr(cosmos, "planner_include_latest_frame", True)),
-        planner_max_tokens=int(getattr(cosmos, "planner_max_tokens", 1000)),
-        startup_wake_enabled=bool(getattr(cosmos, "startup_wake_enabled", True)),
-        startup_wake_left_s=float(getattr(cosmos, "startup_wake_left_s", 0.35)),
-        startup_wake_right_s=float(getattr(cosmos, "startup_wake_right_s", 0.35)),
-        startup_wake_loop_s=float(getattr(cosmos, "startup_wake_loop_s", 0.45)),
-        startup_wake_settle_s=float(getattr(cosmos, "startup_wake_settle_s", 0.70)),
-        startup_wake_rate_rad_s=float(getattr(cosmos, "startup_wake_rate_rad_s", 1.8)),
-        startup_wake_yaw_rad=float(getattr(cosmos, "startup_wake_yaw_rad", 0.16)),
-        startup_min_s=float(getattr(cosmos, "startup_wake_left_s", 0.35))
-        + float(getattr(cosmos, "startup_wake_right_s", 0.35))
-        + float(getattr(cosmos, "startup_wake_loop_s", 0.45))
-        + float(getattr(cosmos, "startup_wake_settle_s", 0.70)),
-        startup_person_conf_fast_exit=float(getattr(cosmos, "startup_person_conf_fast_exit", 0.60)),
-        policy_identity=str(getattr(cosmos, "policy_identity", "You are PALA.")),
-        policy_capabilities=str(getattr(cosmos, "policy_capabilities", "")),
-        policy_safety=str(getattr(cosmos, "policy_safety", "")),
-        policy_style=str(getattr(cosmos, "policy_style", "")),
-        planner_prompt=str(planner_prompt),
-        planner_log_path=planner_log_path,
-        reasoning_log_path=reasoning_log_path,
-        trace_log_path=trace_log_path,
-        mode_fsm=ModeFsmV4Config(
-            min_mode_dwell_s=float(getattr(cosmos, "mode_min_dwell_s", 1.0)),
-            engage_person_conf=float(getattr(cosmos, "mode_engage_person_conf", 0.45)),
-            disengage_person_conf=float(getattr(cosmos, "mode_disengage_person_conf", 0.20)),
-            boot_timeout_s=float(getattr(cosmos, "mode_boot_timeout_s", 6.7)),
-            return_home_settle_s=float(getattr(cosmos, "mode_return_home_settle_s", 1.2)),
-            recover_settle_s=float(getattr(cosmos, "mode_recover_settle_s", 1.0)),
-        ),
-        action_guard=ActionGuardConfig(
-            min_action_dwell_s=float(getattr(cosmos, "arbiter_min_dwell_s", 1.2)),
-            stale_after_s=float(getattr(cosmos, "action_guard_stale_after_s", getattr(cosmos, "stale_expire_s", 7.0))),
-            cooldowns_s={
-                "orient_to_zone": float(getattr(cosmos, "action_guard_orient_cooldown_s", getattr(cosmos, "arbiter_orient_cooldown_s", 1.2))),
-                "glance": float(getattr(cosmos, "action_guard_glance_cooldown_s", getattr(cosmos, "idle_glance_after_s", 3.0))),
-                "nod": float(getattr(cosmos, "action_guard_nod_cooldown_s", 4.0)),
-                "home": float(getattr(cosmos, "action_guard_home_cooldown_s", 4.0)),
-            },
-        ),
-    )
 
 
 def _parse_max_runtime_s() -> Optional[float]:
@@ -635,16 +449,6 @@ def _parse_cli_args(argv: Optional[list[str]]) -> argparse.Namespace:
 def _apply_mode_override(cfg, mode_override: Optional[str]) -> None:
     if mode_override:
         cfg.mode = mode_override
-
-    mode = str(cfg.mode).strip().lower()
-    if mode == "dev":
-        cfg.detector = "dummy"
-        if getattr(cfg, "cosmos", None) is not None:
-            cfg.cosmos.enabled = False
-        return
-
-    if mode in {"jetson_perception", "jetson_full"} and str(cfg.detector).strip().lower() == "dummy":
-        cfg.detector = "deepstream"
 
 
 if __name__ == "__main__":

@@ -44,13 +44,6 @@ class CameraConfig:
 
 
 @dataclass
-class DeepStreamConfig:
-    config_path: Optional[str]
-    person_class_id: int
-    conf_threshold: Optional[float]
-
-
-@dataclass
 class CosmosConfig:
     enabled: bool = False
     base_url: Optional[str] = None
@@ -60,83 +53,12 @@ class CosmosConfig:
         "Prioritize calm, safe desk-companion behavior. "
         "Always choose one concrete next action."
     )
-    policy_identity: str = (
-        "You are PALA, a social desk companion lamp that should feel alive, expressive, and safe."
-    )
-    policy_capabilities: str = (
-        "You can move head/neck joints via primitives: hold, breath, glance, nod, orient_to_zone. "
-        "You cannot manipulate external objects, move base position, or physically touch users."
-    )
-    policy_safety: str = (
-        "Avoid sudden aggressive motion. Prefer stable conservative actions."
-    )
-    policy_style: str = (
-        "Default style is calm; use curious for gentle tracking and focused for attentive task support."
-    )
-    # Remote behavior cadence.
-    planner_hz: float = 0.5
-    summarizer_hz: float = 0.10
-    planner_event_delta_threshold: float = 0.65
-    planner_event_cooldown_s: float = 0.7
-    planner_max_proposals: int = 3
-    planner_use_env_context: bool = True
-    # Deterministic arbitration.
-    arbiter_min_dwell_s: float = 1.2
-    arbiter_base_margin: float = 0.10
-    idle_after_s: float = 6.0
-    idle_glance_after_s: float = 10.0
-    startup_wake_enabled: bool = True
-    startup_wake_left_s: float = 0.35
-    startup_wake_right_s: float = 0.35
-    startup_wake_loop_s: float = 0.45
-    startup_wake_settle_s: float = 0.70
-    startup_wake_rate_rad_s: float = 1.8
-    startup_wake_yaw_rad: float = 0.16
-    startup_wake_roll_rad: float = 0.10
-    startup_wake_pitch2_rad: float = 0.12
-    startup_observe_yaw_rad: float = 0.0
-    startup_observe_pitch2_rad: float = -0.18
-    startup_person_conf_fast_exit: float = 0.60
-    mode_min_dwell_s: float = 1.0
-    mode_return_home_settle_s: float = 1.2
-    mode_recover_settle_s: float = 1.0
-    mode_engage_person_conf: float = 0.45
-    mode_disengage_person_conf: float = 0.20
-    mode_boot_timeout_s: float = 6.7
-    stale_penalty_per_s: float = 0.05
-    stale_expire_s: float = 14.0
-    action_guard_stale_after_s: float = 7.0
-    action_guard_orient_cooldown_s: float = 1.2
-    action_guard_glance_cooldown_s: float = 3.0
-    action_guard_nod_cooldown_s: float = 4.0
-    action_guard_home_cooldown_s: float = 4.0
-    # Frame sampling and media packaging.
-    planner_max_frames: int = 1
-    planner_include_latest_frame: bool = True
-    summary_window_s: float = 6.0
-    summary_max_frames: int = 1
-    summary_max_width: int = 320
-    summary_jpeg_quality: int = 55
-    max_frame_age_ms: int = 500
-    request_min_fresh_frames: int = 1
-    # Remote request and token budgets.
     request_timeout_ms: int = 20000
-    behavior_error_backoff_s: float = 1.5
-    behavior_client_error_backoff_s: float = 5.0
-    env_max_tokens: int = 1000
-    planner_max_tokens: int = 1000
-    response_ttl_ms: int = 12000
-    # Behavior V3 logs.
-    behavior_env_log_path: str = "logs/behavior_env.jsonl"
-    behavior_planner_log_path: str = "logs/behavior_planner.jsonl"
-    behavior_reasoning_log_path: str = "logs/behavior_reasoning.jsonl"
-    behavior_trace_log_path: str = "logs/behavior_trace.jsonl"
 
 
 @dataclass
 class RobotConfig:
     mode: str
-    detector: str
     loop_rates: LoopRates
     deadman_timeout_ms: int
     joint_names: List[str]
@@ -144,7 +66,6 @@ class RobotConfig:
     servo_calibration: Dict[str, Any]
     logging: LoggingConfig
     camera: CameraConfig
-    deepstream: DeepStreamConfig
     telemetry_preview: TelemetryPreviewConfig = field(default_factory=TelemetryPreviewConfig)
     cosmos: CosmosConfig = field(default_factory=CosmosConfig)
     style_profiles: Dict[str, Dict[str, float]] = field(default_factory=dict)
@@ -214,15 +135,6 @@ def load_config(path: str) -> RobotConfig:
     if mode not in allowed_modes:
         _fail("mode", "expected one of dev|jetson_perception|jetson_full")
 
-    detector = str(data.get("detector", "dummy")).strip().lower()
-    if not detector:
-        detector = "dummy"
-    allowed_detectors = {"dummy", "deepstream", "jetson"}
-    if detector not in allowed_detectors:
-        _fail("detector", "expected one of dummy|deepstream|jetson")
-    if detector == "jetson":
-        _fail("detector", "detector 'jetson' is not implemented; use dummy or deepstream")
-
     loop_rates_raw = _req(data, "loop_rates", "root")
     if not isinstance(loop_rates_raw, dict):
         _fail("loop_rates", "expected mapping")
@@ -286,16 +198,6 @@ def load_config(path: str) -> RobotConfig:
         pipeline=camera_raw.get("pipeline"),
     )
 
-    ds_raw = data.get("deepstream", {})
-    if not isinstance(ds_raw, dict):
-        _fail("deepstream", "expected mapping")
-    ds_conf_threshold = ds_raw.get("conf_threshold")
-    deepstream = DeepStreamConfig(
-        config_path=ds_raw.get("config_path"),
-        person_class_id=_as_int(ds_raw.get("person_class_id", 0), "deepstream.person_class_id"),
-        conf_threshold=None if ds_conf_threshold is None else _as_float(ds_conf_threshold, "deepstream.conf_threshold"),
-    )
-
     cosmos_raw = data.get("cosmos", {})
     if not isinstance(cosmos_raw, dict):
         _fail("cosmos", "expected mapping")
@@ -304,207 +206,8 @@ def load_config(path: str) -> RobotConfig:
         base_url=None if cosmos_raw.get("base_url") in (None, "") else str(cosmos_raw.get("base_url")),
         provider=str(cosmos_raw.get("provider", "auto")),
         model=str(cosmos_raw.get("model", "nvidia/cosmos-reason2-2b")),
-        planner_prompt=str(
-            cosmos_raw.get(
-                "planner_prompt",
-                (
-                    "Prioritize calm, safe desk-companion behavior. "
-                    "Always choose one concrete next action."
-                ),
-            )
-        ),
-        policy_identity=str(
-            cosmos_raw.get(
-                "policy_identity",
-                "You are PALA, a social desk companion lamp that should feel alive, expressive, and safe.",
-            )
-        ),
-        policy_capabilities=str(
-            cosmos_raw.get(
-                "policy_capabilities",
-                (
-                    "You can move head/neck joints via primitives: hold, breath, glance, nod, orient_to_zone. "
-                    "You cannot manipulate external objects, move base position, or physically touch users."
-                ),
-            )
-        ),
-        policy_safety=str(
-            cosmos_raw.get(
-                "policy_safety",
-                "Avoid sudden aggressive motion. Prefer stable conservative actions.",
-            )
-        ),
-        policy_style=str(
-            cosmos_raw.get(
-                "policy_style",
-                "Default style is calm; use curious for gentle tracking and focused for attentive task support.",
-            )
-        ),
-        planner_hz=_as_float(cosmos_raw.get("planner_hz", 0.5), "cosmos.planner_hz"),
-        summarizer_hz=_as_float(cosmos_raw.get("summarizer_hz", 0.10), "cosmos.summarizer_hz"),
-        planner_event_delta_threshold=_as_float(
-            cosmos_raw.get("planner_event_delta_threshold", 0.65),
-            "cosmos.planner_event_delta_threshold",
-        ),
-        planner_event_cooldown_s=_as_float(
-            cosmos_raw.get("planner_event_cooldown_s", 0.7),
-            "cosmos.planner_event_cooldown_s",
-        ),
-        planner_max_proposals=_as_int(cosmos_raw.get("planner_max_proposals", 3), "cosmos.planner_max_proposals"),
-        planner_use_env_context=_as_bool(
-            cosmos_raw.get("planner_use_env_context", True),
-            "cosmos.planner_use_env_context",
-        ),
-        arbiter_min_dwell_s=_as_float(
-            cosmos_raw.get("arbiter_min_dwell_s", 1.2),
-            "cosmos.arbiter_min_dwell_s",
-        ),
-        arbiter_base_margin=_as_float(
-            cosmos_raw.get("arbiter_base_margin", 0.10),
-            "cosmos.arbiter_base_margin",
-        ),
-        idle_after_s=_as_float(cosmos_raw.get("idle_after_s", 6.0), "cosmos.idle_after_s"),
-        idle_glance_after_s=_as_float(
-            cosmos_raw.get("idle_glance_after_s", 10.0),
-            "cosmos.idle_glance_after_s",
-        ),
-        startup_wake_enabled=_as_bool(
-            cosmos_raw.get("startup_wake_enabled", True),
-            "cosmos.startup_wake_enabled",
-        ),
-        startup_wake_left_s=_as_float(
-            cosmos_raw.get("startup_wake_left_s", 0.35),
-            "cosmos.startup_wake_left_s",
-        ),
-        startup_wake_right_s=_as_float(
-            cosmos_raw.get("startup_wake_right_s", 0.35),
-            "cosmos.startup_wake_right_s",
-        ),
-        startup_wake_loop_s=_as_float(
-            cosmos_raw.get("startup_wake_loop_s", 0.45),
-            "cosmos.startup_wake_loop_s",
-        ),
-        startup_wake_settle_s=_as_float(
-            cosmos_raw.get("startup_wake_settle_s", 0.70),
-            "cosmos.startup_wake_settle_s",
-        ),
-        startup_wake_rate_rad_s=_as_float(
-            cosmos_raw.get("startup_wake_rate_rad_s", 1.8),
-            "cosmos.startup_wake_rate_rad_s",
-        ),
-        startup_wake_yaw_rad=_as_float(
-            cosmos_raw.get("startup_wake_yaw_rad", 0.16),
-            "cosmos.startup_wake_yaw_rad",
-        ),
-        startup_wake_roll_rad=_as_float(
-            cosmos_raw.get("startup_wake_roll_rad", 0.10),
-            "cosmos.startup_wake_roll_rad",
-        ),
-        startup_wake_pitch2_rad=_as_float(
-            cosmos_raw.get("startup_wake_pitch2_rad", 0.12),
-            "cosmos.startup_wake_pitch2_rad",
-        ),
-        startup_observe_yaw_rad=_as_float(
-            cosmos_raw.get("startup_observe_yaw_rad", 0.0),
-            "cosmos.startup_observe_yaw_rad",
-        ),
-        startup_observe_pitch2_rad=_as_float(
-            cosmos_raw.get("startup_observe_pitch2_rad", -0.18),
-            "cosmos.startup_observe_pitch2_rad",
-        ),
-        startup_person_conf_fast_exit=_as_float(
-            cosmos_raw.get("startup_person_conf_fast_exit", 0.60),
-            "cosmos.startup_person_conf_fast_exit",
-        ),
-        mode_min_dwell_s=_as_float(cosmos_raw.get("mode_min_dwell_s", 1.0), "cosmos.mode_min_dwell_s"),
-        mode_return_home_settle_s=_as_float(
-            cosmos_raw.get("mode_return_home_settle_s", 1.2),
-            "cosmos.mode_return_home_settle_s",
-        ),
-        mode_recover_settle_s=_as_float(
-            cosmos_raw.get("mode_recover_settle_s", 1.0),
-            "cosmos.mode_recover_settle_s",
-        ),
-        mode_engage_person_conf=_as_float(
-            cosmos_raw.get("mode_engage_person_conf", 0.45),
-            "cosmos.mode_engage_person_conf",
-        ),
-        mode_disengage_person_conf=_as_float(
-            cosmos_raw.get("mode_disengage_person_conf", 0.20),
-            "cosmos.mode_disengage_person_conf",
-        ),
-        mode_boot_timeout_s=_as_float(
-            cosmos_raw.get("mode_boot_timeout_s", 6.7),
-            "cosmos.mode_boot_timeout_s",
-        ),
-        stale_penalty_per_s=_as_float(cosmos_raw.get("stale_penalty_per_s", 0.05), "cosmos.stale_penalty_per_s"),
-        stale_expire_s=_as_float(cosmos_raw.get("stale_expire_s", 14.0), "cosmos.stale_expire_s"),
-        action_guard_stale_after_s=_as_float(
-            cosmos_raw.get("action_guard_stale_after_s", cosmos_raw.get("stale_expire_s", 7.0)),
-            "cosmos.action_guard_stale_after_s",
-        ),
-        action_guard_orient_cooldown_s=_as_float(
-            cosmos_raw.get("action_guard_orient_cooldown_s", cosmos_raw.get("arbiter_orient_cooldown_s", 1.2)),
-            "cosmos.action_guard_orient_cooldown_s",
-        ),
-        action_guard_glance_cooldown_s=_as_float(
-            cosmos_raw.get("action_guard_glance_cooldown_s", cosmos_raw.get("idle_glance_after_s", 3.0)),
-            "cosmos.action_guard_glance_cooldown_s",
-        ),
-        action_guard_nod_cooldown_s=_as_float(
-            cosmos_raw.get("action_guard_nod_cooldown_s", 4.0),
-            "cosmos.action_guard_nod_cooldown_s",
-        ),
-        action_guard_home_cooldown_s=_as_float(
-            cosmos_raw.get("action_guard_home_cooldown_s", 4.0),
-            "cosmos.action_guard_home_cooldown_s",
-        ),
-        planner_max_frames=_as_int(cosmos_raw.get("planner_max_frames", 1), "cosmos.planner_max_frames"),
-        planner_include_latest_frame=_as_bool(
-            cosmos_raw.get("planner_include_latest_frame", True),
-            "cosmos.planner_include_latest_frame",
-        ),
-        summary_window_s=_as_float(
-            cosmos_raw.get("summary_window_s", 6.0),
-            "cosmos.summary_window_s",
-        ),
-        summary_max_frames=_as_int(
-            cosmos_raw.get("summary_max_frames", 1),
-            "cosmos.summary_max_frames",
-        ),
-        summary_max_width=_as_int(
-            cosmos_raw.get("summary_max_width", 320),
-            "cosmos.summary_max_width",
-        ),
-        summary_jpeg_quality=_as_int(
-            cosmos_raw.get("summary_jpeg_quality", 55),
-            "cosmos.summary_jpeg_quality",
-        ),
-        max_frame_age_ms=_as_int(cosmos_raw.get("max_frame_age_ms", 500), "cosmos.max_frame_age_ms"),
-        request_min_fresh_frames=_as_int(
-            cosmos_raw.get("request_min_fresh_frames", 1),
-            "cosmos.request_min_fresh_frames",
-        ),
+        planner_prompt=str(cosmos_raw.get("planner_prompt", "Describe the scene and choose one next behavior.")),
         request_timeout_ms=_as_int(cosmos_raw.get("request_timeout_ms", 20000), "cosmos.request_timeout_ms"),
-        behavior_error_backoff_s=_as_float(
-            cosmos_raw.get("behavior_error_backoff_s", 1.5),
-            "cosmos.behavior_error_backoff_s",
-        ),
-        behavior_client_error_backoff_s=_as_float(
-            cosmos_raw.get("behavior_client_error_backoff_s", 5.0),
-            "cosmos.behavior_client_error_backoff_s",
-        ),
-        env_max_tokens=_as_int(cosmos_raw.get("env_max_tokens", 1000), "cosmos.env_max_tokens"),
-        planner_max_tokens=_as_int(cosmos_raw.get("planner_max_tokens", 1000), "cosmos.planner_max_tokens"),
-        response_ttl_ms=_as_int(cosmos_raw.get("response_ttl_ms", 12000), "cosmos.response_ttl_ms"),
-        behavior_env_log_path=str(cosmos_raw.get("behavior_env_log_path", "logs/behavior_env.jsonl")),
-        behavior_planner_log_path=str(
-            cosmos_raw.get("behavior_planner_log_path", "logs/behavior_planner.jsonl")
-        ),
-        behavior_reasoning_log_path=str(
-            cosmos_raw.get("behavior_reasoning_log_path", "logs/behavior_reasoning.jsonl")
-        ),
-        behavior_trace_log_path=str(cosmos_raw.get("behavior_trace_log_path", "logs/behavior_trace.jsonl")),
     )
 
     style_profiles_raw = data.get("styles", {})
@@ -525,7 +228,6 @@ def load_config(path: str) -> RobotConfig:
 
     return RobotConfig(
         mode=mode,
-        detector=detector,
         loop_rates=loop_rates,
         deadman_timeout_ms=deadman_timeout_ms,
         joint_names=joint_names,
@@ -534,7 +236,6 @@ def load_config(path: str) -> RobotConfig:
         logging=logging,
         telemetry_preview=telemetry_preview,
         camera=camera,
-        deepstream=deepstream,
         cosmos=cosmos,
         style_profiles=style_profiles,
     )

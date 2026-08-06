@@ -1,15 +1,4 @@
-from .action_guard import ActionGuard, ActionGuardConfig, GuardContext, GuardResult
-from .decision_schema_v4 import (
-    BEHAVIOR_DECISION_SCHEMA,
-    BehaviorActionDecision,
-    BehaviorDecision,
-    BehaviorDecisionAlternative,
-    BehaviorDecisionParseResult,
-    BehaviorDecisionParser,
-    behavior_decision_response_format,
-    parse_behavior_decision_response,
-)
-from .mode_fsm_v4 import MacroMode, ModeFsmV4, ModeFsmV4Config, ModeSignalsV4, ModeSnapshotV4, ModeTransitionV4
+from .json_parse import parse_json_flexible
 from .model_clients import (
     BaseModelClient,
     ModelProviderName,
@@ -20,60 +9,17 @@ from .model_clients import (
     normalize_chat_url,
     post_chat_json,
 )
-from .policy_v4 import BehaviorPolicyV4, BehaviorPolicyV4Config
-from .prompts import SYSTEM_PROMPT, behavior_v4_mode_guidance, build_behavior_v4_user_text, build_messages
-from .skills_v4 import (
-    SkillSpecV4,
-    allowed_moods_for_mode,
-    allowed_primitives_for,
-    allowed_skills_for_mode,
-    default_action_payload_for_mode,
-    default_skill_for_mode,
-    iter_skill_specs,
-    skill_spec_v4,
-)
-from .trace_bus import TraceBus
+from .policy import HoldBehaviorPolicy
 
 __all__ = [
-    "ActionGuard",
-    "ActionGuardConfig",
     "BaseModelClient",
-    "BEHAVIOR_DECISION_SCHEMA",
-    "BehaviorActionDecision",
-    "BehaviorDecision",
-    "BehaviorDecisionAlternative",
-    "BehaviorDecisionParseResult",
-    "BehaviorDecisionParser",
-    "BehaviorPolicyV4",
-    "BehaviorPolicyV4Config",
-    "GuardContext",
-    "GuardResult",
-    "MacroMode",
-    "ModeFsmV4",
-    "ModeFsmV4Config",
-    "ModeSignalsV4",
-    "ModeSnapshotV4",
-    "ModeTransitionV4",
+    "HoldBehaviorPolicy",
     "ModelProviderName",
     "ModelRequest",
     "ModelResponse",
-    "SYSTEM_PROMPT",
-    "SkillSpecV4",
-    "TraceBus",
-    "allowed_moods_for_mode",
-    "allowed_primitives_for",
-    "allowed_skills_for_mode",
-    "behavior_decision_response_format",
-    "behavior_v4_mode_guidance",
-    "build_behavior_v4_user_text",
-    "build_messages",
     "build_model_client",
-    "default_action_payload_for_mode",
-    "default_skill_for_mode",
     "extract_message_content",
-    "iter_skill_specs",
     "normalize_chat_url",
-    "parse_behavior_decision_response",
+    "parse_json_flexible",
     "post_chat_json",
-    "skill_spec_v4",
 ]
