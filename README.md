@@ -1,207 +1,132 @@
 # PALA: Programmable Autonomous Lamp Assistant
 
-## Overview
-PALA is a physical AI project that runs on an NVIDIA Jetson and uses a fast deploy/run loop from a Mac dev machine. The repo is structured for rapid iteration: edit locally, sync to Jetson, and run on-device with a single command.
+PALA is a five-degree-of-freedom desk lamp built from an IKEA NYMANE lamp,
+custom printed servo mounts, COTS servos, a PCA9685 board, a Logitech camera,
+and an NVIDIA Jetson. The current goal is a repeatable portfolio demo: notice
+a person, acknowledge them expressively, attend, and settle.
 
-PALA uses an IKEA NYMANE lamp, modified to be actuated with 5 degrees of freedom. With custom designed 3d printed servo mounts, a PCA9685 servo hat, and a collection of COTS servos, PALA serves as a minimum viable development platform for at-home functional robotics features.
+## Current baseline
 
-## NVIDIA Competition Focus
-This project is designed to score well on the competition criteria by emphasizing:
-- **Quality of Ideas**: a clear, compelling application of Cosmos Reason for robotics and video analytics agents.
-- **Technical Implementation**: readable, reproducible software with explicit inputs/outputs and evaluation steps.
-- **Design**: intuitive runtime modes and a clean operator workflow.
-- **Impact**: practical, testable behaviors that advance physical AI in the home.
+The runtime captures frames and emits a persistent **hold** action. It does
+not currently recognize people, call Gemini/Cosmos, or choose gestures.
+The four-loop foundation, servo mapping, motion primitives, and optional
+telemetry remain. Gesture choreography is exercised through separate tools
+before autonomous behavior is connected.
 
-## Runtime Modes (Planned)
-We will run PALA in three explicit modes to enable careful, staged porting:
-- `dev`: fully dummy perception + dummy hardware for safe iteration on planning/behavior.
-- `jetson_perception`: reserved for a later milestone; details TBD to avoid confusing closed-loop behavior.
-- `jetson_full`: full perception + control + actuation on Jetson hardware (near-term focus).
+Earlier NVIDIA competition and V3/V4 behavior systems are historical. See
+[architecture](docs/architecture.md), [next steps](docs/todo.md), and the
+[project assessment](docs/assessment_2026-09-04.md).
 
-Example commands:
-- `uv run python -m pala.main --mode dev`
-- `uv run python -m pala.main --mode jetson_perception`
-- `uv run python -m pala.main --mode jetson_full`
+## Run locally on Mac
 
-Mode selection will also be supported via `config/robot.yaml` (single source of truth when set).
+From `/Users/djduecaster/development/pala`, with `uv` installed:
 
-## Mode-First Usage
-- `config/robot.yaml` is local-safe by default.
-- Use `--mode` to switch runtime behavior:
-  - `uv run python -m pala.main` (default local/dev)
-  - `uv run python -m pala.main --mode jetson_full`
-
-When `--mode dev` is active, runtime forces dummy detector and disables Cosmos.
-When `--mode jetson_full` or `--mode jetson_perception` is active and detector is `dummy`, runtime promotes detector to `deepstream`.
-
-## Requirements
-
-### Mac (optional, for enhanced development experience + telemetry viewing)
-- macOS + `ssh` access to Jetson (host alias: `jetson`)
-- `rsync`
-- `make`
-- `uv` installed
-- Python pinned via `uv` (**3.10.12**)
-
-Telemetry quickstart:
-- `uv run python -m tools.telemetry.mac_viewer --jetson-host jetson`
-- `uv run python -m tools.telemetry.doctor --jetson-host jetson`
-- Full workflow/docs: `tools/telemetry/README.md`
-
-### Jetson
-- `uv` installed (e.g. `~/.local/bin/uv`)
-- Python 3.x available (JetPack default is fine)
-- Network connectivity and SSH access
-
-### Jetson Camera Setup (GStreamer)
-For the Jetson camera backend and FPS tool, install GStreamer Python bindings:
-```
-sudo apt update
-sudo apt install -y python3-gi gir1.2-gstreamer-1.0 gstreamer1.0-plugins-base gstreamer1.0-plugins-good
-```
-
-If you want the venv to access system packages (recommended on Jetson for `gi`):
-```
-rm -rf .venv
-uv venv --system-site-packages
+```bash
 uv sync
-uv pip install -e .
+uv run python -m pala.main
 ```
 
-Quick camera probe:
-```
-uv run python tools/test_camera_fps.py --seconds 5 --mode jetson_full
+The checked-in configuration defaults to dummy camera and servo backends.
+For a bounded check:
+
+```bash
+PALA_MAX_RUNTIME_S=3 uv run python -m pala.main --mode dev
+uv run pytest -q
 ```
 
-### Jetson DeepStream Setup (JetPack 6.x)
-DeepStream is a system-level install on Jetson. For JetPack 6.4.x, use the
-DeepStream 7.1 arm64 package from NVIDIA NGC:
-```
-sudo apt-get install ./deepstream-7.1_7.1.0-1_arm64.deb
+Tests use pytest; hardware tests use fakes. Python is pinned in
+`.python-version`, with the supported range defined in `pyproject.toml`.
+
+| Mode | Camera | Servo | Behavior |
+|---|---|---|---|
+| `dev` | Dummy RGB frames | Dummy | Hold |
+| `jetson_perception` | Jetson GStreamer | Dummy | Hold |
+| `jetson_full` | Jetson GStreamer | PCA9685 | Hold |
+
+`--mode` overrides `config/robot.yaml`. The camera-only Jetson mode is wired
+in code; on-device operation still needs verification in the current lab.
+Starting `jetson_full` can actuate the lamp even with hold-only behavior:
+the executor's initial position is a software zero estimate, not an encoder
+measurement of the physical posture.
+
+## Gesture workshop tools
+
+Run motion without hardware:
+
+```bash
+uv run python tools/expressive_movement_demo.py --runtime-mode dev --dry-run
+uv run python tools/validate_primitives.py --runtime-mode dev --dry-run --scenario single --primitive nod --duration-s 1 --no-neutral-start --no-neutral-end
+uv run python -m pala.control.primitive_tuner show
 ```
 
-Verify:
-```
-deepstream-app --version
+The simulator retains primitive traces, playback, and joint geometry checking.
+Its simulated positions are commanded trajectories, not a physics model of
+servo backlash, torque, gravity, or mechanical safety. See the
+[simulator guide](tools/primitive_sim/README.md) for launch commands.
+
+The expressive demo and validation runner require `--enable` for real servo
+writes; `--dry-run` avoids constructing the real servo backend. These tools
+are separate runners and do not inherit the main runtime's hardware-loop
+deadman. Review starting posture and calibrated motion limits before an
+operator-supervised powered session.
+
+`tools/hw_calibrate.py` is the dedicated hardware calibration tool.
+`tools/test_camera_fps.py` measures capture and can save snapshots. Camera and
+servo checks are separate; do not run concurrent owners of the same device.
+
+## Telemetry
+
+The optional preview tap writes a reduced-rate JPEG and metadata. The existing
+SSH sidecar and Mac viewer expose camera/perception information and commanded
+joint state:
+
+```bash
+uv run python -m tools.telemetry.mac_viewer --jetson-host jetson-wifi --focus runtime
 ```
 
-## DeepStream PeopleNet Bring-Up (Validated)
+This command connects to a running Jetson setup; it is not a local dummy
+runtime command. Live GUI video requires Python with Tk support. The viewer
+does not measure actual servo position or prove that a command was applied.
+Old reasoning and curation facilities remain opt-in for historical sessions.
+See [telemetry usage](tools/telemetry/README.md).
 
-This is the currently working process for `detector: deepstream` in `jetson_full`.
+The runtime writes `perception.jsonl` and `actions.jsonl` under a run directory
+in `logs/runs/`. Preview files live separately under `logs/telemetry/preview/`.
+Use the matching run when reviewing evidence; older behavior logs do not
+describe the current process.
 
-1) Prepare Jetson Python + uv environment:
-```
-sudo apt-get update
-sudo apt-get install -y python3-gi python3-gst-1.0 gir1.2-gstreamer-1.0
-cd ~/pala
-rm -rf .venv
-uv venv --system-site-packages
-uv sync
-```
+## Jetson workflow
 
-2) Install DeepStream Python bindings (`pyds`) for DS 7.1 / cp310:
-```
-WHEEL_URL=$(python3 -c "import json,urllib.request; d=json.load(urllib.request.urlopen('https://api.github.com/repos/NVIDIA-AI-IOT/deepstream_python_apps/releases/tags/v1.2.0')); print(next(a['browser_download_url'] for a in d['assets'] if a['name'].endswith('linux_aarch64.whl')))")
-wget -O /tmp/pyds.whl "$WHEEL_URL"
-mv /tmp/pyds.whl /tmp/pyds-1.2.0-cp310-cp310-linux_aarch64.whl
-uv pip install /tmp/pyds-1.2.0-cp310-cp310-linux_aarch64.whl
-uv run python -c "import gi, pyds; print('gi ok, pyds ok')"
-```
+The Mac checkout is the source of truth; the Jetson mirror is `~/pala`.
+The existing deployment commands remain:
 
-3) Build DeepStream custom parser library once (if missing):
-```
-cd /opt/nvidia/deepstream/deepstream-7.1/sources/libs/nvdsinfer_customparser
-sudo make CUDA_VER=12.6
+```bash
+make deploy
+make run
+make go
 ```
 
-4) Use the repo config:
-- `config/robot.yaml`
-  - `mode: jetson_full`
-  - `detector: deepstream`
-- `config/deepstream/peoplenet_int8.txt` (key settings)
-  - `parse-bbox-func-name=NvDsInferParseCustomResnet`
-  - `output-blob-names=output_bbox/BiasAdd:0;output_cov/Sigmoid:0`
-  - `model-engine-file=../../../.cache/pala/engines/resnet34_peoplenet_int8.engine`
+`make go` deploys and runs over foreground SSH. Deployment scripts use the
+`jetson` USB alias; direct Wi-Fi agent work uses `jetson-wifi` and the shared
+`pala` tmux session. `make go-tmux` is a proposal, not an implemented target.
+Read [Jetson agent workflow](docs/jetson_agent_workflow.md) before using that
+shared shell. Deployment uses rsync deletion: preserve any Jetson-only
+artifacts outside the mirror or pull them back before deployment.
 
-5) Keep engine cache outside repo (important with `make deploy`):
-```
-mkdir -p ~/.cache/pala/engines
-cp -v ~/pala/models/peoplenet/resnet34_peoplenet_int8.onnx_b1_gpu0_int8.engine ~/.cache/pala/engines/resnet34_peoplenet_int8.engine
-```
+Jetson camera capture requires GStreamer/PyGObject system packages visible to
+the Python environment. For initial setup, create a system-site-packages venv
+and install the project editable (`uv venv --system-site-packages`, `uv sync`,
+`uv pip install -e .`). Inspect the existing environment before recreating it.
+DeepStream is not required by the current runtime; historical bring-up notes
+remain in [the reintroduction reference](pala/perception/DEEPSTREAM_REINTRODUCTION.md).
 
-6) Run:
-```
-PALA_DS_INFER_TIMEOUT_S=10 PALA_LOG_LEVEL=INFO uv run python -m pala.main
-```
+Jetson-only secrets remain in `~/.config/pala/env.sh`. Keep credentials out of
+the repository and YAML. Retained model transport/probes are independent
+diagnostics; changing `cosmos.enabled` does not activate runtime planning.
 
-Quick detector-only sanity check (no control loop dependencies):
-```
-uv run python tools/test_detector_stats.py --seconds 20 --mode jetson_full --detector deepstream
-```
+## Validation boundary
 
-Manual servo calibration (safe, explicit enable required):
-```
-uv run python tools/hw_calibrate.py --list-joints
-uv run python tools/hw_calibrate.py --enable --neutral --hold-s 1.0
-uv run python tools/hw_calibrate.py --enable --joint yaw --deg 5 --hold-s 1.0
-uv run python tools/hw_calibrate.py --enable --repl
-```
-
-### DeepStream Lessons Learned
-- First engine build can take several minutes; short runtime limits can exit before serialization completes.
-- `make deploy` uses `rsync --delete`; Jetson-side config edits and in-repo engine files are overwritten/deleted unless committed on Mac or stored outside `~/pala`.
-- `zone=center` alone is not proof of detector output; perception falls back to a center dummy bbox when detections are empty.
-- `Deserialize engine failed ...` is expected on first run before the engine exists.
-- Keep NumPy pinned below 2 for current `pyds` compatibility on this stack.
-
-## Cosmos (Brev) One-Command Bring-Up
-
-On a fresh Brev VM:
-```
-cd ~/pala
-export NGC_API_KEY='...'
-./tools/brev_bootstrap_cosmos.sh --replace
-```
-
-This script:
-- validates GPU/docker prereqs,
-- logs into `nvcr.io`,
-- starts Cosmos NIM container,
-- waits for `http://127.0.0.1:8000/v1/health/ready`.
-
-On Jetson (or Mac in `--mode dev`) verify remote service connectivity:
-```
-cd ~/pala
-./tools/cosmos_planner_smoke.sh --base-url "http://<BREV_PUBLIC_IP>:8000" --mode dev --seconds 25
-```
-
-Characterize image round-trip latency (live capture, 1 Hz default):
-```
-cd ~/pala
-uv run python tools/cosmos_image_probe.py --base-url "http://<BREV_PUBLIC_IP>:8000" --mode jetson_full --count 20
-```
-
-Characterize short video-sequence reasoning (multi-frame temporal context):
-```
-cd ~/pala
-uv run python tools/cosmos_video_probe.py --base-url "http://<BREV_PUBLIC_IP>:8000" --mode jetson_full --count 12 --video-window-s 4 --video-max-frames 8
-```
-
-Ask Cosmos to describe what is happening in the camera image:
-```
-cd ~/pala
-uv run python tools/cosmos_image_probe.py --base-url "http://<BREV_PUBLIC_IP>:8000" --mode jetson_full --task describe --question "What is happening in this image?" --count 10
-```
-
-Pass criteria:
-- Runtime starts cleanly.
-- Perception/control/action logs are produced.
-
-## Behavior / Planner Reset
-
-Behavior and planner internals are intentionally reset for a clean-slate rebuild.
-
-TODO:
-- Re-document the new behavior architecture.
-- Re-document the new planner/orchestrator contract.
-- Re-document memory/context payload contracts and debug expectations.
+Passing local tests establishes software behavior with dummy/fake backends.
+Gesture quality, current calibration, startup posture, camera coverage, and
+physical stop behavior require a supervised hardware session. Known remaining
+issues are recorded in [the bug log](docs/bug_log.md).

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from enum import Enum
 import math
 import time
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from ..types import (
     ActionPlan,
@@ -41,14 +41,21 @@ class ControlState:
 
 
 class TrajectoryExecutor:
-    """Typed primitive executor where actions run to completion unless canceled."""
+    """Typed primitive executor with latest-intent arbitration.
+
+    ``ActionPlan.cancel_current`` is currently accepted for contract
+    compatibility but is not interpreted here; a different action intent
+    already replaces the active primitive.
+    """
 
     def __init__(
         self,
         joint_limits_rad: List[List[float]],
         *,
         style_profiles: Optional[Dict[str, Dict[str, float]]] = None,
+        clock: Optional[Callable[[], float]] = None,
     ):
+        self._clock = clock or time.monotonic
         self._limits = joint_limits_rad
         self._current = [0.0 for _ in joint_limits_rad]
         self._target = list(self._current)
@@ -78,7 +85,7 @@ class TrajectoryExecutor:
         return self._state
 
     def step(self, action: ActionPlan, dt: float) -> HardwareCommand:
-        now = time.monotonic()
+        now = self._clock()
         self._maybe_activate(action, now)
         self._apply_timeout(now)
 
@@ -100,7 +107,8 @@ class TrajectoryExecutor:
         kind = self._active_action.primitive
         command = self._active_action.command
         style = self._style_profile(self._active_action.style)
-        elapsed = max(0.0, now - (self._active_start_s or now))
+        start_s = self._active_start_s if self._active_start_s is not None else now
+        elapsed = max(0.0, now - start_s)
 
         if kind == PrimitiveKind.HOLD and isinstance(command, HoldCommand):
             target = list(self._current)

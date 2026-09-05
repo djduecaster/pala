@@ -118,6 +118,27 @@ def test_apply_rate_limit_with_negative_dt_clamps_to_zero():
     assert cmd.joint_angles_rad == [0.0, 0.0]
 
 
+def test_injected_clock_supports_zero_start_and_isolated_instances():
+    first_clock = iter([0.0, 0.12])
+    second_clock = iter([10.0])
+    first = TrajectoryExecutor(_limits(5), clock=lambda: next(first_clock))
+    second = TrajectoryExecutor(_limits(5), clock=lambda: next(second_clock))
+    action = ActionPlan(
+        primitive=PrimitiveKind.NOD,
+        command=NodCommand(amp_rad=0.1, duration_s=0.1, cycles=1, rate_rad_s=1.0),
+        confidence=1.0,
+    )
+
+    first.step(action, dt=0.01)
+    assert first.control_state.started_monotonic_s == 0.0
+    other_command = second.step(action, dt=0.01)
+    assert other_command.timestamp_monotonic_s == 10.0
+    first.step(action, dt=0.01)
+    assert first.control_state.status == ExecutionStatus.DONE
+    assert second.control_state.started_monotonic_s == 10.0
+    assert second.control_state.status == ExecutionStatus.RUNNING
+
+
 def test_home_action_executes_home_branch_and_finishes_when_already_at_origin():
     executor = TrajectoryExecutor(_limits(5))
     action = ActionPlan(

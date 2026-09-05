@@ -109,3 +109,32 @@ def test_load_config_styles_override_and_invalid_styles(tmp_path):
     bad = _base_lines() + ["styles:", "  calm: not_a_mapping"]
     with pytest.raises(ValueError, match="styles.calm"):
         load_config(_write(tmp_path, "styles_bad.yaml", bad))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("perception_hz", 0),
+        ("behavior_hz", "nan"),
+        ("control_hz", -1),
+        ("hardware_hz", "inf"),
+    ],
+)
+def test_load_config_rejects_nonpositive_or_nonfinite_loop_rates(tmp_path, field, value):
+    lines = _base_lines()
+    index = next(i for i, line in enumerate(lines) if line.strip().startswith(f"{field}:"))
+    lines[index] = f"  {field}: {value}"
+    with pytest.raises(ValueError, match=f"loop_rates\\.{field}"):
+        load_config(_write(tmp_path, f"bad_{field}.yaml", lines))
+
+
+def test_load_config_rejects_unordered_limits_and_nonpositive_style(tmp_path):
+    lines = _base_lines()
+    index = lines.index("  - [-1.0, 1.0]")
+    lines[index] = "  - [1.0, -1.0]"
+    with pytest.raises(ValueError, match="joint_limits_rad\\[0\\]"):
+        load_config(_write(tmp_path, "bad_order.yaml", lines))
+
+    lines = _base_lines() + ["styles:", "  calm:", "    amp_scale: .nan"]
+    with pytest.raises(ValueError, match="styles.calm.amp_scale"):
+        load_config(_write(tmp_path, "bad_style_nan.yaml", lines))

@@ -15,10 +15,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from pala.behavior.decision_schema_v4 import behavior_decision_response_format, parse_behavior_decision_response
 from pala.behavior.json_parse import parse_json_flexible
 from pala.behavior.model_clients import extract_message_content, normalize_chat_url, post_chat_json
-from pala.behavior.prompts import build_behavior_v4_user_text, build_messages
 from pala.config import load_config
 
 
@@ -75,18 +73,6 @@ def _safe_json_parse(content: Optional[str]) -> tuple[bool, Optional[str]]:
         return False, err or "json_parse_failed"
     if not isinstance(obj, dict):
         return False, "json_root_not_object"
-    return True, None
-
-
-def _behavior_parse(content: Optional[str]) -> tuple[bool, Optional[str]]:
-    if content is None:
-        return False, "missing_message_content"
-    parsed = parse_behavior_decision_response(content)
-    if parsed is None:
-        return False, "behavior_parse_failed"
-    primitive = str(parsed.decision.action.primitive or "").strip()
-    if not primitive:
-        return False, "behavior_missing_primitive"
     return True, None
 
 
@@ -169,53 +155,6 @@ def _run_case(
     }
 
 
-def _behavior_payload(model: str, *, max_tokens: int, provider: str) -> Dict[str, Any]:
-    context = {
-        "mode": "social_interact",
-        "current_mode": "social_interact",
-        "current_action": {
-            "primitive": "hold",
-            "command": {},
-            "style": "calm",
-            "confidence": 0.2,
-        },
-        "signals": {
-            "person_conf": 0.7,
-            "zone_hint": "left",
-            "env_delta": 0.4,
-            "activity_level": 0.6,
-            "novelty": 0.3,
-            "person_present": True,
-        },
-        "latest_env": {
-            "scene": "I see the scene as a desk with a user to my left.",
-            "summary": "user present and shifting posture",
-        },
-        "control_state": "active_kind=hold",
-        "health": {"planner": "healthy", "perception": "healthy"},
-        "skill_hint": "social_ack",
-        "mode_transition_candidates": ["stay", "to_idle_presence", "to_search_assist"],
-    }
-    user_text = build_behavior_v4_user_text(
-        context=context,
-        policy_identity="You are PALA.",
-        policy_capabilities="Use hold, breath, glance, nod, orient_to_zone.",
-        policy_safety="Keep movement safe and calm.",
-        policy_style="Use calm by default.",
-        planner_prompt="Return one concrete next behavior decision for the current scene.",
-    )
-    return {
-        "model": model,
-        "messages": build_messages(user_text=user_text, image_data_urls=[]),
-        "temperature": 0.0,
-        "top_p": 0.3,
-        "presence_penalty": 0.0,
-        "max_tokens": int(max_tokens),
-        "stream": False,
-        "response_format": behavior_decision_response_format(),
-    }
-
-
 def _json_schema_payload(model: str, *, max_tokens: int, strict: bool, provider: str) -> Dict[str, Any]:
     provider_token = str(provider or "auto").strip().lower()
     if provider_token == "gemini":
@@ -294,8 +233,6 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--runs", type=int, default=1, help="Requests per probe case.")
     parser.add_argument("--sleep-s", type=float, default=0.0, help="Delay between requests in each case.")
     parser.add_argument("--max-tokens", type=int, default=160)
-    parser.add_argument("--planner-max-tokens", type=int, default=520)
-    parser.add_argument("--no-planner", action="store_true", help="Skip behavior-schema probe case.")
     parser.add_argument("--schema-no-strict", action="store_true", help="Use json_schema probe without strict=true.")
     parser.add_argument("--out-root", default="logs/provider_probe")
     parser.add_argument("--verbose", action="store_true")
@@ -346,7 +283,10 @@ def main() -> int:
             provider=str(provider),
             api_key=api_key,
             payload_builder=lambda: _text_payload(model=str(model), max_tokens=max(16, int(args.max_tokens))),
-            parse_fn=lambda content: (bool(content and "READY" in content.upper()), None if content else "missing_content"),
+            parse_fn=lambda content: (
+                bool(content and content.strip().upper() == "READY"),
+                None if content and content.strip().upper() == "READY" else "expected_exact_READY",
+            ),
             timeout_s=float(args.timeout_s),
             runs=runs,
             sleep_s=float(args.sleep_s),
@@ -374,27 +314,6 @@ def main() -> int:
             verbose=args.verbose,
         )
     )
-    if not args.no_planner:
-        results.append(
-            _run_case(
-                name="behavior_schema_probe",
-                url=str(base_url),
-                provider=str(provider),
-                api_key=api_key,
-                payload_builder=lambda: _behavior_payload(
-                    model=str(model),
-                    max_tokens=max(320, int(args.planner_max_tokens)),
-                    provider=str(provider),
-                ),
-                parse_fn=_behavior_parse,
-                timeout_s=float(args.timeout_s),
-                runs=runs,
-                sleep_s=float(args.sleep_s),
-                raw_dir=raw_dir,
-                verbose=args.verbose,
-            )
-        )
-
     report = {
         "run_id": run_id,
         "provider": provider,

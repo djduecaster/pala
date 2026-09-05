@@ -1,5 +1,9 @@
 # Brev VM Setup Plan (Cosmos Integration)
 
+> Historical infrastructure reference. The current runtime is hold-only and
+> does not call Cosmos; the runtime-integration instructions below predate
+> the reset. VM/container operations are not part of the gesture workshop.
+
 This runbook is the exact setup path used to bring up Cosmos Reason 2 NIM on a Brev VM and verify connectivity from Jetson.
 
 ## 1) Create VM in Brev
@@ -105,7 +109,8 @@ Quick endpoint smoke (Jetson or Mac):
 
 ```bash
 cd ~/pala
-./tools/cosmos_planner_smoke.sh --base-url "http://<BREV_PUBLIC_IP>:8000" --mode dev --seconds 25
+# Historical runtime smoke command removed after the behavior reset.
+# Use tools/model_provider_probe.py for standalone endpoint diagnostics.
 ```
 
 Live camera image probe (Jetson, 1 Hz default):

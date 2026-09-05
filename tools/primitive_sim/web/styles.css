@@ -420,7 +420,7 @@ body.embedded-shell .layout {
   grid-template-rows: 1fr;
 }
 
-body.embedded-shell .mode-group {
+body.embedded-shell .mode-nav a {
   display: none;
 }
 
@@ -485,4 +485,8 @@ body.embedded-shell .control-card {
 
 .stage-tools button.wide {
   min-width: 74px;
+}
+
+[hidden] {
+  display: none !important;
 }

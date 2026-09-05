@@ -1,5 +1,10 @@
 # PALA x Cosmos Reason 2 — Strategy Context for Expert Review
 
+> Historical February 2026 competition snapshot. The V3/V4 systems described
+> below were subsequently removed. Its deadlines and measurements are not
+> current runtime claims. See `docs/architecture.md` and `docs/todo.md` for the
+> current baseline and portfolio milestone.
+
 ## 1) Project Backstory and Goal
 
 PALA is a physical AI desk companion lamp running on Jetson hardware.  
@@ -210,4 +215,3 @@ Recommended target: **Approach B (Balanced Hybrid)**.
   - `logs/runs/20260223_152100`
   - `logs/runs/20260223_153644`
   - `logs/runs/20260223_154554`
-

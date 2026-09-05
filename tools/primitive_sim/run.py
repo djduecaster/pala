@@ -6,7 +6,6 @@ import copy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import http.server
-from itertools import product
 import json
 import math
 from pathlib import Path
@@ -60,22 +59,8 @@ _PRIMITIVE_ORDER: tuple[PrimitiveKind, ...] = (
 
 _DEFAULT_BASELINE_REL = Path("tools/primitive_sim/baseline_params.json")
 _DEFAULT_SUITE_TRACE_REL = Path("logs/primitive_sim/latest_trace.json")
-_DEFAULT_SCENARIO_TRACE_REL = Path("logs/primitive_sim/scenario_latest.json")
-_DEFAULT_EXPERIMENTS_REL = Path("logs/primitive_sim/experiments.jsonl")
-_DEFAULT_SWEEP_DIR_REL = Path("logs/primitive_sim/sweeps")
 _BASELINE_VERSION = 2
 _BASELINE_UPDATED_BY = "primitive_studio"
-_MAX_SWEEP_CANDIDATES = 120
-_DEFAULT_SWEEP_TOP_K = 10
-_DEFAULT_SWEEP_WEIGHTS: dict[str, float] = {
-    "min_limit_margin_rad": 4.0,
-    "limit_violation_count": -12.0,
-    "peak_joint_vel_rad_s": -0.35,
-    "mean_abs_joint_vel_rad_s": -0.25,
-    "path_length_rad": -0.04,
-    "primitive_switch_count": -0.15,
-    "duration_s": -0.02,
-}
 
 _GEOM_PARAM_ALIASES: dict[str, tuple[str, ...]] = {
     "baseRadius": ("baseRadius", "base_radius", "base_radius_m"),
@@ -147,8 +132,6 @@ class _StudioContext:
     style_options: list[str]
     lamp_geometry: dict[str, float]
     dh_params: dict[str, float]
-    fsm_sim: Any
-    experiments_path: Path
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -157,7 +140,7 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--config", default="config/robot.yaml", help="Path to robot config")
     parser.add_argument(
         "--scenario",
-        choices=["suite", "single", "script", "studio", "joint_checker", "state_machine", "scenario_lab"],
+        choices=["suite", "single", "script", "studio", "joint_checker"],
         default="suite",
     )
     parser.add_argument("--script", default=None, help="Script JSON path for --scenario script")
@@ -184,7 +167,6 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--serve", action="store_true", help="Serve web viewer and block")
     parser.add_argument("--port", type=int, default=8766, help="Viewer HTTP port")
     parser.add_argument("--baseline", default=str(_DEFAULT_BASELINE_REL), help="Baseline params JSON path")
-    parser.add_argument("--experiments", default=str(_DEFAULT_EXPERIMENTS_REL), help="Scenario experiments JSONL path")
     return parser.parse_args(argv)
 
 
@@ -231,99 +213,6 @@ def _coerce_bool(value: Any, default: bool) -> bool:
 def _safe_slug(value: str) -> str:
     token = re.sub(r"[^a-zA-Z0-9._-]+", "_", str(value or "").strip())
     return token.strip("._-") or "run"
-
-
-def _default_sweep_weights() -> dict[str, float]:
-    return dict(_DEFAULT_SWEEP_WEIGHTS)
-
-
-def _normalize_sweep_weights(raw: Any) -> dict[str, float]:
-    out = _default_sweep_weights()
-    if not isinstance(raw, Mapping):
-        return out
-    for key, default in _DEFAULT_SWEEP_WEIGHTS.items():
-        val = raw.get(key)
-        if val is None:
-            continue
-        out[key] = _coerce_float(val, default)
-    return out
-
-
-def _score_trace_metrics(metrics: Mapping[str, Any], weights: Mapping[str, float]) -> float:
-    score = 0.0
-    for key, weight in weights.items():
-        score += float(weight) * _coerce_float(metrics.get(key), 0.0)
-    return float(score)
-
-
-def _expand_sweep_grid(raw: Any, *, max_candidates: int = _MAX_SWEEP_CANDIDATES) -> list[dict[str, float]]:
-    if not isinstance(raw, Mapping) or not raw:
-        raise ValueError("param_grid must be a non-empty object of numeric arrays")
-
-    keys: list[str] = []
-    values: list[list[float]] = []
-    for key, grid_values in raw.items():
-        field = str(key).strip()
-        if not field:
-            continue
-        if not isinstance(grid_values, list) or not grid_values:
-            raise ValueError(f"param_grid[{field}] must be a non-empty array")
-        numeric_vals: list[float] = []
-        for value_idx, item in enumerate(grid_values):
-            try:
-                num = float(item)
-            except Exception as exc:
-                raise ValueError(
-                    f"param_grid[{field}][{value_idx}] must be numeric"
-                ) from exc
-            if not math.isfinite(num):
-                raise ValueError(f"param_grid[{field}][{value_idx}] must be finite")
-            numeric_vals.append(num)
-        keys.append(field)
-        values.append(numeric_vals)
-
-    if not keys:
-        raise ValueError("param_grid must include at least one named parameter")
-
-    combos: list[dict[str, float]] = []
-    for row in product(*values):
-        combos.append({keys[i]: float(row[i]) for i in range(len(keys))})
-        if len(combos) > max_candidates:
-            raise ValueError(
-                f"param_grid expands to more than {max_candidates} candidates; reduce value counts"
-            )
-    return combos
-
-
-def _target_step_index(raw_steps: Sequence[Any], token: Any) -> int:
-    if not raw_steps:
-        raise ValueError("steps must be non-empty")
-    if token is None:
-        return max(0, len(raw_steps) - 1)
-    if isinstance(token, int):
-        idx = token
-    elif isinstance(token, str):
-        t = token.strip()
-        if not t:
-            return max(0, len(raw_steps) - 1)
-        if t.isdigit() or (t.startswith("-") and t[1:].isdigit()):
-            idx = int(t)
-        else:
-            lowered = t.lower()
-            for i, row in enumerate(raw_steps):
-                if isinstance(row, Mapping):
-                    name = str(row.get("name", "")).strip().lower()
-                    if name and name == lowered:
-                        return i
-            raise ValueError(f"target_step not found by name: {t}")
-    else:
-        idx = _coerce_int(token, len(raw_steps) - 1)
-
-    if idx < 0:
-        idx = len(raw_steps) + idx
-    if idx < 0 or idx >= len(raw_steps):
-        raise ValueError(f"target_step index out of range: {idx}")
-    return idx
 
 
 def _default_move_target(cfg: Any) -> list[float]:
@@ -719,17 +608,6 @@ def _load_viewer_geometry_from_config(config_path: Path) -> dict[str, float]:
     return _load_viewer_geometry_from_raw(raw)
 
 
-def _build_state_machine_simulator(cfg: Any, raw_config: Mapping[str, Any]) -> Any:
-    try:
-        from tools.primitive_sim.state_machine import create_state_machine_simulator
-    except Exception as exc:  # noqa: BLE001
-        raise RuntimeError(
-            "primitive_sim state_machine mode failed to load. "
-            "Check tools/primitive_sim/state_machine.py for import/runtime errors."
-        ) from exc
-    return create_state_machine_simulator(cfg=cfg, raw_config=raw_config)
-
-
 def _default_joint_angles(cfg: Any) -> list[float]:
     out: list[float] = []
     names = list(getattr(cfg, "joint_names", []))
@@ -885,132 +763,6 @@ def _default_duration_s(primitive: PrimitiveKind) -> float:
     return 2.0
 
 
-def _scenario_default_steps(cfg: Any) -> list[dict[str, Any]]:
-    steps: list[dict[str, Any]] = []
-    seed = [
-        ("home", PrimitiveKind.HOME),
-        ("breath", PrimitiveKind.BREATH),
-        ("glance_left", PrimitiveKind.GLANCE),
-        ("orient_center", PrimitiveKind.ORIENT_TO_ZONE),
-        ("nod", PrimitiveKind.NOD),
-    ]
-    for name, primitive in seed:
-        cmd = _default_command_payload(primitive, cfg)
-        if primitive == PrimitiveKind.GLANCE:
-            cmd = dict(cmd)
-            cmd["direction"] = "left"
-        if primitive == PrimitiveKind.ORIENT_TO_ZONE:
-            cmd = dict(cmd)
-            cmd["zone"] = "center"
-        steps.append(
-            {
-                "name": name,
-                "primitive": primitive.value,
-                "style": "calm",
-                "duration_s": _default_duration_s(primitive),
-                "stop_on_done": primitive not in CONTINUOUS_PRIMITIVES,
-                "command": cmd,
-            }
-        )
-    return steps
-
-
-def _segments_to_payload(segments: Sequence[SimSegment]) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    for seg in segments:
-        out.append(
-            {
-                "name": str(seg.name),
-                "duration_s": float(seg.max_s),
-                "stop_on_done": bool(seg.stop_on_done),
-                "primitive": seg.action.primitive.value,
-                "style": str(seg.action.style or "calm"),
-                "command": dict(to_json_dict(seg.action.command)),
-            }
-        )
-    return out
-
-
-def _scenario_segments_from_payload(
-    *,
-    raw_steps: Any,
-    cfg: Any,
-    style_options: Sequence[str],
-    baseline: Mapping[str, Any],
-    default_style: str = "calm",
-) -> list[SimSegment]:
-    if not isinstance(raw_steps, list) or not raw_steps:
-        raise ValueError("steps must be a non-empty array")
-
-    styles = [str(v).strip().lower() for v in style_options if str(v).strip()]
-    if not styles:
-        styles = ["calm"]
-
-    fallback_style = str(default_style or "calm").strip().lower()
-    if fallback_style not in styles:
-        fallback_style = styles[0]
-
-    out: list[SimSegment] = []
-    for idx, item in enumerate(raw_steps):
-        if not isinstance(item, Mapping):
-            raise ValueError(f"steps[{idx}] must be an object")
-
-        try:
-            primitive = _parse_primitive(item.get("primitive", ""))
-        except ValueError as exc:
-            raise ValueError(f"steps[{idx}] invalid primitive: {exc}") from exc
-
-        style = str(item.get("style", fallback_style)).strip().lower() or fallback_style
-        if style not in styles:
-            style = fallback_style
-
-        name = str(item.get("name") or f"step_{idx + 1:02d}_{primitive.value}").strip()
-        if not name:
-            name = f"step_{idx + 1:02d}_{primitive.value}"
-
-        duration_raw = item.get("duration_s", item.get("max_s"))
-        duration_s = max(0.05, _coerce_float(duration_raw, _default_duration_s(primitive)))
-        stop_default = primitive not in CONTINUOUS_PRIMITIVES
-        stop_on_done = _coerce_bool(item.get("stop_on_done"), stop_default)
-
-        command_raw = item.get("command")
-        if command_raw is None:
-            command_raw = {}
-        if not isinstance(command_raw, Mapping):
-            raise ValueError(f"steps[{idx}].command must be an object")
-
-        use_baseline = _coerce_bool(item.get("use_baseline"), True)
-        base_cmd: Mapping[str, Any] | None = None
-        if use_baseline:
-            src = baseline.get("primitives", {}).get(primitive.value, {})
-            if isinstance(src, Mapping):
-                base_cmd = src
-
-        canonical = _canonicalize_command_payload(
-            primitive,
-            cfg,
-            style=style,
-            base=base_cmd,
-            patch=command_raw,
-        )
-        action = ActionPlan(
-            primitive=primitive,
-            command=canonical,
-            confidence=1.0,
-            explanation="primitive_scenario",
-            style=style,
-        )
-        out.append(
-            SimSegment(
-                name=name,
-                action=action,
-                max_s=duration_s,
-                stop_on_done=stop_on_done,
-            )
-        )
-    return out
-
-
 def _trace_metrics(trace: Mapping[str, Any]) -> dict[str, Any]:
     metadata = trace.get("metadata")
     if not isinstance(metadata, Mapping):
@@ -1099,32 +851,6 @@ def _trace_metrics(trace: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _append_experiment_record(path: Path, record: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(dict(record), ensure_ascii=True) + "\n")
-
-
-def _load_experiment_history(path: Path, *, limit: int = 25) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    if not path.exists():
-        return out
-    lines = path.read_text(encoding="utf-8").splitlines()
-    for raw in reversed(lines):
-        token = raw.strip()
-        if not token:
-            continue
-        try:
-            row = json.loads(token)
-        except Exception:
-            continue
-        if isinstance(row, Mapping):
-            out.append(dict(row))
-        if len(out) >= max(1, int(limit)):
-            break
-    return out
-
-
 def _json_response(handler: http.server.BaseHTTPRequestHandler, status: int, payload: Mapping[str, Any]) -> None:
     body = (json.dumps(payload, ensure_ascii=True) + "\n").encode("utf-8")
     handler.send_response(status)
@@ -1198,40 +924,6 @@ class _StudioRequestHandler(http.server.SimpleHTTPRequestHandler):
             _json_response(self, 200, payload)
             return
 
-        if parsed.path == "/api/state_machine/meta":
-            with self.studio.lock:
-                payload = self.studio.fsm_sim.meta()
-            payload["config_path"] = str(self.studio.config_path)
-            _json_response(self, 200, payload)
-            return
-
-        if parsed.path == "/api/scenario/meta":
-            with self.studio.lock:
-                baseline = copy.deepcopy(self.studio.baseline)
-            payload = {
-                "primitives": self.studio.primitive_specs,
-                "styles": self.studio.style_options,
-                "default_steps": _scenario_default_steps(self.studio.cfg),
-                "baseline": baseline,
-                "sweep": {
-                    "max_candidates": _MAX_SWEEP_CANDIDATES,
-                    "default_top_k": _DEFAULT_SWEEP_TOP_K,
-                    "default_weights": _default_sweep_weights(),
-                },
-                "config_path": str(self.studio.config_path),
-            }
-            _json_response(self, 200, payload)
-            return
-
-        if parsed.path == "/api/scenario/history":
-            query = parse_qs(parsed.query)
-            limit = _coerce_int((query.get("limit") or ["25"])[0], 25)
-            limit = max(1, min(200, limit))
-            with self.studio.lock:
-                history = _load_experiment_history(self.studio.experiments_path, limit=limit)
-            _json_response(self, 200, {"history": history})
-            return
-
         super().do_GET()
 
     def do_POST(self) -> None:  # noqa: N802
@@ -1253,30 +945,6 @@ class _StudioRequestHandler(http.server.SimpleHTTPRequestHandler):
 
         if parsed.path == "/api/suite":
             self._handle_suite(payload)
-            return
-
-        if parsed.path == "/api/state_machine/reset":
-            self._handle_state_machine_reset()
-            return
-
-        if parsed.path == "/api/state_machine/step":
-            self._handle_state_machine_step(payload)
-            return
-
-        if parsed.path == "/api/state_machine/force":
-            self._handle_state_machine_force(payload)
-            return
-
-        if parsed.path == "/api/scenario/simulate":
-            self._handle_scenario_simulate(payload)
-            return
-
-        if parsed.path == "/api/scenario/sweep":
-            self._handle_scenario_sweep(payload)
-            return
-
-        if parsed.path == "/api/scenario/save_experiment":
-            self._handle_scenario_save_experiment(payload)
             return
 
         _json_error(self, 404, code="not_found", error="not_found")
@@ -1393,8 +1061,13 @@ class _StudioRequestHandler(http.server.SimpleHTTPRequestHandler):
 
         # Replace full baseline object
         if "primitives" in payload:
-            normalized = _normalize_baseline(payload, self.studio.cfg)
             with self.studio.lock:
+                candidate = dict(payload)
+                # Studio Save All sends the primitive map without metadata.
+                # Supply the current schema version while preserving strict
+                # validation of the complete primitive set.
+                candidate.setdefault("version", self.studio.baseline.get("version", _BASELINE_VERSION))
+                normalized = _normalize_baseline(candidate, self.studio.cfg)
                 normalized = _with_baseline_metadata(normalized)
                 _save_baseline(self.studio.baseline_path, normalized)
                 self.studio.baseline = normalized
@@ -1426,366 +1099,6 @@ class _StudioRequestHandler(http.server.SimpleHTTPRequestHandler):
                 output_path=out_path,
             )
         _json_response(self, 200, response)
-
-    def _handle_state_machine_reset(self) -> None:
-        with self.studio.lock:
-            state = self.studio.fsm_sim.reset()
-            meta = self.studio.fsm_sim.meta()
-        _json_response(
-            self,
-            200,
-            {
-                "state": state,
-                "meta": meta,
-            },
-        )
-
-    def _handle_state_machine_step(self, payload: Mapping[str, Any]) -> None:
-        dt_s = _coerce_float(payload.get("dt_s"), 0.35)
-        commit = _coerce_bool(payload.get("commit"), False)
-        zone_hint = payload.get("zone_hint")
-        signals_raw = payload.get("signals")
-        if signals_raw is not None and not isinstance(signals_raw, Mapping):
-            _json_error(
-                self,
-                400,
-                code="invalid_signals",
-                error="signals must be an object when provided",
-                details={"field": "signals"},
-            )
-            return
-        with self.studio.lock:
-            result = self.studio.fsm_sim.step(
-                dt_s=dt_s,
-                signals=signals_raw if isinstance(signals_raw, Mapping) else None,
-                zone_hint=zone_hint,
-                commit=commit,
-            )
-        _json_response(self, 200, result)
-
-    def _handle_state_machine_force(self, payload: Mapping[str, Any]) -> None:
-        mode_raw = payload.get("mode")
-        if mode_raw is None:
-            _json_error(
-                self,
-                400,
-                code="invalid_mode",
-                error="mode is required",
-                details={"field": "mode"},
-            )
-            return
-        reason = str(payload.get("reason") or "force_mode").strip() or "force_mode"
-        dt_s = _coerce_float(payload.get("dt_s"), 0.0)
-        commit = _coerce_bool(payload.get("commit"), False)
-        zone_hint = payload.get("zone_hint")
-        signals_raw = payload.get("signals")
-        if signals_raw is not None and not isinstance(signals_raw, Mapping):
-            _json_error(
-                self,
-                400,
-                code="invalid_signals",
-                error="signals must be an object when provided",
-                details={"field": "signals"},
-            )
-            return
-        with self.studio.lock:
-            try:
-                result = self.studio.fsm_sim.force_mode(
-                    next_mode=mode_raw,
-                    reason=reason,
-                    dt_s=dt_s,
-                    signals=signals_raw if isinstance(signals_raw, Mapping) else None,
-                    zone_hint=zone_hint,
-                    commit=commit,
-                )
-            except ValueError as exc:
-                _json_error(
-                    self,
-                    400,
-                    code="invalid_mode",
-                    error=str(exc),
-                    details={"field": "mode"},
-                )
-                return
-        _json_response(self, 200, result)
-
-    def _handle_scenario_simulate(self, payload: Mapping[str, Any]) -> None:
-        raw_steps = payload.get("steps")
-        if not isinstance(raw_steps, list):
-            _json_error(
-                self,
-                400,
-                code="invalid_steps",
-                error="steps must be an array",
-                details={"field": "steps"},
-            )
-            return
-        style_default = str(payload.get("style", "calm")).strip().lower() or "calm"
-        run_name = str(payload.get("name") or "scenario_run").strip() or "scenario_run"
-        dry_run = _coerce_bool(payload.get("dry_run"), False)
-        out_path = _abs_path(str(payload.get("output") or _DEFAULT_SCENARIO_TRACE_REL))
-
-        try:
-            with self.studio.lock:
-                segments = _scenario_segments_from_payload(
-                    raw_steps=raw_steps,
-                    cfg=self.studio.cfg,
-                    style_options=self.studio.style_options,
-                    baseline=self.studio.baseline,
-                    default_style=style_default,
-                )
-        except ValueError as exc:
-            _json_error(self, 400, code="scenario_validation_error", error=str(exc))
-            return
-
-        if dry_run:
-            _json_response(
-                self,
-                200,
-                {
-                    "ok": True,
-                    "dry_run": True,
-                    "segment_count": len(segments),
-                    "steps": _segments_to_payload(segments),
-                },
-            )
-            return
-
-        trace = simulate_segments(
-            joint_names=self.studio.cfg.joint_names,
-            joint_limits_rad=self.studio.cfg.joint_limits_rad,
-            segments=segments,
-            hz=self.studio.hz,
-            style_profiles=self.studio.cfg.style_profiles,
-        )
-        trace["metadata"]["scenario"] = "scenario_lab"
-        trace["metadata"]["config_path"] = str(self.studio.config_path)
-        trace["metadata"]["run_name"] = run_name
-        if self.studio.lamp_geometry:
-            trace["metadata"]["lamp_geometry"] = self.studio.lamp_geometry
-
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        write_trace_json(out_path, trace)
-        rel = _relative_trace_path(out_path)
-        viewer_url = "/tools/primitive_sim/web/lamp_sim.html?mode=playback"
-        if rel:
-            viewer_url += f"&trace={quote(rel, safe='/')}"
-        else:
-            viewer_url = "/tools/primitive_sim/web/lamp_sim.html?mode=studio"
-
-        _json_response(
-            self,
-            200,
-            {
-                "ok": True,
-                "dry_run": False,
-                "run_name": run_name,
-                "trace_path": str(out_path),
-                "trace_url": rel,
-                "viewer_url": viewer_url,
-                "sample_count": len(trace.get("samples", [])),
-                "metrics": _trace_metrics(trace),
-                "steps": _segments_to_payload(segments),
-            },
-        )
-
-    def _handle_scenario_sweep(self, payload: Mapping[str, Any]) -> None:
-        raw_steps = payload.get("steps")
-        if not isinstance(raw_steps, list) or not raw_steps:
-            _json_error(
-                self,
-                400,
-                code="invalid_steps",
-                error="steps must be a non-empty array",
-                details={"field": "steps"},
-            )
-            return
-
-        run_name = str(payload.get("name") or "scenario_sweep").strip() or "scenario_sweep"
-        style_default = str(payload.get("style", "calm")).strip().lower() or "calm"
-        save_traces = _coerce_bool(payload.get("save_traces"), False)
-        top_k = _coerce_int(payload.get("top_k"), _DEFAULT_SWEEP_TOP_K)
-        top_k = max(1, min(_MAX_SWEEP_CANDIDATES, top_k))
-
-        try:
-            target_idx = _target_step_index(raw_steps, payload.get("target_step"))
-            combos = _expand_sweep_grid(payload.get("param_grid"), max_candidates=_MAX_SWEEP_CANDIDATES)
-        except ValueError as exc:
-            _json_error(self, 400, code="invalid_sweep_request", error=str(exc))
-            return
-
-        score_weights = _normalize_sweep_weights(payload.get("score_weights"))
-        sweep_id = f"{_safe_slug(run_name)}_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
-        output_root = _abs_path(str(payload.get("output_dir") or _DEFAULT_SWEEP_DIR_REL))
-        sweep_dir = output_root / sweep_id
-
-        with self.studio.lock:
-            baseline = copy.deepcopy(self.studio.baseline)
-
-        candidates: list[dict[str, Any]] = []
-        errors: list[str] = []
-        for i, patch in enumerate(combos):
-            steps_variant = copy.deepcopy(raw_steps)
-            target_step = steps_variant[target_idx]
-            if not isinstance(target_step, Mapping):
-                errors.append(f"candidate {i + 1}: steps[{target_idx}] must be an object")
-                continue
-
-            step_copy: dict[str, Any] = dict(target_step)
-            command_src = step_copy.get("command")
-            command_copy = dict(command_src) if isinstance(command_src, Mapping) else {}
-            command_copy.update(patch)
-            step_copy["command"] = command_copy
-            steps_variant[target_idx] = step_copy
-
-            try:
-                segments = _scenario_segments_from_payload(
-                    raw_steps=steps_variant,
-                    cfg=self.studio.cfg,
-                    style_options=self.studio.style_options,
-                    baseline=baseline,
-                    default_style=style_default,
-                )
-            except ValueError as exc:
-                errors.append(f"candidate {i + 1}: {exc}")
-                continue
-
-            trace = simulate_segments(
-                joint_names=self.studio.cfg.joint_names,
-                joint_limits_rad=self.studio.cfg.joint_limits_rad,
-                segments=segments,
-                hz=self.studio.hz,
-                style_profiles=self.studio.cfg.style_profiles,
-            )
-            trace["metadata"]["scenario"] = "scenario_sweep"
-            trace["metadata"]["config_path"] = str(self.studio.config_path)
-            trace["metadata"]["run_name"] = run_name
-            trace["metadata"]["sweep_id"] = sweep_id
-            trace["metadata"]["sweep_candidate_index"] = i + 1
-            trace["metadata"]["sweep_patch"] = dict(patch)
-            if self.studio.lamp_geometry:
-                trace["metadata"]["lamp_geometry"] = self.studio.lamp_geometry
-
-            metrics = _trace_metrics(trace)
-            score = _score_trace_metrics(metrics, score_weights)
-
-            trace_path = ""
-            trace_url = ""
-            if save_traces:
-                sweep_dir.mkdir(parents=True, exist_ok=True)
-                trace_file = sweep_dir / f"candidate_{i + 1:03d}.json"
-                write_trace_json(trace_file, trace)
-                trace_path = str(trace_file)
-                rel = _relative_trace_path(trace_file)
-                if rel:
-                    trace_url = rel
-
-            candidates.append(
-                {
-                    "candidate_index": i + 1,
-                    "score": float(score),
-                    "param_patch": dict(patch),
-                    "metrics": metrics,
-                    "steps": _segments_to_payload(segments),
-                    "trace_path": trace_path,
-                    "trace_url": trace_url,
-                }
-            )
-
-        if not candidates:
-            _json_error(
-                self,
-                400,
-                code="sweep_no_candidates",
-                error="all sweep candidates failed validation",
-                details={"errors": errors[:10]},
-            )
-            return
-
-        candidates.sort(key=lambda row: float(row.get("score", 0.0)), reverse=True)
-        for i, row in enumerate(candidates, start=1):
-            row["rank"] = i
-
-        top_rows = candidates[: max(1, min(top_k, len(candidates)))]
-        best = dict(top_rows[0])
-        _json_response(
-            self,
-            200,
-            {
-                "ok": True,
-                "run_name": run_name,
-                "sweep_id": sweep_id,
-                "target_step_index": target_idx,
-                "candidate_count": len(combos),
-                "valid_count": len(candidates),
-                "error_count": len(errors),
-                "errors": errors[:20],
-                "score_weights": score_weights,
-                "ranking": top_rows,
-                "best": best,
-            },
-        )
-
-    def _handle_scenario_save_experiment(self, payload: Mapping[str, Any]) -> None:
-        name = str(payload.get("name") or "").strip()
-        if not name:
-            _json_error(
-                self,
-                400,
-                code="invalid_name",
-                error="name is required",
-                details={"field": "name"},
-            )
-            return
-        notes = str(payload.get("notes") or "").strip()
-        steps = payload.get("steps")
-        if not isinstance(steps, list) or not steps:
-            _json_error(
-                self,
-                400,
-                code="invalid_steps",
-                error="steps must be a non-empty array",
-                details={"field": "steps"},
-            )
-            return
-        metrics = payload.get("metrics")
-        if metrics is None:
-            metrics = {}
-        if not isinstance(metrics, Mapping):
-            _json_error(
-                self,
-                400,
-                code="invalid_metrics",
-                error="metrics must be an object",
-                details={"field": "metrics"},
-            )
-            return
-        trace_path = str(payload.get("trace_path") or "").strip()
-        trace_url = str(payload.get("trace_url") or "").strip()
-
-        record = {
-            "saved_at_utc": _utc_now_iso(),
-            "name": name,
-            "notes": notes,
-            "steps": steps,
-            "metrics": dict(metrics),
-            "trace_path": trace_path,
-            "trace_url": trace_url,
-        }
-        with self.studio.lock:
-            _append_experiment_record(self.studio.experiments_path, record)
-            history = _load_experiment_history(self.studio.experiments_path, limit=25)
-
-        _json_response(
-            self,
-            200,
-            {
-                "ok": True,
-                "record": record,
-                "history": history,
-            },
-        )
-
 
 def _relative_trace_path(path: Path) -> str | None:
     try:
@@ -1850,10 +1163,6 @@ def _serve_toolbox(
     with _ThreadingReuseTCPServer(("127.0.0.1", int(port)), handler_cls) as server:
         if landing == "joint_checker":
             url = f"http://127.0.0.1:{port}/tools/primitive_sim/web/lamp_sim.html?mode=joint_checker"
-        elif landing == "state_machine":
-            url = f"http://127.0.0.1:{port}/tools/primitive_sim/web/lamp_sim.html?mode=state_machine"
-        elif landing == "scenario_lab":
-            url = f"http://127.0.0.1:{port}/tools/primitive_sim/web/lamp_sim.html?mode=scenario_lab"
         elif landing == "playback":
             rel = _relative_trace_path(trace_path) if trace_path is not None else None
             url = f"http://127.0.0.1:{port}/tools/primitive_sim/web/lamp_sim.html?mode=playback"
@@ -1867,10 +1176,7 @@ def _serve_toolbox(
         print(f"shell: http://127.0.0.1:{port}/tools/primitive_sim/web/lamp_sim.html")
         print(f"studio(raw): http://127.0.0.1:{port}/tools/primitive_sim/web/index.html?studio=1")
         print(f"joint checker(raw): http://127.0.0.1:{port}/tools/primitive_sim/web/joint_checker.html")
-        print(f"state machine(raw): http://127.0.0.1:{port}/tools/primitive_sim/web/state_machine.html")
-        print(f"scenario lab(raw): http://127.0.0.1:{port}/tools/primitive_sim/web/scenario_lab.html")
         print(f"baseline: {context.baseline_path}")
-        print(f"experiments: {context.experiments_path}")
         print("Press Ctrl-C to stop viewer server.")
         try:
             server.serve_forever()
@@ -1890,14 +1196,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     lamp_geometry = _load_viewer_geometry_from_raw(raw_config)
     dh_params = _extract_numeric_dh_params(raw_config)
 
-    if args.scenario in {"studio", "joint_checker", "state_machine", "scenario_lab"}:
+    if args.scenario in {"studio", "joint_checker"}:
         baseline_path = _abs_path(args.baseline)
-        experiments_path = _abs_path(args.experiments)
         baseline = _load_baseline(baseline_path, cfg)
         if not baseline_path.exists():
             _save_baseline(baseline_path, baseline)
-        fsm_sim = _build_state_machine_simulator(cfg, raw_config)
-
         context = _StudioContext(
             cfg=cfg,
             config_path=config_path,
@@ -1908,15 +1211,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             style_options=_style_options(cfg),
             lamp_geometry=lamp_geometry,
             dh_params=dh_params,
-            fsm_sim=fsm_sim,
-            experiments_path=experiments_path,
         )
         if args.scenario == "joint_checker":
             landing = "joint_checker"
-        elif args.scenario == "state_machine":
-            landing = "state_machine"
-        elif args.scenario == "scenario_lab":
-            landing = "scenario_lab"
         else:
             landing = "studio"
         _serve_toolbox(context, int(args.port), landing=landing)
@@ -1964,12 +1261,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.serve:
         baseline_path = _abs_path(args.baseline)
-        experiments_path = _abs_path(args.experiments)
         baseline = _load_baseline(baseline_path, cfg)
         if not baseline_path.exists():
             _save_baseline(baseline_path, baseline)
-        fsm_sim = _build_state_machine_simulator(cfg, raw_config)
-
         context = _StudioContext(
             cfg=cfg,
             config_path=config_path,
@@ -1980,8 +1274,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             style_options=_style_options(cfg),
             lamp_geometry=lamp_geometry,
             dh_params=dh_params,
-            fsm_sim=fsm_sim,
-            experiments_path=experiments_path,
         )
         _serve_toolbox(context, int(args.port), landing="playback", trace_path=output)
     else:

@@ -34,6 +34,8 @@ from tools.telemetry.mac_viewer import (
     _resolve_capture_output_dir,
     _run_curation_export,
     _render,
+    _render_runtime_panel,
+    _overlay_image,
     _write_viewer_summary,
 )
 from tools.telemetry.capture import CaptureConfig, SessionCaptureWriter
@@ -146,8 +148,9 @@ def test_mode_defaults_apply_live_baseline():
     notes = _apply_mode_defaults(args, parser)
     assert notes == []
     assert args.mode == "live"
-    assert args.pack == ["reasoning_live"]
-    assert "reasoning_stream" in args.panel
+    assert args.pack == ["runtime_core"]
+    assert "runtime" in args.panel
+    assert "video" in args.panel
 
 
 def test_mode_defaults_apply_curate_profile():
@@ -333,6 +336,53 @@ def test_dashboard_state_updates_command_from_video_tap_extra():
     )
     assert state.command is not None
     assert state.command["joint_names"] == ["yaw", "pitch1"]
+
+
+def test_runtime_panel_reports_current_fields_and_unavailable_execution():
+    state = DashboardState(host="jetson")
+    state.perception = {
+        "frame_id": 12,
+        "fps": 20.0,
+        "frame_age_ms": 8.5,
+        "is_new_frame": True,
+        "source_alive": True,
+    }
+    state.action = {"ts_monotonic_s": 1.0, "action": {"primitive": "hold"}}
+    state.command = {
+        "joint_names": ["yaw"],
+        "joint_angles_rad": [0.25],
+        "enable": True,
+    }
+    lines = []
+    _render_runtime_panel(lines, state)
+    rendered = "\n".join(lines)
+    assert "frame_id=12" in rendered
+    assert "frame_age_ms=8.5" in rendered
+    assert "primitive=hold" in rendered
+    assert "commanded:" in rendered
+    assert "applied_hardware/deadman: unavailable" in rendered
+
+
+def test_runtime_panel_reports_missing_state_as_unavailable():
+    lines = []
+    _render_runtime_panel(lines, DashboardState(host="jetson"))
+    rendered = "\n".join(lines)
+    assert "perception: frame_id=-" in rendered
+    assert "commanded: unavailable" in rendered
+    assert "applied_hardware/deadman: unavailable" in rendered
+
+
+def test_live_overlay_uses_capture_fields_without_person_overlay():
+    state = DashboardState(host="jetson")
+    state.perception = {
+        "fps": 20.0,
+        "frame_age_ms": 4.0,
+        "is_new_frame": True,
+        "source_alive": True,
+        "primary_person": {"cx": 0.5, "cy": 0.5, "w": 0.8, "h": 0.8},
+    }
+    image = _overlay_image(Image.new("RGB", (320, 180)), state)
+    assert image.size == (320, 180)
 
 
 def test_dashboard_state_tracks_memory_and_timeline_event_counts():

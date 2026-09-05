@@ -27,6 +27,7 @@ from pala.control.primitives import (
     PrimitiveKind,
 )
 from pala.main import _build_servo
+from pala.hardware import DummyServo
 from pala.types import ActionPlan
 
 logger = logging.getLogger(__name__)
@@ -52,7 +53,6 @@ def _parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--runtime-mode", default=None, help="Optional mode override (for example jetson_full)")
     parser.add_argument("--enable", action="store_true", help="Required to actuate hardware in jetson_full mode")
     parser.add_argument("--dry-run", action="store_true", help="Run the control executor without sending servo commands")
-    parser.add_argument("--keep-enabled", action="store_true", help="Do not disable servos on exit")
     parser.add_argument("--hz", type=float, default=0.0, help="Control update rate (0 uses config control_hz)")
     parser.add_argument("--status-every-s", type=float, default=0.5, help="Status logging cadence")
     parser.add_argument("--neutral-start", action=argparse.BooleanOptionalAction, default=True)
@@ -422,7 +422,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     hz = float(args.hz) if args.hz > 0 else float(cfg.loop_rates.control_hz)
     hz = max(1.0, hz)
 
-    servo = _build_servo(cfg)
+    # Dry runs must remain hardware-free even when the config mode is jetson_full.
+    servo = DummyServo() if args.dry_run else _build_servo(cfg)
     executor = TrajectoryExecutor(cfg.joint_limits_rad, style_profiles=getattr(cfg, "style_profiles", None))
     segments = build_demo_segments(cfg, args)
 
@@ -496,7 +497,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except KeyboardInterrupt:
         logger.warning("Interrupted by user")
     finally:
-        if actuation_on and not args.keep_enabled:
+        if actuation_on:
             servo.enable(False)
         servo.shutdown()
 

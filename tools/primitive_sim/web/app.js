@@ -1103,6 +1103,7 @@ function defaultDurationForPrimitive(primitive) {
 }
 
 function setMode(text) {
+  document.getElementById("studioGroup").hidden = text !== "studio";
   modeLabel.textContent = `Mode: ${text}`;
 }
 

@@ -1,39 +1,42 @@
-# PALA TODO
+# PALA next steps
 
-Last updated: 2026-02-07
+Current milestone: a clean local workshop baseline, followed by three useful
+physical gestures. The lamp can remain unpowered during software cleanup.
 
-## Priority Roadmap
-1. Servo calibration and safety envelope
-   - Validate per-joint min/max, neutral offsets, reverse flags, and clamping.
-   - Verify deadman + commanded disable behavior on real hardware.
-   - Add/confirm safe fallback behavior for stale/no-perception conditions.
+## Session 1: software cleanup
 
-2. Perception capture truthfulness
-   - Validate camera frame IDs, frame age, source health, and FPS on Jetson.
-   - Keep local detection disabled until the direct vision-model loop is stable.
-   - Use `pala/perception/DEEPSTREAM_REINTRODUCTION.md` when local facts are added later.
+- Retire tools and tests tied to deleted V4 behavior contracts.
+- Preserve primitive simulation, playback, and joint checking without V4.
+- Isolate simulated time from the runtime clock.
+- Default telemetry to current capture/action/command data; retain historical
+  reasoning and curation only as opt-in tools.
+- Validate configuration and complete servo command batches before use.
+- Make gesture dry-runs independent of hardware initialization.
+- Pass the full pytest suite, bounded dummy runtime, and retained tool checks.
 
-3. Control primitives and motion policy
-   - Finalize primitive set for demo (`hold`, `glance`, `ack`, `breath`, optional `track`).
-   - Add per-primitive constraints (rate/accel/safety gating).
+Completion evidence is recorded in [the session report](session_1_cleanup.md).
 
-4. Behavior/planner reset
-   - Phase 1 and 2 complete: capture-only perception and V4 behavior removal.
-   - TODO: define the Phase 3 model decision contract and execution semantics.
+## Session 2: three physical performances
 
-5. Cosmos integration via Brev
-   - TODO: re-specify request/response contract after reset.
-   - TODO: re-validate timeout/retry strategy after reset.
+- Inspect current hardware, starting posture, camera coverage, and tested
+  calibration limits before enabling motion.
+- Tune greeting, curiosity/attention, and settling using the existing demo
+  and primitive tools, changing one motion parameter at a time.
+- Record chosen parameters and repeated outcomes; commanded completion is
+  not physical position feedback.
+- Resolve gesture interruption/completion semantics before connecting a
+  multi-part skill runner. Current executor behavior is latest-intent wins.
 
-6. Telemetry and evaluation
-   - Build reproducible eval harness (JSONL -> metrics summary).
-   - Add optional live telemetry preview for debugging/demos.
+## Next: a narrow camera-driven interaction
 
-## Additional Cross-Cutting Items
-- Reproducibility checklist for Jetson environment (package versions, one-command verification).
-- Performance profile checklist (`nvpmodel`, clocks, thermal notes).
-- Tests for safety invariants and contract validation.
+- Define a small model decision contract and execution-aware skill runner.
+- Evaluate Gemini with representative images/sequences in a motion-disabled
+  probe; measure parsing, latency, freshness, and repetitive decisions.
+- Connect observe → greet once → attend → settle, retaining the four loops
+  and `PerceptionState -> ActionPlan -> HardwareCommand` contracts.
+- Demonstrate repeated trials, then publish a short video and reproducible
+  portfolio snapshot with honest limits.
 
-## Suggested Next Step
-- Design Phase 3 before writing code: model authority, state ownership, decision
-  schema, skill completion semantics, and the smallest vertical slice.
+Speech, object search, task-light localization, persistent autobiographical
+memory, local detection, fine-tuning, and V2 hardware are outside this release.
+Future work must not become a prerequisite for the first repeatable greeting.

@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
 from dataclasses import dataclass, replace
 import json
 from pathlib import Path
 import time
-from typing import Any, Iterator, Mapping, Optional, Sequence
+from typing import Any, Mapping, Optional, Sequence
 
-import pala.control.executor as executor_module
 from pala.control import TrajectoryExecutor
 from pala.control.executor import ExecutionStatus
 from pala.types import (
@@ -53,16 +51,6 @@ class _SimClock:
         self._t += max(0.0, float(dt_s))
 
 
-@contextmanager
-def _patched_executor_clock(clock: _SimClock) -> Iterator[None]:
-    original = executor_module.time.monotonic
-    executor_module.time.monotonic = clock.now
-    try:
-        yield
-    finally:
-        executor_module.time.monotonic = original
-
-
 def simulate_segments(
     *,
     joint_names: Sequence[str],
@@ -90,70 +78,68 @@ def simulate_segments(
     prev_t: Optional[float] = None
     prev_angles: Optional[list[float]] = None
 
-    # Executor elapsed math uses a truthy check on start time, so avoid 0.0.
-    clock = _SimClock(start_s=1000.0)
-    with _patched_executor_clock(clock):
-        executor = TrajectoryExecutor(limits, style_profiles=style_profiles)
+    clock = _SimClock(start_s=0.0)
+    executor = TrajectoryExecutor(limits, style_profiles=style_profiles, clock=clock.now)
 
-        for seg in segments:
-            start_t = clock.now()
-            first_tick = True
-            ticks = 0
+    for seg in segments:
+        start_t = clock.now()
+        first_tick = True
+        ticks = 0
 
-            while (clock.now() - start_t) < max(0.01, float(seg.max_s)):
-                request = seg.action if not first_tick else replace(seg.action, cancel_current=True)
-                cmd = executor.step(request, dt_s)
-                state = executor.control_state
-                now_t = clock.now()
-                angles = [float(v) for v in cmd.joint_angles_rad]
+        while (clock.now() - start_t) < max(0.01, float(seg.max_s)):
+            request = seg.action if not first_tick else replace(seg.action, cancel_current=True)
+            cmd = executor.step(request, dt_s)
+            state = executor.control_state
+            now_t = clock.now()
+            angles = [float(v) for v in cmd.joint_angles_rad]
 
+            for i, a in enumerate(angles):
+                min_by_joint[i] = min(min_by_joint[i], a)
+                max_by_joint[i] = max(max_by_joint[i], a)
+
+            if prev_t is not None and prev_angles is not None:
+                actual_dt = max(1e-6, now_t - prev_t)
                 for i, a in enumerate(angles):
-                    min_by_joint[i] = min(min_by_joint[i], a)
-                    max_by_joint[i] = max(max_by_joint[i], a)
+                    vel = abs((a - prev_angles[i]) / actual_dt)
+                    peak_vel_by_joint[i] = max(peak_vel_by_joint[i], vel)
 
-                if prev_t is not None and prev_angles is not None:
-                    actual_dt = max(1e-6, now_t - prev_t)
-                    for i, a in enumerate(angles):
-                        vel = abs((a - prev_angles[i]) / actual_dt)
-                        peak_vel_by_joint[i] = max(peak_vel_by_joint[i], vel)
+            prev_t = now_t
+            prev_angles = list(angles)
 
-                prev_t = now_t
-                prev_angles = list(angles)
+            key = state.status.value
+            summary_status_counts[key] = summary_status_counts.get(key, 0) + 1
 
-                key = state.status.value
-                summary_status_counts[key] = summary_status_counts.get(key, 0) + 1
-
-                samples.append(
-                    {
-                        "t_s": now_t,
-                        "segment": seg.name,
-                        "request_primitive": request.primitive.value,
-                        "active_primitive": None if state.active_kind is None else state.active_kind.value,
-                        "status": key,
-                        "reason": state.reason,
-                        "action_id": request.action_id,
-                        "joint_angles_rad": angles,
-                        "enable": bool(cmd.enable),
-                    }
-                )
-                ticks += 1
-                first_tick = False
-
-                should_stop = bool(seg.stop_on_done) and state.status in TERMINAL_STATUSES
-                clock.advance(dt_s)
-                if should_stop:
-                    break
-
-            end_t = clock.now()
-            segment_summaries.append(
+            samples.append(
                 {
-                    "name": seg.name,
-                    "ticks": ticks,
-                    "elapsed_s": max(0.0, end_t - start_t),
-                    "final_status": executor.control_state.status.value,
-                    "final_reason": executor.control_state.reason,
+                    "t_s": now_t,
+                    "segment": seg.name,
+                    "request_primitive": request.primitive.value,
+                    "active_primitive": None if state.active_kind is None else state.active_kind.value,
+                    "status": key,
+                    "reason": state.reason,
+                    "action_id": request.action_id,
+                    "joint_angles_rad": angles,
+                    "enable": bool(cmd.enable),
                 }
             )
+            ticks += 1
+            first_tick = False
+
+            should_stop = bool(seg.stop_on_done) and state.status in TERMINAL_STATUSES
+            clock.advance(dt_s)
+            if should_stop:
+                break
+
+        end_t = clock.now()
+        segment_summaries.append(
+            {
+                "name": seg.name,
+                "ticks": ticks,
+                "elapsed_s": max(0.0, end_t - start_t),
+                "final_status": executor.control_state.status.value,
+                "final_reason": executor.control_state.reason,
+            }
+        )
 
     joint_stats: list[dict[str, Any]] = []
     for i, name in enumerate(names):

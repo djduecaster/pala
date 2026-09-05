@@ -64,7 +64,7 @@ def draw_lamp_panel(
     draw = ImageDraw.Draw(image)
 
     draw.rectangle((0, 0, panel_w - 1, panel_h - 1), outline=(70, 70, 70))
-    draw.text((10, 8), "Lamp Command View", fill=(245, 245, 245))
+    draw.text((10, 8), "Commanded Joint View", fill=(245, 245, 245))
 
     if not isinstance(command, dict):
         draw.text((10, 30), "No command data", fill=(200, 140, 120))
@@ -72,8 +72,11 @@ def draw_lamp_panel(
 
     pairs = _extract_joint_pairs(command)
     joints = {name: angle for name, angle in pairs}
-    enabled = bool(command.get("enable", True))
-    draw.text((10, 30), f"enable={enabled}", fill=(130, 220, 140) if enabled else (255, 120, 120))
+    enable_raw = command.get("enable")
+    enable_text = str(bool(enable_raw)) if isinstance(enable_raw, bool) else "unavailable"
+    enable_color = (130, 220, 140) if enable_raw is True else (255, 120, 120) if enable_raw is False else (190, 170, 150)
+    draw.text((10, 30), f"commanded enable={enable_text}", fill=enable_color)
+    draw.text((10, 104), "applied/deadman: unavailable", fill=(190, 170, 150))
 
     yaw = _lookup_angle(joints, "yaw")
     roll = _lookup_angle(joints, "roll")

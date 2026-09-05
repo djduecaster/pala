@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from typing import Iterable, List
+import math
 import time
 
 import smbus2
@@ -60,9 +61,21 @@ class PCA9685Servo:
         self._bus.write_byte_data(self._address, base + 3, on_time >> 8)
 
     def set_angles_deg(self, angles_deg: Iterable[float]) -> None:
+        values = list(angles_deg)
+        if len(values) != len(self._channels):
+            raise ValueError(
+                f"expected {len(self._channels)} servo angles, got {len(values)}"
+            )
+        try:
+            values = [float(value) for value in values]
+            finite = all(math.isfinite(value) for value in values)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("servo angles must be finite numbers") from exc
+        if not finite:
+            raise ValueError("servo angles must be finite numbers")
         if not self._enabled:
             return
-        for idx, angle_deg in enumerate(angles_deg):
+        for idx, angle_deg in enumerate(values):
             mapped = angle_deg * self._angle_scales[idx] + self._angle_offsets[idx]
             if self._reverses[idx]:
                 mapped = 180.0 - mapped

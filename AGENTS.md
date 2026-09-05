@@ -3,11 +3,13 @@
 ## North Star
 PALA is a physical AI desk companion (lamp) running on Jetson. The system uses:
 - Fast local perception + deterministic control
-- Slow high-level behavior decisions (using Cosmos Reason 2 for NVIDIA challenge)
-Goal: a reproducible, contest-ready demo with clean architecture and clear evaluation.
+- Slow high-level behavior decisions (Gemini planned for the next narrow slice;
+  Cosmos Reason 2 was the original competition target)
+Goal: a reproducible portfolio demo with three expressive gestures and one
+camera-driven social interaction. Current behavior is intentionally hold-only.
 
 ## Repo workflow
-- Mac is source of truth: ~/dev/pala
+- Mac is source of truth: /Users/djduecaster/development/pala
 - Jetson mirror: ~/pala
 - Sync + run: `make go`
 - Local run: `uv run python -m pala.main`
@@ -66,6 +68,13 @@ Migrate capabilities, not folders. Suggested order:
 - Sync/run Jetson: `make go`
 - Add dependency: `uv add <pkg>`
 
+## Direct Jetson agent workflow
+- Read `docs/jetson_agent_workflow.md` before using the shared Jetson shell.
+- Prefer `jetson-wifi` for direct SSH agent work after Wi-Fi is available; the existing `jetson` alias is the USB path used by the current deployment scripts.
+- The shared Jetson tmux session is named `pala`. Agents send short commands with `tmux send-keys`, then inspect results with `tmux capture-pane`.
+- Keep the shared shell available for operator inspection. Put long-running PALA processes in a named tmux window and check for an existing runtime before starting another one.
+- `make go` currently deploys and runs in a foreground SSH command; it does not attach to tmux. A future opt-in `make go-tmux` target is preferred over changing the meaning of `make go`.
+
 ## Lessons Learned (2-1-26)
 - GStreamer PTS uses a different clock; use PTS deltas or monotonic deltas, not cross-clock subtraction.
 - Camera FPS depends heavily on auto-exposure/lighting; use `v4l2-ctl` to inspect modes and note lighting impact.
@@ -76,7 +85,7 @@ Migrate capabilities, not folders. Suggested order:
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- `pala/` contains the core Python package, grouped by subsystem: `perception/`, `planner/`, `behavior/`, `control/`, `hardware/`, `config/`, `types/`, and `utils/`.
+- `pala/` contains the core Python package, grouped by subsystem: `perception/`, `behavior/`, `control/`, `hardware/`, `config/`, `types/`, and `utils/`. The old planner package was removed.
 - `config/robot.yaml` holds runtime configuration (loop rates, logging, limits).
 - `docs/` includes architecture notes and porting plans.
 - Root scripts (`deploy_jetson.sh`, `run_jetson.sh`, `run_on_jetson.sh`) implement the Mac→Jetson dev loop.
@@ -95,8 +104,8 @@ Migrate capabilities, not folders. Suggested order:
 - No formatter or linter is configured; avoid stylistic churn.
 
 ## Testing Guidelines
-- No test framework is configured yet.
-- If adding tests, create `tests/` with `test_*.py` and document the runner (e.g., `python -m pytest`).
+- Pytest is configured in `pyproject.toml`; run the full suite with `uv run pytest -q`.
+- Add focused `tests/test_*.py` regressions for changed contracts. Hardware tests use fakes; passing tests does not establish physical acceptance.
 
 ## Commit & Pull Request Guidelines
 - Keep commits short, focused, and descriptive (sentence-case summaries).

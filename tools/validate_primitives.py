@@ -29,6 +29,7 @@ from pala.control.primitives import (
     OrientToZoneCommand,
 )
 from pala.main import _build_servo
+from pala.hardware import DummyServo
 from pala.types import ActionPlan, to_json_dict
 
 
@@ -75,7 +76,6 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--scenario", choices=["suite", "single", "sweep"], default="suite")
     parser.add_argument("--enable", action="store_true", help="Required to actuate hardware in jetson_full")
     parser.add_argument("--dry-run", action="store_true", help="Run executor only (no servo writes)")
-    parser.add_argument("--keep-enabled", action="store_true", help="Do not disable servos on exit")
     parser.add_argument("--hz", type=float, default=0.0, help="Control update rate (0 uses config control_hz)")
     parser.add_argument("--status-every-s", type=float, default=0.5, help="Status print interval")
     parser.add_argument("--neutral-start", action=argparse.BooleanOptionalAction, default=True)
@@ -423,7 +423,8 @@ def main() -> int:
     hz = max(1.0, hz)
 
     logger = JsonlWriter(None if args.no_log else args.log_jsonl)
-    servo = _build_servo(cfg)
+    # Dry runs must remain hardware-free even when the config mode is jetson_full.
+    servo = DummyServo() if args.dry_run else _build_servo(cfg)
     executor = TrajectoryExecutor(cfg.joint_limits_rad)
 
     summary: dict[str, Any] = {
@@ -533,7 +534,7 @@ def main() -> int:
     except KeyboardInterrupt:
         print("Interrupted by user")
     finally:
-        if actuation_on and not args.keep_enabled:
+        if actuation_on:
             servo.enable(False)
         servo.shutdown()
         logger.close()

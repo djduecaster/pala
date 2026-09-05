@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 import os
+import math
 import yaml
 
 from ..types.style_profiles import default_style_profiles
@@ -83,9 +84,12 @@ def _req(d: Dict[str, Any], key: str, path: str) -> Any:
 
 def _as_float(v: Any, path: str) -> float:
     try:
-        return float(v)
+        result = float(v)
     except Exception:
         _fail(path, f"expected number, got {type(v).__name__}")
+    if not math.isfinite(result):
+        _fail(path, "expected finite number")
+    return result
 
 
 def _as_int(v: Any, path: str) -> int:
@@ -145,8 +149,13 @@ def load_config(path: str) -> RobotConfig:
         control_hz=_as_float(_req(loop_rates_raw, "control_hz", "loop_rates"), "loop_rates.control_hz"),
         hardware_hz=_as_float(_req(loop_rates_raw, "hardware_hz", "loop_rates"), "loop_rates.hardware_hz"),
     )
+    for name, value in vars(loop_rates).items():
+        if value <= 0:
+            _fail(f"loop_rates.{name}", "expected a positive number")
 
     deadman_timeout_ms = _as_int(_req(data, "deadman_timeout_ms", "root"), "deadman_timeout_ms")
+    if deadman_timeout_ms <= 0:
+        _fail("deadman_timeout_ms", "expected a positive integer")
 
     joint_names = _as_list(_req(data, "joint_names", "root"), "joint_names")
     if not all(isinstance(n, str) for n in joint_names):
@@ -158,8 +167,11 @@ def load_config(path: str) -> RobotConfig:
     for i, lim in enumerate(joint_limits):
         if not isinstance(lim, list) or len(lim) != 2:
             _fail(f"joint_limits_rad[{i}]", "expected [min, max]")
-        _as_float(lim[0], f"joint_limits_rad[{i}][0]")
-        _as_float(lim[1], f"joint_limits_rad[{i}][1]")
+        lo = _as_float(lim[0], f"joint_limits_rad[{i}][0]")
+        hi = _as_float(lim[1], f"joint_limits_rad[{i}][1]")
+        if lo > hi:
+            _fail(f"joint_limits_rad[{i}]", "expected finite ordered [min, max]")
+        joint_limits[i] = [lo, hi]
 
     servo_cal = data.get("servo_calibration", {})
     if not isinstance(servo_cal, dict):
@@ -186,6 +198,9 @@ def load_config(path: str) -> RobotConfig:
         max_height=_as_int(telemetry_preview_raw.get("max_height", 360), "telemetry_preview.max_height"),
         jpeg_quality=_as_int(telemetry_preview_raw.get("jpeg_quality", 65), "telemetry_preview.jpeg_quality"),
     )
+    for name in ("max_hz", "max_width", "max_height"):
+        if getattr(telemetry_preview, name) <= 0:
+            _fail(f"telemetry_preview.{name}", "expected a positive value")
 
     camera_raw = data.get("camera", {})
     if not isinstance(camera_raw, dict):
@@ -197,6 +212,9 @@ def load_config(path: str) -> RobotConfig:
         fps=_as_int(camera_raw.get("fps", 30), "camera.fps"),
         pipeline=camera_raw.get("pipeline"),
     )
+    for name in ("width", "height", "fps"):
+        if getattr(camera, name) <= 0:
+            _fail(f"camera.{name}", "expected a positive value")
 
     cosmos_raw = data.get("cosmos", {})
     if not isinstance(cosmos_raw, dict):
@@ -223,7 +241,10 @@ def load_config(path: str) -> RobotConfig:
         profile = dict(style_profiles.get(key, {}))
         for param in ("amp_scale", "rate_scale", "duration_scale", "settle_scale"):
             if param in raw:
-                profile[param] = _as_float(raw[param], f"styles.{key}.{param}")
+                value = _as_float(raw[param], f"styles.{key}.{param}")
+                if value <= 0:
+                    _fail(f"styles.{key}.{param}", "expected a positive number")
+                profile[param] = value
         style_profiles[key] = profile
 
     return RobotConfig(

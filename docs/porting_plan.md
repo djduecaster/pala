@@ -1,5 +1,10 @@
 # Legacy → New Structure Porting Plan
 
+> Historical migration plan, retained for provenance. Camera and servo ports
+> exist; local detection and the old behavior stack have since been removed.
+> Proposed target filenames below are not an inventory of current modules.
+> Follow [the current next steps](todo.md) for active work.
+
 ## Mode-Aligned Milestones (Planned)
 1. **dev**: all dummy backends; focus on core runtime verification.
 2. **jetson_perception**: on hold; needs careful design to avoid confusing closed-loop behavior.

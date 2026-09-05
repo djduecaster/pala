@@ -5,24 +5,17 @@ from types import SimpleNamespace
 
 import pytest
 
-from pala.behavior.mode_fsm_v4 import ModeFsmV4Config
 from pala.types import ActionPlan
 from pala.control.primitives import BreathCommand, PrimitiveKind
 from tools.primitive_sim.run import (
-    _append_experiment_record,
-    _expand_sweep_grid,
     _default_joint_angles,
     _default_baseline,
     _extract_numeric_dh_params,
     _load_baseline,
-    _load_experiment_history,
     _load_viewer_geometry_from_config,
     _normalize_baseline,
     _primitive_specs,
-    _score_trace_metrics,
-    _scenario_segments_from_payload,
     _save_baseline,
-    _target_step_index,
     _trace_metrics,
 )
 from tools.primitive_sim.simulate import (
@@ -31,7 +24,6 @@ from tools.primitive_sim.simulate import (
     load_segments_from_json,
     simulate_segments,
 )
-from tools.primitive_sim.state_machine import LampStateMachineSimulator
 
 
 def _joint_limits(count: int = 5) -> list[list[float]]:
@@ -66,6 +58,23 @@ def test_simulate_segments_generates_samples_and_summary():
     assert len(trace["samples"]) > 10
     assert trace["summary"]["status_counts"]
     assert len(trace["summary"]["joint_stats"]) == 5
+
+
+def test_simulation_clock_isolated_between_runs():
+    segment = SimSegment(
+        name="hold",
+        action=ActionPlan(
+            primitive=PrimitiveKind.HOLD,
+            command={},
+            confidence=1.0,
+            explanation="test",
+        ),
+        max_s=0.2,
+        stop_on_done=False,
+    )
+    first = simulate_segments(joint_names=_joint_names(), joint_limits_rad=_joint_limits(), segments=[segment], hz=20.0)
+    second = simulate_segments(joint_names=_joint_names(), joint_limits_rad=_joint_limits(), segments=[segment], hz=20.0)
+    assert [row["t_s"] for row in first["samples"]] == [row["t_s"] for row in second["samples"]]
 
 
 def test_load_segments_from_json_supports_wrapped_shape(tmp_path):
@@ -266,48 +275,6 @@ def test_save_baseline_preserves_existing_metadata(tmp_path):
     assert saved["updated_at_utc"] == "2026-02-27T00:00:00Z"
 
 
-def test_scenario_segments_from_payload_parses_and_canonicalizes():
-    cfg = _cfg_stub()
-    baseline = _default_baseline(cfg)
-    segments = _scenario_segments_from_payload(
-        raw_steps=[
-            {
-                "name": "home_step",
-                "primitive": "home",
-                "duration_s": 1.6,
-                "command": {"rate_rad_s": 1.4},
-            },
-            {
-                "primitive": "glance",
-                "style": "curious",
-                "duration_s": 0.8,
-                "command": {"direction": "right", "amp_rad": 0.24},
-            },
-        ],
-        cfg=cfg,
-        style_options=["calm", "curious"],
-        baseline=baseline,
-    )
-    assert len(segments) == 2
-    assert segments[0].name == "home_step"
-    assert segments[0].action.primitive == PrimitiveKind.HOME
-    assert float(getattr(segments[0].action.command, "rate_rad_s")) == 1.4
-    assert segments[1].action.primitive == PrimitiveKind.GLANCE
-    assert segments[1].action.style == "curious"
-    assert str(getattr(segments[1].action.command, "direction")) == "right"
-
-
-def test_scenario_segments_from_payload_rejects_empty_steps():
-    cfg = _cfg_stub()
-    with pytest.raises(ValueError, match="steps must be a non-empty array"):
-        _scenario_segments_from_payload(
-            raw_steps=[],
-            cfg=cfg,
-            style_options=["calm"],
-            baseline=_default_baseline(cfg),
-        )
-
-
 def test_trace_metrics_returns_core_stats():
     segment = SimSegment(
         name="home",
@@ -333,183 +300,3 @@ def test_trace_metrics_returns_core_stats():
     assert metrics["peak_joint_vel_rad_s"] >= 0.0
     assert "limit_violation_count" in metrics
     assert "primitive_switch_count" in metrics
-
-
-def test_experiment_history_appends_and_reads_newest_first(tmp_path):
-    p = tmp_path / "experiments.jsonl"
-    _append_experiment_record(
-        p,
-        {
-            "saved_at_utc": "2026-02-27T00:00:00Z",
-            "name": "exp_a",
-            "metrics": {"sample_count": 10},
-        },
-    )
-    _append_experiment_record(
-        p,
-        {
-            "saved_at_utc": "2026-02-27T00:01:00Z",
-            "name": "exp_b",
-            "metrics": {"sample_count": 20},
-        },
-    )
-    rows = _load_experiment_history(p, limit=2)
-    assert len(rows) == 2
-    assert rows[0]["name"] == "exp_b"
-    assert rows[1]["name"] == "exp_a"
-
-
-def _fsm_sim() -> LampStateMachineSimulator:
-    return LampStateMachineSimulator.create(
-        mode_config=ModeFsmV4Config(),
-        idle_config=None,
-    )
-
-
-def test_state_machine_defaults_to_boot_awaken():
-    sim = _fsm_sim()
-    snap = sim.snapshot()
-    assert snap["mode"] == "boot_awaken"
-    assert "hold" in snap["allowed_primitives"]
-    assert "breath" in snap["allowed_primitives"]
-
-
-def test_state_machine_boot_holds_without_startup_complete_signal():
-    sim = _fsm_sim()
-    out = sim.step(
-        dt_s=0.5,
-        signals={
-            "person_present": True,
-            "person_conf": 0.95,
-        },
-    )
-    assert out["mode_decision"]["to"] == "boot_awaken"
-    assert out["mode_decision"]["transitioned"] is False
-    assert out["mode_decision"]["reason"] in {"hold_mode", "min_mode_dwell_hold"}
-
-
-def test_state_machine_presence_step_transitions_to_social_interact():
-    sim = _fsm_sim()
-    _ = sim.step(
-        dt_s=0.5,
-        signals={"startup_complete": True},
-        zone_hint="center",
-    )
-    out = sim.step(
-        dt_s=1.3,
-        signals={
-            "person_present": True,
-            "person_conf": 0.85,
-            "startup_complete": True,
-        },
-        zone_hint="center",
-    )
-    assert out["mode_decision"]["to"] == "social_interact"
-    assert out["mode_decision"]["reason"] == "person_present_engage"
-    assert any(item["primitive"] == "orient_to_zone" for item in out["proposals"])
-
-
-def test_state_machine_health_breaker_forces_recover_reset():
-    sim = _fsm_sim()
-    out = sim.step(
-        dt_s=1.1,
-        signals={
-            "person_present": False,
-            "person_conf": 0.0,
-            "planner_open_breaker": True,
-            "perception_degraded": False,
-        },
-    )
-    assert out["mode_decision"]["to"] == "recover_reset"
-    assert out["mode_decision"]["reason"] == "health_degraded"
-    assert out["recommended"]["primitive"] == "hold"
-
-
-def test_state_machine_home_request_transitions_to_return_home():
-    sim = _fsm_sim()
-    _ = sim.step(dt_s=0.5, signals={"startup_complete": True})
-    out = sim.step(
-        dt_s=1.3,
-        signals={
-            "startup_complete": True,
-            "home_requested": True,
-        },
-    )
-    assert out["mode_decision"]["to"] == "return_home"
-    assert out["mode_decision"]["reason"] == "home_requested"
-    assert out["recommended"]["primitive"] == "home"
-
-
-def test_state_machine_force_mode_transitions():
-    sim = _fsm_sim()
-    out = sim.force_mode(
-        next_mode="recover_reset",
-        reason="ops_force",
-        dt_s=0.2,
-        signals={"health_degraded": True},
-    )
-    assert out["mode_decision"]["to"] == "recover_reset"
-    assert out["mode_decision"]["reason"] == "ops_force"
-    assert out["tick_index"] == 1
-
-
-def test_state_machine_force_mode_rejects_invalid_mode():
-    sim = _fsm_sim()
-    with pytest.raises(ValueError, match="invalid mode token"):
-        sim.force_mode(next_mode="bad_mode")
-
-
-def test_state_machine_commit_resets_no_commit_timer():
-    sim = _fsm_sim()
-    out1 = sim.step(dt_s=0.5, signals={})
-    assert out1["no_commit_s"] > 0.0
-    out2 = sim.step(dt_s=0.5, signals={}, commit=True)
-    assert out2["no_commit_s"] == 0.0
-
-
-def test_expand_sweep_grid_cartesian_product():
-    grid = _expand_sweep_grid({"amp_rad": [0.05, 0.1], "period_s": [4.0, 6.0]})
-    assert len(grid) == 4
-    assert {"amp_rad": 0.05, "period_s": 4.0} in grid
-    assert {"amp_rad": 0.1, "period_s": 6.0} in grid
-
-
-def test_expand_sweep_grid_rejects_invalid_values():
-    with pytest.raises(ValueError, match="param_grid must be a non-empty object"):
-        _expand_sweep_grid({})
-    with pytest.raises(ValueError, match="must be a non-empty array"):
-        _expand_sweep_grid({"amp_rad": []})
-    with pytest.raises(ValueError, match=r"param_grid\[amp_rad\]\[0\] must be numeric"):
-        _expand_sweep_grid({"amp_rad": ["oops", 0.1]})
-
-
-def test_target_step_index_by_index_or_name():
-    steps = [
-        {"name": "home_step"},
-        {"name": "breath_step"},
-        {"name": "glance_step"},
-    ]
-    assert _target_step_index(steps, None) == 2
-    assert _target_step_index(steps, 1) == 1
-    assert _target_step_index(steps, -1) == 2
-    assert _target_step_index(steps, "breath_step") == 1
-    with pytest.raises(ValueError, match="target_step not found"):
-        _target_step_index(steps, "missing_step")
-
-
-def test_score_trace_metrics_applies_weights():
-    metrics = {
-        "min_limit_margin_rad": 0.2,
-        "limit_violation_count": 1,
-        "peak_joint_vel_rad_s": 0.5,
-    }
-    score = _score_trace_metrics(
-        metrics,
-        {
-            "min_limit_margin_rad": 4.0,
-            "limit_violation_count": -12.0,
-            "peak_joint_vel_rad_s": -0.35,
-        },
-    )
-    expected = 4.0 * 0.2 + (-12.0 * 1.0) + (-0.35 * 0.5)
-    assert score == pytest.approx(expected, rel=1e-9, abs=1e-9)

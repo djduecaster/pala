@@ -6,7 +6,7 @@ It keeps runtime behavior math aligned by reusing `TrajectoryExecutor` from `pal
 
 ## Unified shell (recommended)
 
-Run any Lamp Sim scenario server:
+Run the Lamp Sim sidecar server:
 
 ```bash
 uv run python tools/primitive_sim/run.py --scenario studio --port 8766
@@ -18,18 +18,9 @@ Then open the unified shell:
 http://127.0.0.1:8766/tools/primitive_sim/web/lamp_sim.html
 ```
 
-The shell provides one persistent navigation/workflow UI for Studio, Scenario Lab, Joint Checker, and the Behavior V4 state-machine simulator.
-
-Shell UX features:
-- One persistent mode navigation + workflow checklist
-- Operational goal selector (`Tune Primitive`, `Build Scenario`, `Validate State Machine`, `Review Playback`)
-- Mode-aware primary action button in top bar
-- Mode-aware `Run + Playback` button for faster operational loops
-- Focus Viewer mode (`v`) to maximize stage real estate
-- Global command palette (`Cmd/Ctrl+K`) for fast mode/action switching
-- Global toast/status feedback from active mode actions
-- Keyboard mode shortcuts (`1..4`), suite playback (`r`), run+playback (`p`), and focus toggle (`v`)
-- Cross-mode handoff: send FSM recommended primitive into Scenario builder/steps
+The shell provides navigation between Studio, Joint Checker, and Playback.
+Generate a suite trace in Studio before opening Playback. All modes are local
+simulation tools; they do not command hardware or establish physical acceptance.
 
 ## Primitive Studio mode (recommended)
 
@@ -45,7 +36,7 @@ Raw mode URL:
 http://127.0.0.1:8766/tools/primitive_sim/web/index.html?studio=1
 ```
 
-Studio, Joint Checker, State Machine, and Scenario Lab pages are available from this same server instance.
+Studio, Joint Checker, and Playback are available from this same server instance.
 
 Studio features:
 - Select any runtime primitive (`hold`, `home`, `move_to`, `gaze_to`, `glance`, `nod`, `breath`, `orient_to_zone`)
@@ -58,8 +49,8 @@ Studio features:
 - Reload from baselines on startup
 - Camera toolbar (`zoom +/-`, `orbit <- ->`, `reset view`) + mouse-wheel zoom
 - Parameter filter and expanded nudge controls (`--`, `-`, `+`, `++`)
-- Top bar mode buttons: switch between Studio, Joint Checker, Scenario Lab, and State Machine
-- `Run Suite Playback` button: generates `logs/primitive_sim/latest_trace.json` and opens playback
+- Top bar mode buttons: switch between Studio, Joint Checker, and Playback
+- `Run Suite Trace` button: generates `logs/primitive_sim/latest_trace.json` and opens playback
 
 ## Joint checker mode
 
@@ -75,7 +66,7 @@ Raw mode URL:
 http://127.0.0.1:8766/tools/primitive_sim/web/joint_checker.html
 ```
 
-Joint Checker, Studio, State Machine, and Scenario Lab pages are available from this same server instance.
+Joint Checker, Studio, and Playback are available from this same server instance.
 
 Joint checker features:
 - Per-joint sliders generated from `joint_names` + `joint_limits_rad`
@@ -84,84 +75,7 @@ Joint checker features:
 - Camera toolbar (`zoom +/-`, `orbit <- ->`, `reset view`) + mouse-wheel zoom
 - Per-joint `+/-` nudge buttons adjacent to angle input
 - DH parameter table loaded from `config/robot.yaml`
-- Top bar mode buttons and `Run Suite Playback` button
-
-## State machine mode (Behavior V4)
-
-Run the V4 macro-mode simulator:
-
-```bash
-uv run python tools/primitive_sim/run.py --scenario state_machine --port 8766
-```
-
-Raw mode URL:
-
-```text
-http://127.0.0.1:8766/tools/primitive_sim/web/state_machine.html
-```
-
-State machine features:
-- Behavior V4 mode graph (`boot_awaken`, `idle_presence`, `social_interact`, `search_assist`, `task_lighting`, `return_home`, `recover_reset`)
-- Direct signal stepping (`person/search/task/home/health`) with explicit transition reason
-- Skill-scoped allowed primitive lists and ranked deterministic proposals
-- Operator presets (`boot`, `idle`, `social`, `search`, `task`, `home`, `recover`, `fault`) for fast triage
-- Forced mode transitions with operator reason tags for debugging/recovery drills
-- Transition log + snapshot copy for runbooks/incidents
-- Cross-mode handoff by sending recommended primitive to Scenario Lab from the shell
-
-## Scenario lab mode
-
-Run scenario composition + evaluation:
-
-```bash
-uv run python tools/primitive_sim/run.py --scenario scenario_lab --port 8766
-```
-
-Raw mode URL:
-
-```text
-http://127.0.0.1:8766/tools/primitive_sim/web/scenario_lab.html
-```
-
-Scenario Lab features:
-- Build multi-step primitive scenarios from a step builder or direct JSON
-- Validate scenarios before execution (`dry_run` compile path)
-- Run scenarios and auto-open embedded playback preview
-- Scenario metrics (`duration`, `path_length`, `peak/mean velocity`, `limit margin/violations`, `switch count`)
-- Run parameter sweeps on one step command (grid search + weighted score ranking)
-- Generate sweep templates from the selected target step primitive
-- Apply best sweep patch back into scenario JSON
-- Promote best sweep candidate directly to primitive baseline params
-- Save experiment records to JSONL history and reload trace previews from history
-
-Default experiments path:
-
-```text
-logs/primitive_sim/experiments.jsonl
-```
-
-Override path:
-
-```bash
-uv run python tools/primitive_sim/run.py --scenario scenario_lab --experiments path/to/experiments.jsonl
-```
-
-## Roadmap
-
-Phase 1 (implemented):
-- Primitive Studio tuning
-- Joint Checker
-- Scenario Lab (compose + run + evaluate + save history)
-
-Phase 2 (in progress):
-- Parameter sweep / optimizer for scenario step params (implemented in Scenario Lab native shell)
-- Batch A/B eval runner (baseline vs candidate) with scorecards (next)
-- Servo/hardware emulation layer (latency, deadband, quantization) (next)
-
-Phase 3 (next):
-- Fault-injection scenarios for breaker/perception dropouts
-- Reachability/workspace map and safety envelope visualizer
-- Evidence-pack exporter for demo/ablation artifacts
+- Top bar mode buttons and `Run Suite Trace` button
 
 ## Baseline params file
 

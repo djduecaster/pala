@@ -2,6 +2,10 @@
 
 Telemetry remains a sidecar under `tools/telemetry` and does not change the core 4-loop runtime.
 
+## Current reset runtime
+
+The default live viewer is the runtime view (`runtime_core`). It shows the camera preview, capture freshness (`frame_id`, FPS, frame age, new-frame and source-alive flags), the hold action, and the latest commanded joint angles. Joint values are commands; telemetry does not measure servo position or report hardware application/deadman state because the current runtime emits no structured execution event. Historical reasoning, planner/V4, case, curation, and dataset features remain available through explicit replay/curation modes and focus profiles; empty legacy log sources should be expected during the hold-only reset.
+
 ## V4 Shipment
 - Case-centric telemetry workflow:
   - `capture` -> `compile` -> `review` -> `export` -> `report`
@@ -63,7 +67,7 @@ PALA_LOG_LEVEL=INFO uv run python -m pala.main
 cd /Users/djduecaster/development/pala
 UV_PYTHON=/opt/homebrew/bin/python3.10 uv run python -m tools.telemetry.mac_viewer \
   --mode live \
-  --focus reasoning \
+  --focus runtime \
   --jetson-host jetson
 ```
 

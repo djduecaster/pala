@@ -522,8 +522,8 @@ class ModeConfig:
 
 MODE_CONFIGS: Dict[str, ModeConfig] = {
     "live": ModeConfig(
-        pack="reasoning_live",
-        panels=("summary", "trace_list", "reasoning_stream", "planner", "arbiter", "mode", "v4_health", "case_list", "case_detail", "quality", "video"),
+        pack="runtime_core",
+        panels=("summary", "runtime", "video"),
         quality_gate="warn",
         index_mode="auto",
         no_video=False,
@@ -1021,17 +1021,9 @@ def _overlay_image(image: Image.Image, state: DashboardState) -> Image.Image:
 
     p_fps = None
     p_latency = None
-    zone = None
-    primary_person = None
-    person_conf = None
     if state.perception:
         p_fps = state.perception.get("fps")
-        p_latency = state.perception.get("latency_ms")
-        person_conf = state.perception.get("primary_person_conf")
-        primary_person = state.perception.get("primary_person")
-        debug = state.perception.get("debug")
-        if isinstance(debug, dict):
-            zone = debug.get("zone_hint")
+        p_latency = state.perception.get("frame_age_ms", state.perception.get("latency_ms"))
 
     gpu = None
     cpu = None
@@ -1040,40 +1032,15 @@ def _overlay_image(image: Image.Image, state: DashboardState) -> Image.Image:
         cpu = state.tegrastats.get("cpu_util_avg_pct")
 
     draw.text((8, 6), f"primitive={primitive} conf={confidence}", fill=(255, 255, 255))
+    is_new = state.perception.get("is_new_frame") if state.perception else None
+    source_alive = state.perception.get("source_alive") if state.perception else None
     draw.text(
         (8, 23),
-        f"perception_fps={p_fps} latency_ms={p_latency} zone={zone} gpu={gpu}% cpu={cpu}%",
+        f"fps={p_fps} frame_age_ms={p_latency} new={is_new} alive={source_alive} gpu={gpu}% cpu={cpu}%",
         fill=(255, 255, 255),
     )
     if explanation is not None:
         draw.text((8, 40), _shorten(str(explanation), 90), fill=(220, 220, 220))
-
-    if isinstance(primary_person, dict):
-        try:
-            cx = float(primary_person.get("cx", 0.5))
-            cy = float(primary_person.get("cy", 0.5))
-            bw = float(primary_person.get("w", 0.2))
-            bh = float(primary_person.get("h", 0.4))
-
-            x1 = int((cx - bw * 0.5) * width)
-            y1 = int((cy - bh * 0.5) * height)
-            x2 = int((cx + bw * 0.5) * width)
-            y2 = int((cy + bh * 0.5) * height)
-
-            x1 = max(0, min(width - 1, x1))
-            y1 = max(0, min(height - 1, y1))
-            x2 = max(0, min(width - 1, x2))
-            y2 = max(0, min(height - 1, y2))
-
-            if x2 > x1 and y2 > y1:
-                draw.rectangle((x1, y1, x2, y2), outline=(0, 255, 0), width=3)
-                label = "person"
-                if person_conf is not None:
-                    label = f"person {person_conf:.2f}"
-                text_y = max(60, y1 - 14)
-                draw.text((x1 + 3, text_y), label, fill=(0, 255, 0))
-        except Exception:
-            pass
 
     return image
 
@@ -1622,6 +1589,31 @@ def _render_v4_health_panel(lines: List[str], state: DashboardState) -> None:
         f"  mode_top={_shorten(_top_counter_text(health.get('mode_counts', {})), 120)} "
         f"skill_top={_shorten(_top_counter_text(health.get('skill_counts', {})), 120)}"
     )
+    lines.append("")
+
+
+def _render_runtime_panel(lines: List[str], state: DashboardState) -> None:
+    lines.append(f"{_focus_prefix(state, 'runtime')}Runtime")
+    perception = state.perception or {}
+    action = state.action or {}
+    command = state.command or {}
+    lines.append(
+        "  perception: "
+        f"frame_id={perception.get('frame_id', '-')} fps={perception.get('fps', '-')} "
+        f"frame_age_ms={perception.get('frame_age_ms', perception.get('latency_ms', '-'))} "
+        f"new={perception.get('is_new_frame', '-')} alive={perception.get('source_alive', '-')}"
+    )
+    lines.append(
+        f"  action: primitive={action.get('action', action).get('primitive', '-') if isinstance(action.get('action', action), dict) else '-'}"
+    )
+    if command:
+        lines.append(
+            f"  commanded: enable={command.get('enable', '-')} joints={command.get('joint_names', '-')} "
+            f"angles_rad={command.get('joint_angles_rad', '-')}"
+        )
+    else:
+        lines.append("  commanded: unavailable")
+    lines.append("  applied_hardware/deadman: unavailable (runtime does not emit structured status)")
     lines.append("")
 
 
@@ -2229,6 +2221,9 @@ def _render(state: DashboardState, *, now_wall_s: float, args: argparse.Namespac
 
     if _panel_enabled(args, "reasoning_stream"):
         _render_reasoning_stream(lines, state, args)
+
+    if _panel_enabled(args, "runtime"):
+        _render_runtime_panel(lines, state)
 
     if _panel_enabled(args, "trace_list"):
         _render_trace_list(lines, state, args)

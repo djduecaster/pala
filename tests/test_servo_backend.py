@@ -4,6 +4,8 @@ import importlib
 import sys
 import types
 
+import pytest
+
 
 class _FakeSMBus:
     def __init__(self, _bus_number: int):
@@ -112,3 +114,26 @@ def test_pca9685_disable_zeroes_pwm(monkeypatch):
         (0x40, base1 + 2, 0),
         (0x40, base1 + 3, 0),
     ]
+
+
+def test_pca9685_rejects_invalid_final_angle_without_partial_write(monkeypatch):
+    backend = _import_backend(monkeypatch)
+    servo = backend.PCA9685Servo(
+        bus_number=7,
+        address=0x40,
+        frequency_hz=50,
+        channels=[0, 1],
+        min_pulse_us=[500, 500],
+        max_pulse_us=[2500, 2500],
+        angle_scales=[1.0, 1.0],
+        angle_offsets_deg=[0.0, 0.0],
+        reverses=[False, False],
+    )
+    before = list(servo._bus.writes)
+    with pytest.raises(ValueError, match="finite"):
+        servo.set_angles_deg([0.0, "nan"])
+    assert servo._bus.writes == before
+
+    with pytest.raises(ValueError, match="expected 2"):
+        servo.set_angles_deg([0.0])
+    assert servo._bus.writes == before
