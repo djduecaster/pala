@@ -7,10 +7,11 @@ a person, acknowledge them expressively, attend, and settle.
 
 ## Current baseline
 
-The runtime captures frames and emits a persistent **hold** action. It does
-not currently recognize people, call Gemini/Cosmos, or choose gestures.
+By default, the runtime captures frames and emits a persistent **hold** action.
+An opt-in manual mode executes saved gestures in the four-loop runtime. It does
+not currently recognize people, call Gemini/Cosmos, or autonomously choose gestures.
 The four-loop foundation, servo mapping, motion primitives, and optional
-telemetry remain. Gesture choreography is exercised through separate tools
+telemetry remain. The workshop edits choreography; the manual runtime composes accepted gestures
 before autonomous behavior is connected.
 
 Earlier NVIDIA competition and V3/V4 behavior systems are historical. See
@@ -49,7 +50,29 @@ Starting `jetson_full` can actuate the lamp even with hold-only behavior:
 the executor's initial position is a software zero estimate, not an encoder
 measurement of the physical posture.
 
+## Manual interaction
+
+```bash
+uv run python -m pala.main --manual --mode dev
+```
+
+After startup reaches rest, type `demo` to greet, attend, and settle. Type
+`shutdown` to return to zero and exit; `stop` or Ctrl-C exits without recovery
+motion. The [operator guide](docs/manual_interaction.md) covers individual commands,
+Jetson startup confirmation, logs, and the remaining physical acceptance checks.
+Recipes live in `config/performances.json`; pitch3 remains fixed.
+
 ## Gesture workshop tools
+
+For an interactive sequence editor with trial logs, ratings, and saved favorites:
+
+```bash
+uv run python -m tools.gesture_workshop
+```
+
+This defaults to dummy servos. On the Jetson, use `--hardware --enable` for
+operator-confirmed physical trials. See the [workshop guide](docs/gesture_workshop.md)
+for editing commands, replay, output holding, and stop behavior.
 
 Run motion without hardware:
 

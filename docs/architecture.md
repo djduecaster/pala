@@ -19,7 +19,7 @@ PALA is between behavior architectures. The V4 mode FSM, skills, prompts,
 decision schema, and ActionGuard were removed intentionally before designing the
 next model-driven behavior agent.
 
-The behavior loop currently emits one persistent `hold` action. This is not a
+By default, the behavior loop emits one persistent `hold` action. This is not a
 fallback behavior architecture; it is a temporary contract-preserving baseline
 that keeps the four-loop runtime executable while Phase 3 is designed.
 
@@ -39,14 +39,15 @@ are preserved in `pala/perception/DEEPSTREAM_REINTRODUCTION.md`.
 
 ## Behavior
 
-The behavior package currently retains only:
+The behavior package retains:
 
 - model transport clients
 - deterministic JSON extraction
-- a hold-only boundary policy
+- a hold-only default policy
+- an opt-in manual request gate for deterministic performances
 
-The next behavior architecture will be designed before adding model calls,
-state transitions, semantic skills, or action validation.
+Model-driven behavior remains deferred. The manual interaction introduces only
+explicit pose states and operator requests; camera capture does not select gestures.
 
 ## Control and Hardware
 
@@ -66,10 +67,10 @@ interpreted by the executor. Gesture sequencing must account for this behavior.
 
 The executor starts at a software zero estimate and exposes commanded
 completion, not measured physical arrival. The current servo interface has no
-position feedback. Calibration numbers are unchanged by the cleanup; for
-example, pitch2's scale/offset maps roughly -25 to +65 joint degrees into the
-servo's unsaturated 0–180 degree range, narrower than the configured software
-limits. This mathematical range is not a validated physical safety envelope.
+position feedback. Following operator confirmation with the calibration tool,
+pitch2's software limits are -25 to +65 joint degrees. These match its
+unsaturated servo mapping; scale 2 and offset 50 remain unchanged. Physical
+behavior was confirmed by the operator, not measured by software feedback.
 
 Simulation supplies a private clock to the same executor. It does not patch
 global time or change the runtime's real monotonic clock. Configuration rejects
@@ -94,3 +95,25 @@ Live telemetry defaults to the runtime view. Joint positions and enable state
 are explicitly commanded values; applied hardware and deadman status are
 unavailable without a structured status producer. Historical reasoning,
 capture/replay, and curation remain optional sidecar tooling.
+
+## Opt-in manual performances
+
+`--manual` enables the [manual interaction](manual_interaction.md). The supervisor
+polls terminal commands without adding a worker loop. The behavior loop gates
+requests and publishes immutable performance recipes through a latest-value
+channel. The control loop expands each recipe into the existing typed
+`ActionPlan` steps and executes them through `TrajectoryExecutor`;
+`PerceptionState`, `ActionPlan`, and `HardwareCommand` schemas are unchanged.
+Control feedback reports commanded completion to the behavior gate.
+
+This control-rate sequencer preserves short holds, rejects normal preemption,
+and permits an explicit shutdown trajectory from the current command estimate.
+It uses unit style multipliers and 1e-6-radian commanded completion tolerance,
+matching the workshop. Default executor tolerance remains unchanged. Rest and
+zero are distinct. Ctrl-C stops without recovery. Once manual commands have
+started, a hardware deadman expiry stops the session without automatic resume.
+
+Manual runs add recipe/configuration snapshots and `interaction.jsonl` execution
+reports; their `actions.jsonl` records step transitions instead of hold-only
+decisions. Individual source gestures received operator acceptance; the composed
+interaction requires supervised physical validation.

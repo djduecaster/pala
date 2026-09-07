@@ -15,6 +15,9 @@ from .perception import PerceptionNode, LatestFrameCache
 from .perception.preview_tap import PreviewTapWriter
 from .perception.frame_source import DummyFrameSource, CameraFrameSource
 from .behavior import HoldBehaviorPolicy
+from .behavior.manual import ManualBehaviorPolicy
+from .control.performances import PerformanceLibrary, PerformanceSequencer
+from .utils.manual_console import ManualConsole
 from .control import TrajectoryExecutor
 from .control.primitives import PrimitiveKind, HoldCommand
 from .hardware import DummyServo, PCA9685Servo, ServoCalibration
@@ -27,12 +30,21 @@ def main(argv: Optional[list[str]] = None) -> int:
     args = _parse_cli_args([] if argv is None else argv)
     cfg = load_config(args.config)
     _apply_mode_override(cfg, args.mode)
+    library = PerformanceLibrary(args.performances, cfg) if args.manual else None
+    if args.manual and cfg.mode == "jetson_full":
+        if not args.enable:
+            raise ValueError("Manual hardware mode requires --enable")
+        logger.info("Stop other servo owners. Establish physical zero before continuing.")
+        if input("Type ZERO to confirm the known starting posture: ").strip() != "ZERO":
+            logger.info("Startup canceled before hardware initialization")
+            return 0
     max_runtime_s = _parse_max_runtime_s()
     run_log_dir = _init_run_log_dir(cfg)
     if run_log_dir:
         logger.info("run log scope=%s", run_log_dir)
 
     stop = threading.Event()
+    graceful_requested = threading.Event()
     thread_failure_lock = threading.Lock()
     thread_failure: Dict[str, str] = {}
 
@@ -41,12 +53,16 @@ def main(argv: Optional[list[str]] = None) -> int:
     latest_action = LatestValue[ActionPlan]()
     latest_command = LatestValue[HardwareCommand]()
     latest_frame = LatestFrameCache()
+    latest_performance = LatestValue()
+    latest_execution = LatestValue()
+    manual = ManualBehaviorPolicy(library) if args.manual else None
+    sequencer = PerformanceSequencer(cfg) if args.manual else None
+    console = ManualConsole(sys.stdin) if args.manual else None
 
     # Nodes
     perception = PerceptionNode(source=_build_frame_source(cfg))
     behavior = HoldBehaviorPolicy()
     executor = TrajectoryExecutor(cfg.joint_limits_rad, style_profiles=getattr(cfg, "style_profiles", None))
-    servo = _build_servo(cfg)
     preview_tap = _build_preview_tap(cfg)
 
     # Optional logging
@@ -57,8 +73,25 @@ def main(argv: Optional[list[str]] = None) -> int:
         _scope_log_path(cfg.logging.actions_jsonl, run_log_dir) if cfg.logging.enabled else None
     )
 
+    interaction_log = maybe_logger(
+        os.path.join(run_log_dir or "logs", "interaction.jsonl")
+        if args.manual and cfg.logging.enabled else None
+    )
+    if args.manual and run_log_dir:
+        import json
+        with open(os.path.join(run_log_dir, "performances.json"), "w") as output:
+            json.dump(library.raw, output, indent=2)
+        with open(args.config) as source, open(os.path.join(run_log_dir, "robot.yaml"), "w") as output:
+            output.write(source.read())
+
     def _handle_sig(_sig, _frame):
-        stop.set()
+        if args.manual and _sig == signal.SIGTERM and not graceful_requested.is_set():
+            graceful_requested.set()
+        else:
+            stop.set()
+
+    # Initialize outputs only after validating input and preparing logging.
+    servo = _build_servo(cfg)
 
     signal.signal(signal.SIGINT, _handle_sig)
     signal.signal(signal.SIGTERM, _handle_sig)
@@ -120,6 +153,14 @@ def main(argv: Optional[list[str]] = None) -> int:
         rl = RateLimiter(cfg.loop_rates.behavior_hz)
         last_action_id: Optional[str] = None
         while not stop.is_set():
+            if manual is not None:
+                report, _ = latest_execution.get()
+                plan = manual.step(report)
+                latest_performance.set(plan, time.monotonic())
+                if manual.status()["failure"]:
+                    raise RuntimeError(manual.status()["failure"])
+                rl.sleep()
+                continue
             st, _ = latest_perception.get()
             action = behavior.step(st)
             ts = time.monotonic()
@@ -150,6 +191,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     def control_loop() -> None:
         rl = RateLimiter(cfg.loop_rates.control_hz)
         last_ts = time.monotonic()
+        last_performance_phase = None
         startup_hold_action = ActionPlan(
             primitive=PrimitiveKind.HOLD,
             command=HoldCommand(),
@@ -164,7 +206,25 @@ def main(argv: Optional[list[str]] = None) -> int:
             dt = now - last_ts
             last_ts = now
 
-            cmd = executor.step(action, dt)
+            if sequencer is not None:
+                plan, _ = latest_performance.get()
+                cmd, report = sequencer.tick(plan, dt)
+                if report is not None:
+                    latest_execution.set(report, now)
+                    phase_key = (report.plan_id, report.step, report.phase, report.status)
+                    if phase_key != last_performance_phase:
+                        logger.info("performance=%s step=%d %s phase=%s status=%s",
+                                    report.name, report.step, report.step_name, report.phase, report.status)
+                        if action_log:
+                            action_log.write({"ts_wall_s": time.time(), "action": sequencer.action, "execution": report})
+                        last_performance_phase = phase_key
+                    if interaction_log:
+                        interaction_log.write({"type": "execution", "report": report, "command": cmd})
+                    if report.status == "failed":
+                        latest_command.set(cmd, cmd.timestamp_monotonic_s)
+                        raise RuntimeError(report.reason)
+            else:
+                cmd = executor.step(action, dt)
             latest_command.set(cmd, cmd.timestamp_monotonic_s)
 
             rl.sleep()
@@ -175,33 +235,40 @@ def main(argv: Optional[list[str]] = None) -> int:
         deadman_s = cfg.deadman_timeout_ms / 1000.0
         enabled = True
         last_state: Optional[str] = None
-        while not stop.is_set():
-            cmd, ts = latest_command.get()
-            now = time.monotonic()
-            state = "enabled"
-            if cmd is None or ts is None or (now - ts) > deadman_s:
-                if enabled:
-                    servo.enable(False)
-                    enabled = False
-                state = "deadman"
-            else:
-                if cmd.enable is False:
+        received_command = False
+        try:
+            while not stop.is_set():
+                cmd, ts = latest_command.get()
+                now = time.monotonic()
+                state = "enabled"
+                if cmd is None or ts is None or (now - ts) > deadman_s:
                     if enabled:
                         servo.enable(False)
                         enabled = False
-                    state = "commanded_disable"
+                    state = "deadman"
+                    if manual is not None and received_command:
+                        raise RuntimeError("Manual control command expired; outputs disabled")
                 else:
-                    if not enabled:
-                        servo.enable(True)
-                        enabled = True
-                    servo.set_angles(cmd.joint_angles_rad)
-                    state = "enabled"
+                    received_command = True
+                    if cmd.enable is False:
+                        if enabled:
+                            servo.enable(False)
+                            enabled = False
+                        state = "commanded_disable"
+                    else:
+                        if not enabled:
+                            servo.enable(True)
+                            enabled = True
+                        servo.set_angles(cmd.joint_angles_rad)
+                        state = "enabled"
 
-            if state != last_state:
-                logger.info("hardware state=%s", state)
-                last_state = state
+                if state != last_state:
+                    logger.info("hardware state=%s", state)
+                    last_state = state
 
-            rl.sleep()
+                rl.sleep()
+        finally:
+            servo.enable(False)
 
     threads = [
         threading.Thread(target=_thread_guard("perception", perception_loop), daemon=True),
@@ -214,15 +281,55 @@ def main(argv: Optional[list[str]] = None) -> int:
         t.start()
 
     start_time = time.monotonic()
+    shutdown_started = None
+    if manual is not None:
+        logger.info("Manual interaction: greet | attend | settle | demo | status | help | shutdown/q | stop")
+        logger.info("Startup enters rest. Busy requests are rejected. Ctrl-C/stop disables; shutdown/q returns to zero first.")
     try:
         while not stop.is_set():
             with thread_failure_lock:
                 if thread_failure:
                     break
             if max_runtime_s is not None and (time.monotonic() - start_time) >= max_runtime_s:
-                stop.set()
-                break
-            time.sleep(0.1)
+                if manual is None:
+                    stop.set()
+                    break
+                graceful_requested.set()
+            if manual is not None:
+                commands = console.poll()
+                for text in commands:
+                    token = text.strip().lower()
+                    if not token:
+                        continue
+                    if token in {"stop", "abort"}:
+                        stop.set()
+                        break
+                    if token in {"help", "?"}:
+                        logger.info("greet: greet once and stay attentive; attend: attention pose; settle: return to rest; "
+                                    "demo: greet, attend, settle; status: current progress; shutdown/q: zero then disable; stop/Ctrl-C: disable immediately")
+                        continue
+                    if token == "status":
+                        logger.info("manual status=%s", manual.status())
+                        continue
+                    if token in {"shutdown", "q", "quit"}:
+                        graceful_requested.set()
+                        continue
+                    accepted, message = manual.request(token)
+                    logger.info("manual request=%s accepted=%s: %s", token, accepted, message)
+                    if interaction_log:
+                        interaction_log.write({"type": "request", "command": token, "accepted": accepted, "message": message})
+                if stop.is_set():
+                    break
+                if graceful_requested.is_set() and shutdown_started is None:
+                    accepted, message = manual.request("shutdown")
+                    logger.info("manual shutdown: %s", message)
+                    shutdown_started = time.monotonic()
+                state = manual.status()
+                if state["finished"]:
+                    stop.set()
+                elif shutdown_started is not None and time.monotonic() - shutdown_started > 30:
+                    raise RuntimeError("Graceful shutdown exceeded 30 seconds; disabling outputs")
+            time.sleep(0.05 if manual is not None else 0.1)
     finally:
         stop.set()
         for t in threads:
@@ -254,6 +361,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                 perception_log.close()
             except Exception:  # noqa: BLE001 - shutdown should not crash process exit
                 logger.exception("perception log close failed")
+        if interaction_log:
+            interaction_log.close()
         if action_log:
             try:
                 action_log.close()
@@ -443,6 +552,9 @@ def _parse_cli_args(argv: Optional[list[str]]) -> argparse.Namespace:
         choices=["dev", "jetson_perception", "jetson_full"],
         help="Override mode from config",
     )
+    parser.add_argument("--manual", action="store_true", help="Enable manually triggered deterministic gestures")
+    parser.add_argument("--enable", action="store_true", help="Required for --manual with jetson_full")
+    parser.add_argument("--performances", default="config/performances.json", help="Validated gesture library for --manual")
     return parser.parse_args(argv)
 
 

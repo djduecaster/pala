@@ -54,7 +54,11 @@ class TrajectoryExecutor:
         *,
         style_profiles: Optional[Dict[str, Dict[str, float]]] = None,
         clock: Optional[Callable[[], float]] = None,
+        position_tolerance_rad: float = 0.02,
     ):
+        if not math.isfinite(position_tolerance_rad) or position_tolerance_rad < 0:
+            raise ValueError("position_tolerance_rad must be finite and nonnegative")
+        self._position_tolerance_rad = position_tolerance_rad
         self._clock = clock or time.monotonic
         self._limits = joint_limits_rad
         self._current = [0.0 for _ in joint_limits_rad]
@@ -149,7 +153,7 @@ class TrajectoryExecutor:
         # Completion checks must use feasible (clamped) targets so out-of-limit
         # requests do not leave primitives running indefinitely.
         if kind in {PrimitiveKind.HOME, PrimitiveKind.MOVE_TO, PrimitiveKind.ORIENT_TO_ZONE}:
-            done = self._within_tol(self._target, self._current)
+            done = self._within_tol(self._target, self._current, self._position_tolerance_rad)
         elif kind == PrimitiveKind.GAZE_TO and isinstance(command, GazeToCommand):
             done = self._gaze_done(command, now, self._target)
         self._apply_rate_limit(self._target, rate, dt)
@@ -250,7 +254,7 @@ class TrajectoryExecutor:
         self._finish_active(status=ExecutionStatus.TIMED_OUT, reason="timeout")
 
     def _gaze_done(self, command: GazeToCommand, now: float, target: List[float]) -> bool:
-        reached = self._within_tol(target, self._current)
+        reached = self._within_tol(target, self._current, self._position_tolerance_rad)
         if not reached:
             self._active_reached_s = None
             return False

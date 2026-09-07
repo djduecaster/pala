@@ -1,0 +1,196 @@
+{
+  "version": 1,
+  "joint_names": [
+    "yaw",
+    "pitch1",
+    "pitch2",
+    "roll",
+    "pitch3"
+  ],
+  "poses_deg": {
+    "zero": [
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    "rest": [
+      0,
+      -25,
+      0,
+      0,
+      0
+    ],
+    "attention": [
+      25,
+      -15,
+      40,
+      10,
+      0
+    ]
+  },
+  "provenance": {
+    "greeting-preferred": {
+      "trial": "d07fe82ac484",
+      "operator_rating": 5,
+      "hardware_trial": true
+    },
+    "attention-preferred": {
+      "trial": "f0ea80e4adf4",
+      "operator_rating": 5,
+      "hardware_trial": true
+    },
+    "settling-preferred": {
+      "trial": "423d5d236e51",
+      "operator_rating": 5,
+      "hardware_trial": true
+    }
+  },
+  "integration_notes": [
+    "Workshop prep/reset steps removed. Greeting adds a roll=10 attention endpoint after the accepted wave; this transition is not yet physically validated.",
+    "Rest and zero are distinct. Rate multipliers are unity and commanded tolerance is 1e-6 rad, matching the workshop.",
+    "Manual attend moves directly to the attention pose; the composed interaction is not physically validated."
+  ],
+  "performances": {
+    "startup": {
+      "end_state": "rest",
+      "steps": [
+        {
+          "name": "Establish known zero",
+          "pose": "zero",
+          "rate_deg_s": 8,
+          "hold_s": 2
+        },
+        {
+          "name": "Enter rest",
+          "pose": "rest",
+          "rate_deg_s": 12,
+          "hold_s": 2
+        }
+      ]
+    },
+    "greet": {
+      "end_state": "attention",
+      "steps": [
+        {
+          "name": "Look up toward visitor",
+          "target_deg": [
+            25,
+            -15,
+            40,
+            0,
+            0
+          ],
+          "rate_deg_s": 18,
+          "hold_s": 0.5
+        },
+        {
+          "name": "Greeting tilt",
+          "target_deg": [
+            33.0,
+            -15,
+            40,
+            20.0,
+            0
+          ],
+          "rate_deg_s": 25.0,
+          "hold_s": 0.25
+        },
+        {
+          "name": "Wave across",
+          "target_deg": [
+            17.0,
+            -15,
+            40,
+            -20.0,
+            0
+          ],
+          "rate_deg_s": 25.0,
+          "hold_s": 0.25
+        },
+        {
+          "name": "Finish acknowledgment",
+          "target_deg": [
+            25.0,
+            -15,
+            40,
+            0.0,
+            0
+          ],
+          "rate_deg_s": 25.0,
+          "hold_s": 1
+        },
+        {
+          "name": "Remain attentive",
+          "pose": "attention",
+          "rate_deg_s": 10,
+          "hold_s": 0.5
+        }
+      ]
+    },
+    "attend": {
+      "end_state": "attention",
+      "steps": [
+        {
+          "name": "Attend to visitor",
+          "pose": "attention",
+          "rate_deg_s": 10,
+          "hold_s": 3
+        }
+      ]
+    },
+    "settle": {
+      "end_state": "rest",
+      "steps": [
+        {
+          "name": "Release curious tilt",
+          "target_deg": [
+            25.0,
+            -15.0,
+            40.0,
+            0,
+            0.0
+          ],
+          "rate_deg_s": 10,
+          "hold_s": 0.5
+        },
+        {
+          "name": "Face resting direction",
+          "target_deg": [
+            0,
+            -15.0,
+            40.0,
+            0,
+            0.0
+          ],
+          "rate_deg_s": 12,
+          "hold_s": 0.5
+        },
+        {
+          "name": "Settle both pitch joints",
+          "target_deg": [
+            0,
+            -25,
+            0,
+            0,
+            0.0
+          ],
+          "rate_deg_s": 10,
+          "hold_s": 5
+        }
+      ]
+    },
+    "shutdown": {
+      "end_state": "zero",
+      "steps": [
+        {
+          "name": "Normal shutdown to zero",
+          "pose": "zero",
+          "rate_deg_s": 8,
+          "hold_s": 2
+        }
+      ]
+    }
+  }
+}

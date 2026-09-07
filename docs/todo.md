@@ -1,7 +1,8 @@
 # PALA next steps
 
-Current milestone: a clean local workshop baseline, followed by three useful
-physical gestures. The lamp can remain unpowered during software cleanup.
+Current milestone: physically validate the composed manual interaction. Three
+individual gestures received 5/5 operator ratings; repeatability remains to be
+established. The manual runtime has local dummy verification only.
 
 ## Session 1: software cleanup
 
@@ -26,6 +27,14 @@ Completion evidence is recorded in [the session report](session_1_cleanup.md).
   not physical position feedback.
 - Resolve gesture interruption/completion semantics before connecting a
   multi-part skill runner. Current executor behavior is latest-intent wins.
+
+## Session 3: manual interaction acceptance
+
+- Saved recipe library and opt-in four-loop runner: implemented.
+- Verify startup to rest, greeting to attention, settling to rest, and shutdown
+  to zero on the lamp. Emergency stop should disable without recovery motion.
+- Repeat the complete interaction three times and capture a demonstration.
+- See [operator guide](manual_interaction.md) and [workshop results](workshop_2026-09-07.md).
 
 ## Next: a narrow camera-driven interaction
 
