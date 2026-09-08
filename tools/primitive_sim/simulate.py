@@ -58,6 +58,7 @@ def simulate_segments(
     segments: Sequence[SimSegment],
     hz: float,
     style_profiles: Optional[dict[str, dict[str, float]]] = None,
+    position_tolerance_rad: float = 0.02,
 ) -> dict[str, Any]:
     rate_hz = max(1.0, float(hz))
     dt_s = 1.0 / rate_hz
@@ -79,7 +80,8 @@ def simulate_segments(
     prev_angles: Optional[list[float]] = None
 
     clock = _SimClock(start_s=0.0)
-    executor = TrajectoryExecutor(limits, style_profiles=style_profiles, clock=clock.now)
+    executor = TrajectoryExecutor(limits, style_profiles=style_profiles, clock=clock.now,
+                                  position_tolerance_rad=position_tolerance_rad)
 
     for seg in segments:
         start_t = clock.now()

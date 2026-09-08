@@ -21,6 +21,8 @@ class OpenAICompatClient:
         t0 = time.monotonic()
         try:
             client = _get_openai_client(base_url=self.base_url, api_key=self.api_key)
+            if request.max_retries is not None:
+                client = client.with_options(max_retries=request.max_retries)
             payload = _request_payload(request)
             raw = client.chat.completions.with_raw_response.create(timeout=request.timeout_s, **payload)
             status_code = int(getattr(raw, "status_code", 200))

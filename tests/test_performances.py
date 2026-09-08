@@ -159,3 +159,13 @@ def test_console_nonblocking_lines_and_eof():
         os.close(writer)
         assert console.poll() == ['shutdown']
         assert console.poll() == []
+
+
+def test_camera_rest_is_shared_by_startup_settling_and_demo(setup):
+    cfg, lib, clock, seq = setup
+    expected = tuple(math.radians(v) for v in [0, -40, 25, 0, 0])
+    assert lib.poses['rest'] == expected
+    assert lib.raw['performances']['settle']['steps'][-1]['pose'] == 'rest'
+    for name in ('startup', 'settle', 'demo'):
+        assert lib.plan(name).steps[-1].target_rad == expected
+    assert lib.plan('shutdown').steps[-1].target_rad == (0.,) * 5

@@ -431,7 +431,8 @@ function forwardKinematics() {
   const yaw = angleAt(map.yaw);
   const roll = angleAt(map.roll);
   const pitch1 = angleAt(map.pitch1) + Number(g.pitch1ZeroOffsetRad || 0);
-  const pitch2 = angleAt(map.pitch2) + Number(g.pitch2ZeroOffsetRad || 0);
+  // Physical pitch2 positive opens/lifts the elbow; its axis opposes pitch1.
+  const pitch2 = Number(g.pitch2ZeroOffsetRad || 0) - angleAt(map.pitch2);
   const pitch3 = angleAt(map.pitch3) + Number(g.pitch3ZeroOffsetRad || 0);
 
   const baseCenter = [0, 0, 0];

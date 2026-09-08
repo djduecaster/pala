@@ -47,8 +47,13 @@ is yaw, pitch1, pitch2, roll, pitch3; values are joint degrees:
 | Pose | Values |
 |---|---|
 | Zero | `[0, 0, 0, 0, 0]` |
-| Rest | `[0, -25, 0, 0, 0]` |
+| Rest | `[0, -40, 25, 0, 0]` |
 | Attention | `[25, -15, 40, 10, 0]` |
+
+Rest was revised after the camera probe showed only lower legs from the previous
+`[0, -25, 0, 0, 0]` posture. Startup and settling reference the same named pose.
+The new greeting approach, settling endpoint, and shutdown path need renewed
+physical acceptance; earlier ratings describe the previous rest posture.
 
 Each step specifies a full target or named pose, per-joint rate in degrees/second,
 and a hold after commanded arrival. Joints start together but can finish at

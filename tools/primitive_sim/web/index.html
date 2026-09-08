@@ -4,11 +4,17 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>PALA Lamp Sim - Primitive Studio</title>
-    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="styles.css?v=desk-scene-2">
   </head>
   <body>
     <main class="layout">
       <section class="stage-card">
+        <section id="scenePanel" hidden style="padding:16px;background:#172c38;color:#eef7fc;border-radius:12px">
+          <button id="scenePlay" type="button">Play / pause</button> <strong id="sceneTitle"></strong>
+          <p id="sceneHuman"></p><p id="sceneIntent"></p>
+          <nav id="sceneChapters" aria-label="Interaction moments"></nav>
+          <small>Scripted human cues and illustrative delays. Simulation only; no camera, Gemini, or hardware.</small>
+        </section>
         <canvas id="simCanvas" width="1080" height="680"></canvas>
         <div class="stage-tools" aria-label="Viewer controls">
           <button id="zoomOutBtn" type="button" title="Zoom out">-</button>
@@ -148,6 +154,6 @@
       </aside>
     </main>
 
-    <script src="app.js"></script>
+    <script src="app.js?v=pitch2-direction-3"></script>
   </body>
 </html>

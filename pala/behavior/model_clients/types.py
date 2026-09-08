@@ -19,6 +19,7 @@ class ModelRequest:
     presence_penalty: Optional[float] = None
     stream: bool = False
     extra_body: Optional[Dict[str, Any]] = None
+    max_retries: Optional[int] = None
 
 
 @dataclass(frozen=True)

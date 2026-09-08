@@ -1,0 +1,245 @@
+{
+  "title": "PALA \u2014 A moment at the desk",
+  "beats": [
+    {
+      "id": "rest",
+      "title": "Available",
+      "human": "Desk is empty.",
+      "intent": "Relaxed, ready without demanding attention.",
+      "steps": [
+        {
+          "name": "Enter established rest",
+          "pose": "rest",
+          "rate_deg_s": 12,
+          "hold_s": 3
+        }
+      ]
+    },
+    {
+      "id": "notice",
+      "title": "Oh, someone is here",
+      "human": "You roll your chair into view and start working.",
+      "intent": "Small orienting movement; no wave or celebration.",
+      "steps": [
+        {
+          "name": "Illustrative observation delay",
+          "hold_s": 2.5
+        },
+        {
+          "name": "Quiet glance",
+          "target_deg": [
+            12,
+            -34,
+            30,
+            3,
+            0
+          ],
+          "rate_deg_s": 12,
+          "hold_s": 2
+        },
+        {
+          "name": "Let them work",
+          "hold_s": 4
+        }
+      ]
+    },
+    {
+      "id": "greet",
+      "title": "Hello!",
+      "human": "You turn your head toward the lamp.",
+      "intent": "Lift, open, and make one broad coordinated wave.",
+      "steps": [
+        {
+          "name": "Illustrative Gemini delay",
+          "hold_s": 2.8
+        },
+        {
+          "name": "Look up",
+          "target_deg": [
+            25,
+            -15,
+            30.0,
+            5,
+            0
+          ],
+          "rate_deg_s": 22,
+          "hold_s": 0.25
+        },
+        {
+          "name": "Open wave",
+          "target_deg": [
+            39,
+            -8,
+            39.0,
+            28,
+            0
+          ],
+          "rate_deg_s": 32,
+          "hold_s": 0.12
+        },
+        {
+          "name": "Sweep and dip",
+          "target_deg": [
+            11,
+            -22,
+            23.0,
+            -28,
+            0
+          ],
+          "rate_deg_s": 36,
+          "hold_s": 0.12
+        },
+        {
+          "name": "Smaller rebound",
+          "target_deg": [
+            32,
+            -12,
+            35.0,
+            16,
+            0
+          ],
+          "rate_deg_s": 32,
+          "hold_s": 0.15
+        },
+        {
+          "name": "Attentive landing",
+          "rate_deg_s": 24,
+          "hold_s": 3,
+          "target_deg": [
+            25,
+            -15,
+            30.0,
+            10,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "excited",
+      "title": "You too!",
+      "human": "You give the lamp a thumbs-up.",
+      "intent": "Two compact bounces with alternating tilt; finish cleanly.",
+      "steps": [
+        {
+          "name": "Illustrative Gemini delay",
+          "hold_s": 2.8
+        },
+        {
+          "name": "Wind up",
+          "target_deg": [
+            30.0,
+            -23,
+            29.0,
+            -12,
+            0
+          ],
+          "rate_deg_s": 19.599999999999998,
+          "hold_s": 0.1
+        },
+        {
+          "name": "First bright bounce",
+          "target_deg": [
+            50.0,
+            -5,
+            47.0,
+            32,
+            0
+          ],
+          "rate_deg_s": 28.0,
+          "hold_s": 0.1
+        },
+        {
+          "name": "Bounce across",
+          "target_deg": [
+            20.0,
+            -21,
+            27.0,
+            -32,
+            0
+          ],
+          "rate_deg_s": 30.799999999999997,
+          "hold_s": 0.1
+        },
+        {
+          "name": "Second smaller bounce",
+          "target_deg": [
+            45.0,
+            -9,
+            43.0,
+            24,
+            0
+          ],
+          "rate_deg_s": 28.0,
+          "hold_s": 0.1
+        },
+        {
+          "name": "Damped rebound",
+          "target_deg": [
+            28.0,
+            -18,
+            32.0,
+            -14,
+            0
+          ],
+          "rate_deg_s": 25.2,
+          "hold_s": 0.1
+        },
+        {
+          "name": "Stay warmly attentive",
+          "rate_deg_s": 18.2,
+          "hold_s": 3,
+          "target_deg": [
+            35.0,
+            -15,
+            25.0,
+            10,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "id": "settle",
+      "title": "Back to your work",
+      "human": "You turn back toward your desk.",
+      "intent": "Wait before disengaging, then soften and return to rest.",
+      "steps": [
+        {
+          "name": "Disengagement grace period",
+          "hold_s": 4
+        },
+        {
+          "name": "Release tilt",
+          "target_deg": [
+            35,
+            -15,
+            25,
+            0,
+            0
+          ],
+          "rate_deg_s": 10,
+          "hold_s": 0.5
+        },
+        {
+          "name": "Face resting direction",
+          "target_deg": [
+            0,
+            -15,
+            25,
+            0,
+            0
+          ],
+          "rate_deg_s": 12,
+          "hold_s": 0.5
+        },
+        {
+          "name": "Relax both pitch joints",
+          "pose": "rest",
+          "rate_deg_s": 10,
+          "hold_s": 5
+        }
+      ]
+    }
+  ]
+}

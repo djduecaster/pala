@@ -490,3 +490,10 @@ body.embedded-shell .control-card {
 [hidden] {
   display: none !important;
 }
+
+/* Story cues remain beside the playback controls without shrinking the lamp. */
+body.scene-mode .stage-card { flex-direction: column; }
+body.scene-mode #simCanvas { height: 420px; object-fit: contain; }
+body.scene-mode .stage-tools { top: auto; bottom: 18px; }
+body.scene-mode #scenePanel p { margin: 6px 0; }
+body.scene-mode #sceneChapters { margin: 8px 0; }

@@ -13,6 +13,8 @@ if (pageParams.get("shell") === "1") {
   });
 }
 
+document.getElementById("scenePlay").addEventListener("click", () => document.getElementById("playPauseBtn").click());
+
 const playPauseBtn = document.getElementById("playPauseBtn");
 const resetBtn = document.getElementById("resetBtn");
 const speedSelect = document.getElementById("speedSelect");
@@ -687,7 +689,8 @@ function forwardKinematics(sample) {
   const yaw = angleAt(angles, map.yaw);
   const roll = angleAt(angles, map.roll);
   const pitch1 = angleAt(angles, map.pitch1) + Number(g.pitch1ZeroOffsetRad || 0);
-  const pitch2 = angleAt(angles, map.pitch2) + Number(g.pitch2ZeroOffsetRad || 0);
+  // Physical pitch2 positive opens/lifts the elbow; its axis opposes pitch1.
+  const pitch2 = Number(g.pitch2ZeroOffsetRad || 0) - angleAt(angles, map.pitch2);
   const pitch3 = angleAt(angles, map.pitch3) + Number(g.pitch3ZeroOffsetRad || 0);
 
   const baseCenter = [0, 0, 0];
@@ -884,6 +887,11 @@ function buildJointRows() {
 }
 
 function updateInfo(sample) {
+  if (sample.scene) {
+    document.getElementById("sceneTitle").textContent = sample.scene.title;
+    document.getElementById("sceneHuman").textContent = `You: ${sample.scene.human}`;
+    document.getElementById("sceneIntent").textContent = `Lamp: ${sample.scene.intent}`;
+  }
   const t = Number(sample.t_s || 0);
   timeLabel.textContent = `t=${t.toFixed(2)}s`;
 
@@ -959,6 +967,23 @@ function loadTrace(trace, sourceLabel, { asBaseline = false } = {}) {
   }
 
   state.samples = trace.samples;
+  document.getElementById("scenePanel").hidden = !trace.samples[0]?.scene;
+  document.body.classList.toggle("scene-mode", Boolean(trace.samples[0]?.scene));
+  const chapters = document.getElementById("sceneChapters");
+  chapters.replaceChildren();
+  const seenChapters = new Set();
+  trace.samples.forEach((sample, index) => {
+    if (!sample.scene || seenChapters.has(sample.scene.id)) return;
+    seenChapters.add(sample.scene.id);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = sample.scene.title;
+    button.addEventListener("click", () => {
+      timeline.value = String(index);
+      timeline.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    chapters.appendChild(button);
+  });
 
   const namesRaw = trace?.metadata?.joint_names;
   const limitsRaw = trace?.metadata?.joint_limits_rad;

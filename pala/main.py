@@ -31,6 +31,26 @@ def main(argv: Optional[list[str]] = None) -> int:
     cfg = load_config(args.config)
     _apply_mode_override(cfg, args.mode)
     library = PerformanceLibrary(args.performances, cfg) if args.manual else None
+    probe = None
+    if sum((args.attention_probe, args.live_greeting, args.live_interaction)) > 1:
+        raise ValueError("Choose only one model test mode")
+    live_mode = args.live_greeting or args.live_interaction
+    if args.attention_probe or live_mode:
+        if not args.manual:
+            raise ValueError("Model test modes require --manual; use the corresponding tools entry point")
+        if args.probe_mock and cfg.mode != "dev":
+            raise ValueError("--probe-mock is limited to dev mode")
+        if args.live_interaction:
+            from tools.live_interaction import LiveInteraction
+            if not {"notice", "excite"} <= library.performances.keys():
+                raise ValueError("Live interaction requires the desk performance library")
+            probe = LiveInteraction.from_args(args)
+        elif args.live_greeting:
+            from tools.live_greeting import LiveGreeting
+            probe = LiveGreeting.from_args(args)
+        else:
+            from tools.attention_probe import AttentionProbe
+            probe = AttentionProbe.from_args(args)
     if args.manual and cfg.mode == "jetson_full":
         if not args.enable:
             raise ValueError("Manual hardware mode requires --enable")
@@ -283,7 +303,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     start_time = time.monotonic()
     shutdown_started = None
     if manual is not None:
-        logger.info("Manual interaction: greet | attend | settle | demo | status | help | shutdown/q | stop")
+        if probe is not None:
+            logger.info("Live model test: wait for rest, then arm; help lists commands" if live_mode else
+                        "Attention probe: wait for PROBE READY, then type 1–4 + Enter; help lists commands")
+        else:
+            logger.info("Manual interaction: greet | attend | settle | demo | status | help | shutdown/q | stop")
         logger.info("Startup enters rest. Busy requests are rejected. Ctrl-C/stop disables; shutdown/q returns to zero first.")
     try:
         while not stop.is_set():
@@ -305,14 +329,28 @@ def main(argv: Optional[list[str]] = None) -> int:
                         stop.set()
                         break
                     if token in {"help", "?"}:
+                        if probe is not None:
+                            if args.live_interaction:
+                                from tools.live_interaction import HELP
+                            elif args.live_greeting:
+                                from tools.live_greeting import HELP
+                            else:
+                                from tools.attention_probe import HELP
+                            logger.info(HELP)
+                            continue
                         logger.info("greet: greet once and stay attentive; attend: attention pose; settle: return to rest; "
                                     "demo: greet, attend, settle; status: current progress; shutdown/q: zero then disable; stop/Ctrl-C: disable immediately")
                         continue
                     if token == "status":
                         logger.info("manual status=%s", manual.status())
+                        if live_mode:
+                            logger.info("live armed=%s request_inflight=%s", probe.armed, bool(probe.inflight))
                         continue
                     if token in {"shutdown", "q", "quit"}:
                         graceful_requested.set()
+                        continue
+                    if probe is not None:
+                        probe.command(token, manual.status())
                         continue
                     accepted, message = manual.request(token)
                     logger.info("manual request=%s accepted=%s: %s", token, accepted, message)
@@ -325,6 +363,16 @@ def main(argv: Optional[list[str]] = None) -> int:
                     logger.info("manual shutdown: %s", message)
                     shutdown_started = time.monotonic()
                 state = manual.status()
+                if probe is not None and not graceful_requested.is_set():
+                    probe.tick(latest_frame.get(max_age_ms=500), state)
+                    if live_mode:
+                        request = probe.take_request()
+                        if request is not None:
+                            accepted, message = manual.request(request)
+                            if args.live_interaction:
+                                probe.motion_result(request, accepted)
+                            probe.record({"type": "motion_request", "command": request, "accepted": accepted, "message": message})
+                            logger.info("live request=%s accepted=%s: %s", request, accepted, message)
                 if state["finished"]:
                     stop.set()
                 elif shutdown_started is not None and time.monotonic() - shutdown_started > 30:
@@ -332,6 +380,11 @@ def main(argv: Optional[list[str]] = None) -> int:
             time.sleep(0.05 if manual is not None else 0.1)
     finally:
         stop.set()
+        if probe is not None:
+            try:
+                probe.close()
+            except Exception:
+                logger.exception("probe log close failed")
         for t in threads:
             t.join(timeout=1.0)
 
@@ -555,6 +608,13 @@ def _parse_cli_args(argv: Optional[list[str]]) -> argparse.Namespace:
     parser.add_argument("--manual", action="store_true", help="Enable manually triggered deterministic gestures")
     parser.add_argument("--enable", action="store_true", help="Required for --manual with jetson_full")
     parser.add_argument("--performances", default="config/performances.json", help="Validated gesture library for --manual")
+    parser.add_argument("--live-interaction", action="store_true", help="Supervised notice, greet, excite, settle interaction")
+    parser.add_argument("--live-greeting", action="store_true", help="Explicitly armed Gemini-triggered greeting test")
+    parser.add_argument("--attention-probe", action="store_true", help="Four timed Gemini observations at rest; no model actuation")
+    parser.add_argument("--probe-mock", action="store_true", help="Dev-only fake model for offline testing")
+    parser.add_argument("--gemini-model", default=os.getenv("PALA_GEMINI_MODEL"), help="Gemini model ID (or PALA_GEMINI_MODEL)")
+    parser.add_argument("--gemini-key-file", help="File containing only API key; prefer a path outside the repository")
+    parser.add_argument("--probe-output", default="logs/attention_probe", help="Parent directory for unique probe sessions")
     return parser.parse_args(argv)
 
 

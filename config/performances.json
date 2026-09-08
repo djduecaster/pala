@@ -17,8 +17,8 @@
     ],
     "rest": [
       0,
-      -25,
-      0,
+      -40,
+      25,
       0,
       0
     ],
@@ -50,7 +50,9 @@
   "integration_notes": [
     "Workshop prep/reset steps removed. Greeting adds a roll=10 attention endpoint after the accepted wave; this transition is not yet physically validated.",
     "Rest and zero are distinct. Rate multipliers are unity and commanded tolerance is 1e-6 rad, matching the workshop.",
-    "Manual attend moves directly to the attention pose; the composed interaction is not physically validated."
+    "Manual attend moves directly to the attention pose; the composed interaction is not physically validated.",
+    "Rest revised to pitch1=-40 and pitch2=+15 for shade-mounted camera coverage. Prior acceptance ratings refer to the earlier pitch1=-25/pitch2=0 rest; affected transitions require renewed physical validation.",
+    "Rest pitch2=+25 accepted for a seated close-range demo after framing trial 52d3169f14bc. Transitions to/from this pose still need live acceptance."
   ],
   "performances": {
     "startup": {
@@ -169,15 +171,9 @@
         },
         {
           "name": "Settle both pitch joints",
-          "target_deg": [
-            0,
-            -25,
-            0,
-            0,
-            0.0
-          ],
           "rate_deg_s": 10,
-          "hold_s": 5
+          "hold_s": 5,
+          "pose": "rest"
         }
       ]
     },

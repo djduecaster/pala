@@ -21,20 +21,28 @@ class ManualBehaviorPolicy:
 
     def request(self, name: str) -> tuple[bool, str]:
         with self._lock:
-            if name not in {"greet", "attend", "settle", "demo", "shutdown"}:
+            if name not in {"greet", "attend", "settle", "demo", "shutdown", "notice", "excite"}:
                 return False, "Unknown request"
+            if name in {"notice", "excite"} and name not in self.library.performances:
+                return False, "Performance unavailable in this library"
             if self._closing or self._failed:
                 return False, "Shutdown or failure is already in progress"
             if name != "shutdown":
                 if self._busy:
                     return False, "Busy; request rejected rather than queued or interrupting"
+                if name == "notice" and (self._state != "rest" or self._greeted):
+                    return False, "Notice requires unengaged rest"
+                if name == "excite" and (self._state != "attention" or not self._greeted):
+                    return False, "Excitement requires a completed greeting"
                 if name in {"greet", "demo"} and self._greeted:
                     return False, "Already greeted this interaction; settle before greeting again"
                 if name == "settle" and self._state == "rest":
                     return False, "Already resting"
                 if name == "attend" and self._state == "attention":
                     return False, "Already attentive"
-            self._plan = self.library.plan(name)
+            variant = f"settle_{self._state}"
+            plan_name = variant if name == "settle" and variant in self.library.performances else name
+            self._plan = self.library.plan(plan_name)
             self._busy = True
             self._report = None
             self._closing = name == "shutdown"
@@ -51,7 +59,7 @@ class ManualBehaviorPolicy:
                     self._state = self._plan.end_state
                     if self._plan.name == "greet":
                         self._greeted = True
-                    elif self._plan.name in {"settle", "demo"}:
+                    elif self._plan.name in {"settle", "demo"} or self._plan.name.startswith("settle_"):
                         self._greeted = False
                     if self._closing:
                         self._finished = True

@@ -62,6 +62,21 @@ motion. The [operator guide](docs/manual_interaction.md) covers individual comma
 Jetson startup confirmation, logs, and the remaining physical acceptance checks.
 Recipes live in `config/performances.json`; pitch3 remains fixed.
 
+## Supervised Gemini greeting
+
+The [live greeting test](docs/live_greeting.md) adds explicitly armed camera
+observations that can trigger one accepted greeting. It holds attention afterward;
+`reset` settles and `arm` starts another trial. No automatic rearming or disengagement
+is enabled.
+
+## Gemini attention experiment
+
+Run `uv run python -m tools.attention_probe --mode dev --probe-mock` for an
+offline rehearsal of four numbered, five-second snapshot trials. The physical
+probe enters rest through the main runtime, sends only requested snapshots to
+Gemini, and logs proposed responses without model-driven movement. See the
+[probe guide](docs/attention_probe.md) for Jetson and API-key setup.
+
 ## Gesture workshop tools
 
 For an interactive sequence editor with trial logs, ratings, and saved favorites:
@@ -98,6 +113,14 @@ operator-supervised powered session.
 servo checks are separate; do not run concurrent owners of the same device.
 
 ## Telemetry
+
+For a lightweight browser camera view, start the camera-only runtime on Jetson
+(`uv run python -m pala.main --mode jetson_perception`), then on Mac run
+`uv run python -m tools.camera_preview --jetson-host jetson-wifi` and open
+http://127.0.0.1:8765. It reads the existing preview tap over SSH, binds only to
+loopback, and shows a stale-frame indicator. It does not command servos or call
+Gemini. Stop camera-only capture before starting another camera-owning runtime.
+
 
 The optional preview tap writes a reduced-rate JPEG and metadata. The existing
 SSH sidecar and Mac viewer expose camera/perception information and commanded
@@ -153,3 +176,11 @@ Passing local tests establishes software behavior with dummy/fake backends.
 Gesture quality, current calibration, startup posture, camera coverage, and
 physical stop behavior require a supervised hardware session. Known remaining
 issues are recorded in [the bug log](docs/bug_log.md).
+
+### Expanded supervised desk interaction
+
+The [desk interaction test](docs/live_interaction.md) connects the accepted
+notice, greeting, excited response, and settling performances to stationary
+Gemini observations. Run `uv run python -m tools.live_interaction --mode dev
+--probe-mock` for a dummy smoke test (one line). Physical gestures have operator
+acceptance; the expanded live semantic sequence still requires a hardware trial.
