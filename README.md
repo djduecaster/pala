@@ -6,7 +6,9 @@ PALA turns an IKEA NYMÅNE lamp into a physical desk companion. It notices someo
 
 https://github.com/user-attachments/assets/bdd66a1e-fc92-461a-8403-59784bc540fe
 
-**[Download the full-quality PALA V1 demo](https://github.com/djduecaster/pala/releases/tag/v0.1.0)** · 1 minute 47 seconds · The inline player uses a compressed copy; the full-quality film is distributed as `pala-v1-demo.mp4` in GitHub Releases. Its simulator and joint charts reconstruct commanded motion; they are not measured servo telemetry.
+**[Download the full-quality PALA V1 demo](https://github.com/djduecaster/pala/releases/tag/v0.1.0)** · 1 minute 47 seconds
+
+The simulator and joint charts reconstruct commanded motion; they are not measured servo telemetry.
 
 ## The interaction
 
