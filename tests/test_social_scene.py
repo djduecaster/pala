@@ -6,7 +6,7 @@ from tools.primitive_sim.social_scene import build_trace
 def test_desk_scene_is_bounded_and_returns_to_rest():
     trace = build_trace()
     samples = trace['samples']
-    assert {s['scene']['id'] for s in samples} == {'rest', 'notice', 'greet', 'excited', 'settle'}
+    assert {s['scene']['id'] for s in samples} == {'rest', 'notice', 'greet', 'excited', 'settle', 'breathing', 'breathing_final', 'point_left', 'point_right'}
     assert not {s['status'] for s in samples} & {'rejected', 'timed_out', 'canceled'}
     for sample in samples:
         assert sample['joint_angles_rad'][4] == 0

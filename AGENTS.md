@@ -1,12 +1,14 @@
 # PALA — Agent Working Notes (Read First)
 
 ## North Star
-PALA is a physical AI desk companion (lamp) running on Jetson. The system uses:
-- Fast local perception + deterministic control
-- Slow high-level behavior decisions (Gemini planned for the next narrow slice;
-  Cosmos Reason 2 was the original competition target)
-Goal: a reproducible portfolio demo with three expressive gestures and one
-camera-driven social interaction. Current behavior is intentionally hold-only.
+PALA V1 is a supervised physical AI desk companion running on Jetson.
+The default runtime holds position. The opt-in live demo uses stationary camera
+snapshots and Gemini structured observations to select deterministic local
+performances: notice, greeting, excitement, pointing, settling and idle breathing.
+The V1 portfolio demo is operator-reviewed. Preserve this working scope; new
+capabilities belong in a deliberate follow-up rather than a broad rewrite.
+Model observations never supply joint commands. Servo position is estimated from
+commands, not measured feedback.
 
 ## Repo workflow
 - Mac is source of truth: /Users/djduecaster/development/pala
@@ -35,7 +37,7 @@ camera-driven social interaction. Current behavior is intentionally hold-only.
 - `pala/types/models.py` — PerceptionState, ActionPlan, HardwareCommand
 - `config/robot.yaml` — calibration + loop rates + limits
 - `docs/architecture.md` — loop rates + contracts
-- `docs/porting_plan.md` — legacy mapping from `../pala_old/...`
+- `docs/README.md` — current operator and development guides
 
 ## Secrets
 - Jetson-only secrets live in: `~/.config/pala/env.sh`
@@ -48,13 +50,11 @@ camera-driven social interaction. Current behavior is intentionally hold-only.
 - Type hints + dataclasses
 - Make changes small; prefer surgical commits
 
-## Migration policy (from ../pala_old/pala_project/src)
-Migrate capabilities, not folders. Suggested order:
-1) Servo backend: PCA9685 + calibration mapping
-2) Control primitives: MoveTo, Hold, Glance/Breath; enforce limits
-3) Camera pipeline: GStreamer low-latency capture
-4) Perception: preprocess + TRT detector + pose + pointing head
-5) Planner: Cosmos interface + post-training dataset exporter + eval harness
+## V1 maintenance
+- Keep media and archived production notes under ignored `logs/local/` or `logs/`.
+- Distribute the portfolio film as a GitHub Release asset, not in Git history.
+- Preserve the simulator and optional telemetry sidecar.
+- Treat historical ratings as evidence for the tested recipe, not all future edits.
 
 ## How to work (expected agent behavior)
 - Propose a plan before making edits.
@@ -87,7 +87,7 @@ Migrate capabilities, not folders. Suggested order:
 ## Project Structure & Module Organization
 - `pala/` contains the core Python package, grouped by subsystem: `perception/`, `behavior/`, `control/`, `hardware/`, `config/`, `types/`, and `utils/`. The old planner package was removed.
 - `config/robot.yaml` holds runtime configuration (loop rates, logging, limits).
-- `docs/` includes architecture notes and porting plans.
+- `docs/` includes architecture and current operator guides.
 - Root scripts (`deploy_jetson.sh`, `run_jetson.sh`, `run_on_jetson.sh`) implement the Mac→Jetson dev loop.
 - `main.py` at repo root is a boot check; the main runtime entry is `pala/main.py`.
 

@@ -56,9 +56,13 @@
       "operator_rating": 5
     },
     "excite": {
-      "trial": "996eff8ac06a",
-      "hardware_trial": true,
-      "operator_rating": 5
+      "hardware_trial": false,
+      "status": "New staged recoil and oscillation; awaiting physical review",
+      "previous_version": {
+        "trial": "996eff8ac06a",
+        "hardware_trial": true,
+        "operator_rating": 5
+      }
     },
     "settle": {
       "trial": "3df8f9c049a1",
@@ -67,7 +71,8 @@
     }
   },
   "integration_notes": [
-    "Accepted desk workshop vocabulary. Startup/shutdown retained. Alternate settling approaches from notice and greeting require live acceptance."
+    "Accepted desk workshop vocabulary. Startup/shutdown retained. Alternate settling approaches from notice and greeting require live acceptance.",
+    "Pointing and +/-5 degree breathing are software-tested proposals pending hardware tuning. Left is positive yaw in the simulator; verify physical direction before acceptance."
   ],
   "performances": {
     "startup": {
@@ -236,71 +241,83 @@
       "end_state": "excited",
       "steps": [
         {
-          "name": "Wind up",
+          "name": "Lean forward",
           "target_deg": [
-            30.0,
-            -23,
-            29.0,
-            -12,
+            25,
+            10,
+            30,
+            10,
             0
           ],
-          "rate_deg_s": 19.599999999999998,
-          "hold_s": 0.1
+          "rate_deg_s": 16,
+          "hold_s": 0.25
         },
         {
-          "name": "First bright bounce",
+          "name": "Lean back through zero",
           "target_deg": [
-            50.0,
-            -5,
-            47.0,
-            32,
+            25,
+            -1,
+            30,
+            10,
             0
           ],
-          "rate_deg_s": 28.0,
-          "hold_s": 0.1
+          "rate_deg_s": 16,
+          "hold_s": 0
         },
         {
-          "name": "Bounce across",
+          "name": "Recoil and first sweep",
           "target_deg": [
-            20.0,
-            -21,
-            27.0,
-            -32,
+            50,
+            -30,
+            45,
+            10,
             0
           ],
-          "rate_deg_s": 30.799999999999997,
-          "hold_s": 0.1
+          "rate_deg_s": 25,
+          "hold_s": 0.15
         },
         {
-          "name": "Second smaller bounce",
+          "name": "Sweep across and dip",
           "target_deg": [
-            45.0,
-            -9,
-            43.0,
-            24,
+            10,
+            -30,
+            15,
+            10,
             0
           ],
-          "rate_deg_s": 28.0,
-          "hold_s": 0.1
+          "rate_deg_s": 28,
+          "hold_s": 0.15
         },
         {
-          "name": "Damped rebound",
+          "name": "Smaller second sweep",
           "target_deg": [
-            28.0,
-            -18,
-            32.0,
-            -14,
+            45,
+            -30,
+            40,
+            10,
             0
           ],
-          "rate_deg_s": 25.2,
-          "hold_s": 0.1
+          "rate_deg_s": 25,
+          "hold_s": 0.15
         },
         {
-          "name": "Stay warmly attentive",
+          "name": "Damped return",
           "target_deg": [
-            35.0,
+            25,
+            -30,
+            25,
+            10,
+            0
+          ],
+          "rate_deg_s": 22,
+          "hold_s": 0.2
+        },
+        {
+          "name": "Warm attentive landing",
+          "target_deg": [
+            35,
             -15,
-            25.0,
+            25,
             10,
             0
           ],
@@ -376,6 +393,122 @@
           "pose": "rest",
           "rate_deg_s": 10,
           "hold_s": 5
+        }
+      ]
+    },
+    "point_left": {
+      "end_state": "attention",
+      "steps": [
+        {
+          "name": "Follow lamp-relative left",
+          "target_deg": [
+            70,
+            -5,
+            15,
+            0,
+            0
+          ],
+          "rate_deg_s": 18,
+          "hold_s": 3
+        },
+        {
+          "name": "Return to visitor",
+          "pose": "attention",
+          "rate_deg_s": 18,
+          "hold_s": 1
+        }
+      ]
+    },
+    "point_right": {
+      "end_state": "attention",
+      "steps": [
+        {
+          "name": "Follow lamp-relative right",
+          "target_deg": [
+            -10,
+            -5,
+            15,
+            0,
+            0
+          ],
+          "rate_deg_s": 18,
+          "hold_s": 3
+        },
+        {
+          "name": "Return to visitor",
+          "pose": "attention",
+          "rate_deg_s": 18,
+          "hold_s": 1
+        }
+      ]
+    },
+    "breathe": {
+      "end_state": "rest",
+      "steps": [
+        {
+          "name": "Inhale",
+          "target_deg": [
+            0,
+            -32,
+            33,
+            0,
+            0
+          ],
+          "rate_deg_s": 16,
+          "hold_s": 0
+        },
+        {
+          "name": "Exhale",
+          "target_deg": [
+            0,
+            -48,
+            17,
+            0,
+            0
+          ],
+          "rate_deg_s": 16,
+          "hold_s": 0
+        },
+        {
+          "name": "Rest midpoint for camera",
+          "pose": "rest",
+          "rate_deg_s": 16,
+          "hold_s": 0
+        }
+      ]
+    },
+    "breathe_sway": {
+      "end_state": "rest",
+      "steps": [
+        {
+          "name": "Inhale",
+          "target_deg": [
+            6,
+            -32,
+            33,
+            0,
+            0
+          ],
+          "rate_deg_s": 16,
+          "hold_s": 0
+        },
+        {
+          "name": "Exhale",
+          "target_deg": [
+            -6,
+            -48,
+            17,
+            0,
+            0
+          ],
+          "rate_deg_s": 16,
+          "hold_s": 0
+        },
+        {
+          "name": "Rest midpoint for camera",
+          "pose": "rest",
+          "rate_deg_s": 16,
+          "hold_s": 0
         }
       ]
     }

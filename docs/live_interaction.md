@@ -1,123 +1,140 @@
 # Supervised desk interaction
 
-This opt-in V1 demo uses the physically reviewed desk gestures and Gemini
-observations. Default runtime behavior and the earlier live-greeting test remain
-available. A first live trial exercised noticing, greeting, and settling; the separate
-thumbs-up-triggered excited response remains unverified in the live sequence.
+This opt-in V1 demo uses shade-camera snapshots and Gemini observations to select
+fixed local performances: notice, greet, excitement, directional pointing, and
+settling. It has been exercised in supervised Jetson rehearsals. The default
+`pala.main` runtime remains hold-only. This guide describes the checked-in
+configuration; individual rehearsal results below refer to their recorded version.
 
-## Launch on Jetson
+## Launch
 
-Stop other servo owners and establish zero, then run in a named tmux window:
+Stop other camera/servo owners, establish physical zero, and run in a named tmux
+window using the [Jetson workflow](jetson_agent_workflow.md):
 
 ```bash
 cd ~/pala
-/home/dylan/.local/bin/uv run python -m tools.live_interaction \
+export PALA_GEMINI_MODEL='YOUR_AVAILABLE_GEMINI_MODEL_ID'
+uv run python -m tools.live_interaction \
   --mode jetson_full --enable \
   --gemini-key-file ~/.config/pala/gemini_api_key \
-  --gemini-model gemini-3.6-flash
+  --gemini-model "$PALA_GEMINI_MODEL"
 ```
 
-Confirm `ZERO`; startup moves to the established rest (-40/+25). Wait for
-`SOCIAL READY`. `arm` gives five seconds before the first image. One arm permits
-one interaction, with an observation window of 180 seconds:
+Choose an image-capable model available to your account; the placeholder above
+is not a real model ID. Complete [key and model setup](attention_probe.md#key-and-model-setup-on-jetson)
+first. Credentials stay in the local secret file. Confirm `ZERO` only with
+the lamp at the known starting posture. Startup moves to rest, then automatically
+arms with a five-second countdown. Add `--record-pov` for optional
+[POV recording](pov_recording.md).
 
-1. Start outside the image, then sit in the tested close-range seated position
-   and work. Visible presence triggers the quiet noticing gesture once.
-2. Look toward the shade camera. A fresh observation of attention triggers
-   the accepted greeting once. If a clear thumbs-up accompanies that attention
-   at rest or after noticing, the lamp greets and then performs excitement
-   automatically. At rest, this explicit invitation skips the quiet notice.
-3. If you have not already given an early thumbs-up, you can give one after
-   greeting to trigger excitement. Hold the cue for several seconds until it
-   is observed; snapshots are not continuous tracking. An accepted early cue
-   does not need to be repeated or held through the greeting.
+For a Mac smoke test with dummy camera/servos and no API call:
+
+```bash
+uv run python -m tools.live_interaction --mode dev --probe-mock
+```
+
+Mock observations are uncertain and do not trigger social gestures. Automated
+tests separately inject scripted observations to exercise dispatch.
+
+## Interaction and controls
+
+1. Enter the tested close-range seated camera view and work. Presence triggers
+   quiet noticing once. Look toward the shade camera to invite greeting.
+2. A clear thumbs-up with attention at rest or after noticing accepts greeting
+   followed by excitement. No second cue is required between those movements.
+   A thumbs-up after greeting can also trigger excitement, once per interaction.
+3. After greeting or excitement, point clearly left or right in the unmirrored
+   camera image. Hold the cue long enough for a snapshot. Release your hand
+   between cues; another point requires a valid present-person/gesture-none
+   observation and at least eight seconds since the last accepted point.
 4. Return to work. Two valid away/absent observations spanning at least four
-   seconds trigger settling. Brief look-aways and uncertain results do not count
-   as confirmed disengagement. Before greeting, the away grace is 20 seconds so
-   the initial noticing gesture does not immediately disengage.
-5. After settling, observation stops. Explicitly `arm` for another interaction.
+   seconds trigger settling. Before greeting, the away grace is 20 seconds.
+5. Normal settling automatically rearms after a 0.75-second stationary pause.
+   Presence memory prevents repeated notice/settle cycles for someone still
+   working. Two valid absent-at-rest observations spanning four seconds permit
+   a future arrival to trigger notice again.
 
-`pause` stops observation and invalidates pending decisions without aborting
-motion. `reset` disarms and settles if currently idle away from rest; during
-motion it only disarms, so issue reset again after completion. `status` reports
-runtime and observation state. `shutdown`/`q` returns to zero and disables;
-`stop`/Ctrl-C disables immediately without recovery motion. If 180 seconds
-expires, observations stop and the current motion/hold remains; reset or shut
-down explicitly. No fresh/valid result means no model-triggered movement.
+Each arm has a 180-second observation window. Expiry disarms social decisions;
+the current posture remains and enabled idle breathing may continue at rest.
 
-## Evidence and boundaries
+| Command | Effect |
+|---|---|
+| `arm` | Start a five-second countdown; during breathing, wait for rest midpoint first |
+| `pause` / `cancel` | Disarm observation, suppress automatic rearming, and suspend breathing |
+| `reset` | Disarm and suspend breathing; settle if idle away from rest; during motion, issue again after completion |
+| `breathe-on` / `breathe-off` | Enable/suspend subsequent idle cycles; active cycle finishes at midpoint |
+| `status` | Report runtime and observation state |
+| `shutdown` / `q` | Controlled return to zero, disable outputs, and exit |
+| `stop` / Ctrl-C | Disable immediately without recovery motion |
 
-`config/desk_performances.json` contains the reviewed workshop segments with
-preparation/reset removed. Notice: 4/5, trial b710447c26b0. Greeting: 5/5,
-4c1f6a2d62ff. Excited: 5/5, 996eff8ac06a, at the accepted 70% of original
-simulator rates. Settling: 5/5, 3df8f9c049a1. Full workshop composition:
-c278313a5769, operator said it was pretty great (no numerical rating).
+After pause/reset, use `arm` to resume observations and `breathe-on` if desired.
 
-The accepted excited endpoint is yaw=35/pitch1=-15/pitch2=25/roll=10/pitch3=0.
-Greeting ends at yaw=25/pitch1=-15/pitch2=30/roll=10/pitch3=0. Alternate
-settling approaches from noticing or greeting release their own pose first,
-then center and rest; those new paths still need physical review.
+## Current motion and observation settings
 
-Gemini reports only person, apparent attention, visible hand gesture, and brief
-evidence. Local state controls gesture selection, one-shot limits, and motion.
-The network worker cannot actuate. Capture runs only while stationary, with
-0.75 seconds after completed motion before a new frame can be used. There is
-one request in flight, a six-second image-age gate, current-camera freshness
-checking, and plan/stage/generation matching. Pause, changed context, failed
-requests, and invalid responses cannot trigger a gesture. Requests use the
-existing 20-second provider timeout with no automatic retries.
+`config/desk_performances.json` is the live motion source of truth. Joint order
+is yaw, pitch1, pitch2, roll, pitch3, in degrees:
 
-Logs and JPEGs are under `logs/attention_probe/<session>/`; command traces and
-calibration snapshots are under `logs/runs/<run>/`. Credentials stay on Jetson.
-The model receives still images from the moving shade camera. Visibility at
-notice, greeting, and excited poses and reliable thumbs-up recognition remain
-live-test questions; success of the resting-view probe does not establish them.
+| Pose | Values |
+|---|---|
+| Rest | `[0, -40, 25, 0, 0]` |
+| Attention | `[25, -15, 30, 10, 0]` |
+| Excited endpoint | `[35, -15, 25, 10, 0]` |
+| Point left / right | `[70, -5, 15, 0, 0]` / `[-10, -5, 15, 0, 0]` |
 
-For a Mac smoke test use `--mode dev --probe-mock` without `--enable` or a key.
-Mock responses are uncertain and do not cause social gestures. Automated tests
-inject scripted observations separately to exercise the full runtime dispatch.
+Pointing holds three seconds then returns to attention. It follows a general
+direction, not a triangulated target. Excitement leans pitch1 to +10, recoils
+through -1 to -30 with staged yaw/pitch2 sweeps, then returns to its endpoint.
 
-## First live review — 2026-09-07
+Idle breathing cycles pitch1 ±8 degrees around rest with pitch2 compensation;
+every third cycle adds yaw ±6 degrees. Pitch3 remains zero. Current 16°/s rates
+produce approximately two seconds of motion, followed by stationary waiting and
+inference. This faster motion setting is distinct from the four-second breathing
+cycles recorded in the September 12 rehearsal snapshots.
 
-Probe `20260907_191959_d600fe`, runtime `20260907_192021`: seven valid model
-responses; median request latency 3.09 seconds (range 2.50–5.96). The first
-response was discarded at 6.07 seconds image age, exceeding the six-second
-freshness gate. The next observation triggered notice. A later image clearly
-showed attention plus thumbs-up; because the state was still noticed, local
-logic selected greet. Two post-greeting images showed attention elsewhere and
-triggered settle_attention. No excite command occurred. The sequence at the time of that trial
-required a new thumbs-up observation after greeting; do not describe this trial
-as validating the excited response end to end.
+Requests use `reasoning_effort=minimal`, a 0.25-second inter-request pause, one
+request in flight, and a 0.75-second stationary-frame wait. The lamp holds through
+the model response. Capture cadence therefore includes motion and inference;
+it is not continuous tracking or a fixed frame interval.
 
-Capture-to-first-command timings: notice 3.21s, greet 3.22s, settling 3.58s.
-The local decision-to-command delays were 10–22ms. These are not measured servo
-motion onset or time since the operator first presented a cue. No execution
-failures were present. Requested shutdown completed zero and exited cleanly.
-Operator feedback: mostly worked, looked reasonable, went pretty well; lamp
-glare was uncomfortable and a thin white disk was suggested. No numeric rating
-was given. No optical modification has been made or evaluated.
+Gemini reports presence, apparent attention, visible gesture, and brief evidence.
+Local code owns stage transitions, fixed recipes, limits, and execution. A
+six-second image-age gate, current-camera freshness, and plan/stage/generation
+matching reject invalid or obsolete observations. The worker cannot actuate.
+Requests have a 20-second provider timeout and no automatic transport retries.
+A later fresh observation may be requested after failure.
 
-Copies and a structured review are under
-`logs/attention_probe_jetson/20260907_191959_d600fe/`; runtime evidence is under
-`logs/live_greeting_jetson/20260907_192021/`. Review the interaction policy for
-an early thumbs-up, or explicitly present the cue again after the greeting in
-the next trial. Preserve the current freshness gate pending further evidence.
+Early thumbs-up accepts a two-movement response with a 30-second continuation
+expiry. Greeting must complete at its expected endpoint before excitement.
+Pause, reset, disarm, rejection, failure, shutdown, or unexpected completion
+clears the continuation. Lowering a hand during greeting does not cancel the
+already accepted response; no image is interpreted between those movements.
 
-## Early thumbs-up response
+## Rehearsal evidence and limitations
 
-An eligible, valid, fresh observation of a person looking toward the camera
-with a thumbs-up, at rest or after noticing, accepts `greet -> excite` as one
-response. Greeting must complete at its expected attentive endpoint before
-excitement is dispatched once. No second image or hand gesture is needed.
-The accepted continuation expires after 30 seconds and is cleared by pause,
-reset, disarm, motion rejection, failure, shutdown, or unexpected completion.
-The 180-second arm window still applies. Later observations cannot repeat the
-excited response in the same interaction.
+The September 12 full-choreography review recorded probe
+`20260912_153135_3334c8` and runtime `20260912_153200`: notice, greeting, staged
+excitement, both pointing directions, settling, breathing, sway, and a clean
+controlled shutdown. The operator called it “a very successful run.” Across 32
+valid responses, median request latency was 2.67 seconds; one stale result was
+rejected. These are local rehearsal records, not a published benchmark.
 
-The six-second freshness gate applies when accepting the original cue. The
-second movement completes the accepted response, rather than reusing that image
-as new evidence. The camera is not consulted between these two movements, so a
-person lowering their hand or looking away during greeting does not cancel the
-accepted response. After excitement, fresh observations resume for settling.
-`sequence_accepted` and `sequence_continuation` log the originating trial ID.
-This revised policy is software-tested; physical end-to-end acceptance is pending.
+The later minimal-thinking snapshot (`20260912_154543_5a0b12`, runtime
+`20260912_154604`) recorded 17 valid responses with median 1.76 seconds
+(range 1.37–4.51), no stale rejections, and completion of greeting, excitement,
+left pointing, and settling. Operator feedback was “pretty much perfect.” That
+snapshot was taken during an active run and does not establish final shutdown or
+right pointing for that run. Latency comparisons were not same-image experiments.
+
+Physical success is based on operator observation. Logs show commanded angles
+and completion, not measured servo position, physical motion onset, or reliability
+across users, lighting, and camera views. Earlier gesture ratings in the
+[workshop report](workshop_2026-09-07.md) apply to those recipe versions.
+
+Model observations and JPEGs are local under `logs/attention_probe/<session>/`;
+command traces and configuration snapshots are under `logs/runs/<run>/`. Logs,
+keys, and raw media are not required published assets. Simulator playback
+validates configured motion, not physical clearance or Gemini recognition:
+
+```bash
+uv run python -m tools.primitive_sim.social_scene
+```

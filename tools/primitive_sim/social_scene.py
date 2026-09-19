@@ -18,13 +18,13 @@ ROOT = Path(__file__).resolve().parents[2]
 def build_trace() -> dict[str, Any]:
     cfg = load_config(str(ROOT / 'config/robot.yaml'))
     scene = json.loads((ROOT / 'tools/primitive_sim/desk_scene.json').read_text())
-    performances = json.loads((ROOT / 'config/performances.json').read_text())
+    performances = json.loads((ROOT / 'config/desk_performances.json').read_text())
     poses = performances['poses_deg']
     segments: list[SimSegment] = []
     cues: dict[str, dict[str, str]] = {}
     previous = [0.0] * len(cfg.joint_names)
     for beat in scene['beats']:
-        for index, step in enumerate(beat['steps']):
+        for index, step in enumerate(performances['performances'][beat['performance']]['steps']):
             name = f"{beat['id']} / {index + 1}: {step['name']}"
             cues[name] = {k: beat[k] for k in ('id', 'title', 'human', 'intent')}
             target = poses[step['pose']] if 'pose' in step else step.get('target_deg')

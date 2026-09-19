@@ -1,8 +1,9 @@
 # Model transport diagnostics
 
-The runtime remains hold-only. Model probes run independently and do not
-activate planning or actuate the lamp. The next Gemini behavior contract will
-be designed after the gesture workshop.
+The default runtime remains hold-only. Generic transport probes run independently
+and do not actuate the lamp. The implemented camera/Gemini demo is documented in
+[live interaction](live_interaction.md); its validated semantic observations
+feed local gesture selection.
 
 The surviving transport is under `pala/behavior/model_clients/`. It supports
 provider-aware URL normalization and chat requests. `tools/model_provider_probe.py`
@@ -30,6 +31,6 @@ The `cosmos` configuration block is retained for these diagnostic tools.
 runtime planner smoke script was removed because its assertions referenced
 behavior that no longer exists.
 
-Before future API integration, check the selected provider's current model
+Before changing a provider or model, check the selected provider's current model
 and parameter documentation. Historical model IDs and quota assumptions are
 not a current recommendation. See [Google's compatibility reference](https://ai.google.dev/gemini-api/docs/openai).

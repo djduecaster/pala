@@ -50,7 +50,8 @@ tool:
   offset_5: [-0.0686, 0.0762, 0.0]
   rot_5_deg_zyx: [0.0, 180.0, 0.0]
 
-# Placeholder calibration to be filled when porting PCA9685 driver
+# Calibration for the existing physical build; verify horn alignment, mapping and
+# safe limits independently before using these values on another mechanism.
 servo_calibration:
   bus_number: 7
   address: 0x40
@@ -89,8 +90,8 @@ camera:
     video/x-raw,format=RGB !
     appsink name=appsink emit-signals=true max-buffers=2 drop=true sync=false
 
-# Reserved remote-model connection settings. Runtime behavior remains hold-only
-# until the new behavior contract is designed in Phase 3.
+# Generic model-tool connection settings; disabled for the default hold runtime.
+# The opt-in live Gemini demo uses its own CLI/environment model configuration.
 cosmos:
   enabled: false
   base_url: null

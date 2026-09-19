@@ -13,3 +13,22 @@ node_modules/
 models/
 logs/
 jetson_logs/
+
+# Local production media, source footage and archived working notes
+/local/
+*.mp4
+*.mov
+*.MOV
+*.mkv
+*.webm
+*.avi
+*.wav
+*.aiff
+*.mp3
+*.imovielibrary/
+
+# Local test/tool caches
+.pytest_cache/
+.coverage
+htmlcov/
+.ruff_cache/

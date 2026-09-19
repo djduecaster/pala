@@ -1,4 +1,4 @@
-# Bug Log (Active Only)
+# Known issues from prior review
 
 Cleanup review: 2026-09-05. Resolved/retired entries below were checked against
 the cleanup changes. Retained telemetry and legacy diagnostic findings are
@@ -7,7 +7,7 @@ backlog from the earlier review, not newly reproduced hardware results.
 Conventions:
 - Severity: `P1` high, `P2` medium, `P3` low.
 - Keep IDs stable.
-- This file contains only currently active bugs.
+- Retained entries are unresolved review findings; recheck the current code before treating them as reproduced failures.
 
 | ID | Severity | Area | Summary | Evidence |
 |---|---|---|---|---|

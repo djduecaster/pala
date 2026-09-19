@@ -214,46 +214,15 @@ Open:
 http://127.0.0.1:8766/tools/primitive_sim/web/index.html?studio=0&trace=/logs/primitive_sim/desk_scene.json
 ```
 
-Use **Play / pause** above the lamp, or jump between the five labeled moments.
-The timeline and speed controls allow closer inspection. The approximately
-56-second scene is authored in `tools/primitive_sim/desk_scene.json`:
+Use **Play / pause** above the lamp or jump between labeled moments. The scene
+order and captions come from `tools/primitive_sim/desk_scene.json`; motion comes
+from the same `config/desk_performances.json` recipes as the live demo.
+Regenerate the trace after recipe changes instead of relying on an old duration
+or a hand-copied pose list.
 
-1. Established rest, pitch1=-40/pitch2=+25.
-2. Chair enters: a quiet yaw=12/pitch1=-34/pitch2=30/roll=3 glance.
-3. Eye contact: a broader greeting with yaw 11..39, pitch1 -22..-8,
-   pitch2 23..39, roll -28..28 degrees, followed by a damped rebound.
-4. Thumbs-up: two alternating bounces, yaw 20..50, pitch1 -23..-5,
-   pitch2 27..47, roll -32..32 degrees, then yaw=35/pitch1=-15/pitch2=25/roll=10/pitch3=0.
-5. Back to work: four-second grace period, release tilt, face forward,
-   move both pitch joints to rest, and hold.
-
-Human actions are captions, not a simulated human model. Observation delays
-(2.5/2.8 seconds) are illustrative. There is no Gemini call, camera access,
-thumbs-up detector, or hardware output. The scene exercises TrajectoryExecutor
-at 80 Hz with unity style scales and the workshop's 1e-6-radian tolerance.
-Pitch3 stays zero. Configured targets are checked before generating the trace.
-The existing live performance library is not changed or deployed by this tool.
-
-This viewer uses the retained kinematic geometry; it cannot establish physical
-clearance, camera framing after motion, or how servo loading changes the rhythm.
-Before promotion, review the scene visually, then try each new movement on the
-lamp. Gemini presence/attention/affirmative-gesture decisions and automatic
-settling remain a separate integration step; scripted timing is not evidence
-that those decisions work live.
-
-Pitch2 direction correction: the operator confirmed positive pitch2 lifts away
-from the ground. Both viewer paths now subtract the joint value from the elbow
-zero offset. The temporary higher pitch2 scene targets were reverted because
-they compensated for an incorrect rendering direction. Hardware calibration,
-limits, zero offsets, and live performance recipes were not changed.
-
-Hardware workshop revision: greeting pitch2 targets were lowered by 10 degrees
-(30, 39, 23, 35, then 30 at the attention landing). This applies only to the
-greeting beat; other beats retain their candidates pending individual tests.
-The operator accepted the revised greeting at 5/5 in trial 4c1f6a2d62ff.
-
-Excited workshop candidate v2 shifts the oscillation center +10 degrees in yaw
-and lowers pitch2 5 degrees. Trial 996eff8ac06a was accepted at 5/5 at 70% of the original authored rates.
-The simulation now uses those accepted rates too. Settling starts from yaw=35,
-pitch1=-15, pitch2=25, roll=10 and keeps pitch2 at 25 throughout, avoiding an
-unwanted head lift. Settling was accepted at 5/5 in physical trial 3df8f9c049a1.
+Human actions are captions. This tool makes no Gemini requests, opens no camera,
+and writes no hardware output. It runs the production executor at 80 Hz with
+unity style scales and 1e-6-radian completion tolerance, and checks configured
+target limits. It does not establish physical clearance, camera framing, measured
+servo position, or recognition accuracy. For the real supervised behavior and its
+rehearsal boundaries, see [live interaction](../../docs/live_interaction.md).

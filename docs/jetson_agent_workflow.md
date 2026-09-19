@@ -5,9 +5,16 @@ operators. It is intentionally separate from the PALA runtime architecture:
 the Jetson shell and tmux session are operator tooling, not another runtime
 loop.
 
+## First-time setup
+
+Complete the [recreation guide](recreating_pala.md#software-environment) before
+using the deployment scripts on a fresh Jetson. Their plain-venv bootstrap is not
+a system dependency installer and does not expose system PyGObject/GStreamer.
+
 ## SSH paths
 
-The local SSH configuration currently provides two aliases:
+The development setup uses two locally configured SSH aliases (configure these
+for your own Jetson before using the examples):
 
 - `jetson`: the USB device-mode path at the `192.168.55.x` link-local address.
 - `jetson-wifi`: the Jetson's normal Wi-Fi address.

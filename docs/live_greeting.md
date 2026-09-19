@@ -1,6 +1,7 @@
 # Supervised live Gemini greeting
 
-This test lets you judge response timing by watching the lamp move. The operator
+This earlier diagnostic lets you judge response timing by watching the lamp move.
+For the current V1 demo, use [live interaction](live_interaction.md). The operator
 chose to skip additional numbered-camera and shadow-only trials. It is explicitly
 armed and allows one Gemini-triggered greeting per arm, not autonomous ongoing
 interaction. Rest is `[0, -40, 25, 0, 0]` joint degrees, accepted for a seated,
@@ -11,10 +12,10 @@ owns both camera and servo output, and continues publishing the existing preview
 tap for the Mac browser. From `~/pala` on Jetson:
 
 ```bash
-/home/dylan/.local/bin/uv run python -m tools.live_greeting \
+uv run python -m tools.live_greeting \
   --mode jetson_full --enable \
   --gemini-key-file ~/.config/pala/gemini_api_key \
-  --gemini-model gemini-3.6-flash
+  --gemini-model "${PALA_GEMINI_MODEL:?Set an available image-capable Gemini model first}"
 ```
 
 Confirm established physical zero. Startup moves to rest. Wait for

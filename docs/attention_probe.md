@@ -49,7 +49,16 @@ for example `~/.config/pala/gemini_api_key`, and use `--gemini-key-file` below.
 `PALA_GEMINI_API_KEY` and `GOOGLE_API_KEY` are also recognized. No key is accepted
 on the command line as a literal value or written to probe logs.
 
-For a temporary environment variable without placing the key in shell history:
+To create the key file without putting the key in shell history (Jetson Bash):
+
+```bash
+install -d -m 700 ~/.config/pala
+(umask 077; read -r -s -p 'Gemini API key: ' key; echo;
+ printf '%s' "$key" > ~/.config/pala/gemini_api_key)
+chmod 600 ~/.config/pala/gemini_api_key
+```
+
+For a temporary environment variable instead (Jetson Bash):
 
 ```bash
 read -r -s -p 'Gemini API key: ' GEMINI_API_KEY; echo

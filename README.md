@@ -1,186 +1,97 @@
-# PALA: Programmable Autonomous Lamp Assistant
+# PALA
 
-PALA is a five-degree-of-freedom desk lamp built from an IKEA NYMANE lamp,
-custom printed servo mounts, COTS servos, a PCA9685 board, a Logitech camera,
-and an NVIDIA Jetson. The current goal is a repeatable portfolio demo: notice
-a person, acknowledge them expressively, attend, and settle.
+**Programmable Autonomous Lamp Assistant** — a five-axis desk lamp with a little character.
 
-## Current baseline
+PALA turns an IKEA NYMÅNE lamp into a physical desk companion. It notices someone sitting down, acknowledges a look toward its camera, celebrates a thumbs-up, follows a pointing direction, and settles back into a breathing rest pose. This is my first robotics portfolio project: custom printed mechanisms, embedded control, camera perception, and expressive motion brought together in a supervised V1 demo.
 
-By default, the runtime captures frames and emits a persistent **hold** action.
-An opt-in manual mode executes saved gestures in the four-loop runtime. It does
-not currently recognize people, call Gemini/Cosmos, or autonomously choose gestures.
-The four-loop foundation, servo mapping, motion primitives, and optional
-telemetry remain. The workshop edits choreography; the manual runtime composes accepted gestures
-before autonomous behavior is connected.
+[![PALA — physical demo, simulator and commanded motion](docs/assets/pala-demo.jpg)](https://github.com/djduecaster/pala/releases/tag/v0.1.0)
 
-Earlier NVIDIA competition and V3/V4 behavior systems are historical. See
-[architecture](docs/architecture.md), [next steps](docs/todo.md), and the
-[project assessment](docs/assessment_2026-09-04.md).
+**[Watch the PALA V1 demo](https://github.com/djduecaster/pala/releases/tag/v0.1.0)** · 1 minute 47 seconds · The film is distributed as `pala-v1-demo.mp4` in GitHub Releases. Its simulator and joint charts reconstruct commanded motion; they are not measured servo telemetry.
 
-## Run locally on Mac
+## The interaction
 
-From `/Users/djduecaster/development/pala`, with `uv` installed:
+| You… | PALA… |
+|---|---|
+| Sit down and work | Makes a small noticing movement |
+| Look toward the shade camera | Gives an expressive greeting |
+| Give a thumbs-up | Leans forward, recoils, and adds coordinated yaw/pitch oscillations |
+| Point left or right | Turns toward that general direction, then returns |
+| Turn back to work | Disengages and settles into rest |
+| Leave it resting | Breathes gently, with occasional yaw motion |
 
-```bash
-uv sync
-uv run python -m pala.main
+The performances were tuned on the real lamp through repeated operator ratings. Small movements often read poorly, so the final gestures use larger coordinated changes and distinct timing. The shade-mounted camera also shaped the resting posture: a useful view and a convincing pose had to work together.
+
+## How it works
+
+Gemini interprets a stationary camera snapshot and returns structured observations of presence, apparent attention, and visible gestures. Local Python logic decides whether an observation is fresh and appropriate for the current interaction stage, then selects a fixed performance. The model never supplies servo angles.
+
+```mermaid
+flowchart LR
+    C[Shade camera] --> S[Stationary snapshot]
+    S --> G[Gemini observation]
+    G --> B[Local behavior gates]
+    B --> P[Fixed performance]
+    P --> T[Trajectory and limits]
+    T --> H[PCA9685 / five servos]
 ```
 
-The checked-in configuration defaults to dummy camera and servo backends.
-For a bounded check:
+The core runtime retains four independent loops: perception, behavior, control, and hardware. Their shared contracts are `PerceptionState → ActionPlan → HardwareCommand`. Latest-value exchange avoids queues of old camera frames; execution applies configured joint limits, and the hardware loop has a deadman timeout. The deadman is software-only, not an independent electrical emergency stop;
+hardware operation requires supervision. See the [architecture guide](docs/architecture.md).
+
+| Layer | Implementation |
+|---|---|
+| Mechanism | IKEA NYMÅNE lamp, custom 3D-printed servo mounts, five hobby-servo joints |
+| Compute and actuation | NVIDIA Jetson, PCA9685 PWM driver |
+| Vision | Logitech shade-mounted camera, GStreamer capture, Gemini image observations |
+| Control | Python, deterministic choreography, calibrated joint-to-servo mapping |
+| Development | Mac dummy backends, browser simulator, gesture workshop, optional telemetry |
+| Capture | Optional FFmpeg POV recording and frame/command logs |
+
+## Try it without hardware
+
+Install Python 3.10–3.12 and [uv](https://docs.astral.sh/uv/), then:
 
 ```bash
+git clone https://github.com/djduecaster/pala.git
+cd pala
+uv sync
 PALA_MAX_RUNTIME_S=3 uv run python -m pala.main --mode dev
 uv run pytest -q
 ```
 
-Tests use pytest; hardware tests use fakes. Python is pinned in
-`.python-version`, with the supported range defined in `pyproject.toml`.
+The default runtime holds position using dummy backends. It does not start the live camera-driven performance or call Gemini.
 
-| Mode | Camera | Servo | Behavior |
-|---|---|---|---|
-| `dev` | Dummy RGB frames | Dummy | Hold |
-| `jetson_perception` | Jetson GStreamer | Dummy | Hold |
-| `jetson_full` | Jetson GStreamer | PCA9685 | Hold |
-
-`--mode` overrides `config/robot.yaml`. The camera-only Jetson mode is wired
-in code; on-device operation still needs verification in the current lab.
-Starting `jetson_full` can actuate the lamp even with hold-only behavior:
-the executor's initial position is a software zero estimate, not an encoder
-measurement of the physical posture.
-
-## Manual interaction
+For the local motion simulator:
 
 ```bash
-uv run python -m pala.main --manual --mode dev
+uv run python tools/primitive_sim/run.py --scenario studio --port 8766
 ```
 
-After startup reaches rest, type `demo` to greet, attend, and settle. Type
-`shutdown` to return to zero and exit; `stop` or Ctrl-C exits without recovery
-motion. The [operator guide](docs/manual_interaction.md) covers individual commands,
-Jetson startup confirmation, logs, and the remaining physical acceptance checks.
-Recipes live in `config/performances.json`; pitch3 remains fixed.
+Open <http://127.0.0.1:8766/tools/primitive_sim/web/lamp_sim.html>. The [simulator guide](tools/primitive_sim/README.md) covers playback and joint checking. Simulation is a preview of commanded geometry, not a physical validation.
 
-## Supervised Gemini greeting
+For the physical demo, follow the [Jetson workflow](docs/jetson_agent_workflow.md), then the [live interaction guide](docs/live_interaction.md). Hardware runs require the calibrated mechanism, a clear workspace, the established zero posture, and local credentials. The live tool moves to rest and automatically arms after its startup checks. Rest and shutdown zero are intentionally different positions.
 
-The [live greeting test](docs/live_greeting.md) adds explicitly armed camera
-observations that can trigger one accepted greeting. It holds attention afterward;
-`reset` settles and `arm` starts another trial. No automatic rearming or disengagement
-is enabled.
+## V1 boundaries
 
-## Gemini attention experiment
+This is a working, supervised prototype rather than continuous human tracking. Model requests introduce variable latency; observations pause during motion, and the seated demo framing is deliberately constrained. Pointing selects left/right choreography rather than locating an exact object. Hobby servos provide no measured joint feedback, so commanded trajectories and simulator traces cannot establish actual position. The fifth joint is available but largely unused in the final gestures because of its mechanical limitations.
 
-Run `uv run python -m tools.attention_probe --mode dev --probe-mock` for an
-offline rehearsal of four numbered, five-second snapshot trials. The physical
-probe enters rest through the main runtime, sends only requested snapshots to
-Gemini, and logs proposed responses without model-driven movement. See the
-[probe guide](docs/attention_probe.md) for Jetson and API-key setup.
+V1 is a completed portfolio milestone. A future version could improve the mechanism, sensing, and responsiveness, but those are separate work rather than requirements for this demo.
 
-## Gesture workshop tools
+## Recreating and reusing PALA
 
-For an interactive sequence editor with trial logs, ratings, and saved favorites:
+Start with the [recreation guide](docs/recreating_pala.md) for parts, calibration,
+system dependencies and staged bring-up. CAD/STL and a few hardware details are
+still pending; this is a documented prototype rather than a complete build kit.
+Software and textual documentation are [MIT licensed](LICENSE).
+[Separate scope rules](docs/licensing.md) apply to media and CAD.
 
-```bash
-uv run python -m tools.gesture_workshop
-```
+## Explore the project
 
-This defaults to dummy servos. On the Jetson, use `--hardware --enable` for
-operator-confirmed physical trials. See the [workshop guide](docs/gesture_workshop.md)
-for editing commands, replay, output holding, and stop behavior.
+- [Documentation index](docs/README.md): current guides and dated evidence
+- [Live interaction](docs/live_interaction.md): behavior, controls, timing, and limitations
+- [Gesture workshop](docs/gesture_workshop.md): pose and performance tuning
+- [POV recording](docs/pov_recording.md): camera-only and live-demo capture
+- [Robot configuration](config/robot.yaml) and [desk performances](config/desk_performances.json)
+- [Portfolio media](docs/portfolio_media.md): release asset and local production archive
 
-Run motion without hardware:
-
-```bash
-uv run python tools/expressive_movement_demo.py --runtime-mode dev --dry-run
-uv run python tools/validate_primitives.py --runtime-mode dev --dry-run --scenario single --primitive nod --duration-s 1 --no-neutral-start --no-neutral-end
-uv run python -m pala.control.primitive_tuner show
-```
-
-The simulator retains primitive traces, playback, and joint geometry checking.
-Its simulated positions are commanded trajectories, not a physics model of
-servo backlash, torque, gravity, or mechanical safety. See the
-[simulator guide](tools/primitive_sim/README.md) for launch commands.
-
-The expressive demo and validation runner require `--enable` for real servo
-writes; `--dry-run` avoids constructing the real servo backend. These tools
-are separate runners and do not inherit the main runtime's hardware-loop
-deadman. Review starting posture and calibrated motion limits before an
-operator-supervised powered session.
-
-`tools/hw_calibrate.py` is the dedicated hardware calibration tool.
-`tools/test_camera_fps.py` measures capture and can save snapshots. Camera and
-servo checks are separate; do not run concurrent owners of the same device.
-
-## Telemetry
-
-For a lightweight browser camera view, start the camera-only runtime on Jetson
-(`uv run python -m pala.main --mode jetson_perception`), then on Mac run
-`uv run python -m tools.camera_preview --jetson-host jetson-wifi` and open
-http://127.0.0.1:8765. It reads the existing preview tap over SSH, binds only to
-loopback, and shows a stale-frame indicator. It does not command servos or call
-Gemini. Stop camera-only capture before starting another camera-owning runtime.
-
-
-The optional preview tap writes a reduced-rate JPEG and metadata. The existing
-SSH sidecar and Mac viewer expose camera/perception information and commanded
-joint state:
-
-```bash
-uv run python -m tools.telemetry.mac_viewer --jetson-host jetson-wifi --focus runtime
-```
-
-This command connects to a running Jetson setup; it is not a local dummy
-runtime command. Live GUI video requires Python with Tk support. The viewer
-does not measure actual servo position or prove that a command was applied.
-Old reasoning and curation facilities remain opt-in for historical sessions.
-See [telemetry usage](tools/telemetry/README.md).
-
-The runtime writes `perception.jsonl` and `actions.jsonl` under a run directory
-in `logs/runs/`. Preview files live separately under `logs/telemetry/preview/`.
-Use the matching run when reviewing evidence; older behavior logs do not
-describe the current process.
-
-## Jetson workflow
-
-The Mac checkout is the source of truth; the Jetson mirror is `~/pala`.
-The existing deployment commands remain:
-
-```bash
-make deploy
-make run
-make go
-```
-
-`make go` deploys and runs over foreground SSH. Deployment scripts use the
-`jetson` USB alias; direct Wi-Fi agent work uses `jetson-wifi` and the shared
-`pala` tmux session. `make go-tmux` is a proposal, not an implemented target.
-Read [Jetson agent workflow](docs/jetson_agent_workflow.md) before using that
-shared shell. Deployment uses rsync deletion: preserve any Jetson-only
-artifacts outside the mirror or pull them back before deployment.
-
-Jetson camera capture requires GStreamer/PyGObject system packages visible to
-the Python environment. For initial setup, create a system-site-packages venv
-and install the project editable (`uv venv --system-site-packages`, `uv sync`,
-`uv pip install -e .`). Inspect the existing environment before recreating it.
-DeepStream is not required by the current runtime; historical bring-up notes
-remain in [the reintroduction reference](pala/perception/DEEPSTREAM_REINTRODUCTION.md).
-
-Jetson-only secrets remain in `~/.config/pala/env.sh`. Keep credentials out of
-the repository and YAML. Retained model transport/probes are independent
-diagnostics; changing `cosmos.enabled` does not activate runtime planning.
-
-## Validation boundary
-
-Passing local tests establishes software behavior with dummy/fake backends.
-Gesture quality, current calibration, startup posture, camera coverage, and
-physical stop behavior require a supervised hardware session. Known remaining
-issues are recorded in [the bug log](docs/bug_log.md).
-
-### Expanded supervised desk interaction
-
-The [desk interaction test](docs/live_interaction.md) connects the accepted
-notice, greeting, excited response, and settling performances to stationary
-Gemini observations. Run `uv run python -m tools.live_interaction --mode dev
---probe-mock` for a dummy smoke test (one line). Physical gestures have operator
-acceptance; the expanded live semantic sequence still requires a hardware trial.
+`pala/` contains the runtime; `tools/` contains operator tools and simulator sidecars; `tests/` covers contracts and software behavior. Videos, raw captures, model files, and archived working notes remain local and ignored by Git. Passing software tests does not establish physical acceptance of a new motion recipe.

@@ -42,9 +42,12 @@ def main(argv: Optional[list[str]] = None) -> int:
             raise ValueError("--probe-mock is limited to dev mode")
         if args.live_interaction:
             from tools.live_interaction import LiveInteraction
-            if not {"notice", "excite"} <= library.performances.keys():
+            if not {"notice", "excite", "point_left", "point_right", "breathe", "breathe_sway"} <= library.performances.keys():
                 raise ValueError("Live interaction requires the desk performance library")
             probe = LiveInteraction.from_args(args)
+            probe.breathing = True
+            probe.auto_arm = True
+            probe.auto_arm_pending = True
         elif args.live_greeting:
             from tools.live_greeting import LiveGreeting
             probe = LiveGreeting.from_args(args)
@@ -297,6 +300,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         threading.Thread(target=_thread_guard("hardware", hardware_loop), daemon=True),
     ]
 
+    recorder = None
+    if args.record_pov:
+        from pathlib import Path
+        from tools.pov_recorder import PovRecorder
+        from uuid import uuid4
+        recording_dir = Path(run_log_dir or 'logs/recordings') / ('pov_' + uuid4().hex[:8])
+        recorder = PovRecorder(latest_frame, recording_dir, fragmented=True, max_lag_s=None)
+        recorder.start()
+
     for t in threads:
         t.start()
 
@@ -409,6 +421,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             preview_tap.close()
         except Exception:  # noqa: BLE001 - shutdown should not crash process exit
             logger.exception("preview tap close failed")
+        if recorder is not None:
+            recorder.close()
         if perception_log:
             try:
                 perception_log.close()
@@ -605,6 +619,7 @@ def _parse_cli_args(argv: Optional[list[str]]) -> argparse.Namespace:
         choices=["dev", "jetson_perception", "jetson_full"],
         help="Override mode from config",
     )
+    parser.add_argument("--record-pov", action="store_true", help="Record up to ten minutes of silent 720p/20fps POV video; requires ffmpeg")
     parser.add_argument("--manual", action="store_true", help="Enable manually triggered deterministic gestures")
     parser.add_argument("--enable", action="store_true", help="Required for --manual with jetson_full")
     parser.add_argument("--performances", default="config/performances.json", help="Validated gesture library for --manual")

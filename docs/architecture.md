@@ -13,15 +13,15 @@ The stable runtime contract remains:
 PerceptionState -> ActionPlan -> HardwareCommand
 ```
 
-## Current Reset Baseline
+## Runtime modes
 
-PALA is between behavior architectures. The V4 mode FSM, skills, prompts,
-decision schema, and ActionGuard were removed intentionally before designing the
-next model-driven behavior agent.
+The default behavior emits one persistent `hold` action and uses dummy backends
+in dev mode. Opt-in manual performances and the supervised camera/Gemini demo
+share the same four loops and typed control/hardware contracts.
 
-By default, the behavior loop emits one persistent `hold` action. This is not a
-fallback behavior architecture; it is a temporary contract-preserving baseline
-that keeps the four-loop runtime executable while Phase 3 is designed.
+The [live interaction](live_interaction.md) runner uses stationary camera snapshots
+for semantic observations. Local code selects and sequences fixed performances;
+the model never writes joint targets or hardware commands.
 
 ## Perception
 
@@ -34,20 +34,15 @@ FrameSource -> PerceptionNode -> LatestFrameCache + PerceptionState
 `PerceptionState` reports frame identity, freshness, timing, FPS, and source
 health. It does not report people, objects, zones, gestures, or pointing.
 
-Local DeepStream detection was removed from the runtime. Reintroduction notes
-are preserved in `pala/perception/DEEPSTREAM_REINTRODUCTION.md`.
+Local DeepStream detection is not part of the active runtime. Semantic image
+interpretation runs only in the opt-in model tools.
 
 ## Behavior
 
-The behavior package retains:
-
-- model transport clients
-- deterministic JSON extraction
-- a hold-only default policy
-- an opt-in manual request gate for deterministic performances
-
-Model-driven behavior remains deferred. The manual interaction introduces only
-explicit pose states and operator requests; camera capture does not select gestures.
+The behavior package includes a hold-only default policy, manual performance
+request gate, model transport clients, and validation for social observations.
+The live-demo supervisor uses one model request in flight and rejects stale,
+invalid, or context-mismatched results before requesting a local performance.
 
 ## Control and Hardware
 
@@ -83,13 +78,15 @@ The main runtime's four-loop deadman does not apply to these standalone tools.
 
 ## Logging
 
-The reset baseline writes:
+The default runtime writes:
 
 - `perception.jsonl`: capture state and source health
 - `actions.jsonl`: emitted hold actions
 - optional preview image and metadata files for telemetry
 
-Model-decision and reasoning logs will be specified with the Phase 3 contract.
+Manual/live runs also write `interaction.jsonl` and recipe/configuration snapshots.
+Live model observations, source images, and session settings are recorded under
+`logs/attention_probe/<session>/`; see the live interaction guide.
 
 Live telemetry defaults to the runtime view. Joint positions and enable state
 are explicitly commanded values; applied hardware and deadman status are
@@ -115,5 +112,5 @@ started, a hardware deadman expiry stops the session without automatic resume.
 
 Manual runs add recipe/configuration snapshots and `interaction.jsonl` execution
 reports; their `actions.jsonl` records step transitions instead of hold-only
-decisions. Individual source gestures received operator acceptance; the composed
-interaction requires supervised physical validation.
+decisions. The separate live-demo composition has supervised rehearsal evidence described
+in the live interaction guide. This does not establish unattended reliability.

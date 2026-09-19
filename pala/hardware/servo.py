@@ -1,8 +1,4 @@
-"""Servo interfaces and dummy implementation.
-
-TODO: Port legacy PCA9685 driver from ../pala_old/pala_project/src/hardware/servos.py
-      into pala/hardware/servo_pca9685.py
-"""
+"""Servo interfaces, dummy implementation, and PCA9685 backend adapter."""
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, List

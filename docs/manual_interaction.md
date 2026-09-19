@@ -87,7 +87,7 @@ For first physical acceptance, check startup → rest, then `greet`, then `settl
 then `shutdown`. Evaluate the new transitions before running `demo`. Repeat the
 accepted complete interaction three times and note any inconsistent motion,
 interpretation, or mechanical concern. Record video only when the transitions
-are satisfactory. Camera-triggered behavior is a later milestone.
+are satisfactory. For the separate camera-triggered demo, see [live interaction](live_interaction.md).
 
 ## Evidence and failure behavior
 

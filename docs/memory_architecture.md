@@ -1,10 +1,12 @@
 # Behavior memory boundary
 
-The current hold-only runtime has no model memory or scene interpretation.
-Earlier identity/transcript experiments are historical and are not loaded by
-`pala.main`.
+The default hold policy has no scene interpretation or model memory. The opt-in
+live interaction maintains session-local state: current stage, active performance,
+presence already noticed, greeting/excitement limits, pointing release/cooldown,
+observation generation, and automatic rearming.
 
-The next behavior slice will use a small amount of execution context: active
-skill, status, recent accepted outcomes, and greeting/re-arm bookkeeping.
-This contract remains to be designed with the skill runner. Persistent
-autobiographical memory and a separate summarizer are outside the V1 scope.
+Presence persists across automatic rearms so a seated person does not repeatedly
+trigger notice. Two valid absent observations at rest spanning four seconds allow
+a later arrival to be noticed again. This is bookkeeping, not person recognition.
+The state is not persistent identity or autobiographical memory. A separate
+summarizer, long-term learning, and transcript memory are outside V1.

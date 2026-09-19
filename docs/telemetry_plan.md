@@ -1,6 +1,6 @@
 # Telemetry scope
 
-The implemented transport is an optional SSH sidecar. The current workshop
+The implemented transport is an optional SSH sidecar. The supervised demo and workshop
 uses the existing runtime preview tap, JSONL logs, and Mac viewer. See
 [the usage guide](../tools/telemetry/README.md) for commands and panel choices.
 
@@ -14,9 +14,8 @@ monotonic clocks are not comparable. The command attached to a preview frame
 is a sampled command snapshot; it is not proof of physical execution.
 
 Existing capture/replay, reasoning, trace analysis, and curation modules are
-retained. V3/V4 reasoning tools serve historical sessions; current hold-only
-runs do not produce those semantic streams. Full telemetry removal is
-deferred until the workshop path has been exercised.
+retained. V3/V4 reasoning tools serve historical sessions; current runs do not produce the old V3/V4 semantic streams. Live-demo
+observations and execution reports use their own run logs.
 
 No WebRTC migration, new dashboard, or hardware-status publisher is part of
 the cleanup. Any later structured execution-status output must be optional,

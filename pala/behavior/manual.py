@@ -21,15 +21,19 @@ class ManualBehaviorPolicy:
 
     def request(self, name: str) -> tuple[bool, str]:
         with self._lock:
-            if name not in {"greet", "attend", "settle", "demo", "shutdown", "notice", "excite"}:
+            if name not in {"greet", "attend", "settle", "demo", "shutdown", "notice", "excite", "point_left", "point_right", "breathe", "breathe_sway"}:
                 return False, "Unknown request"
-            if name in {"notice", "excite"} and name not in self.library.performances:
+            if name in {"notice", "excite", "point_left", "point_right", "breathe", "breathe_sway"} and name not in self.library.performances:
                 return False, "Performance unavailable in this library"
             if self._closing or self._failed:
                 return False, "Shutdown or failure is already in progress"
             if name != "shutdown":
                 if self._busy:
                     return False, "Busy; request rejected rather than queued or interrupting"
+                if name in {"breathe", "breathe_sway"} and self._state != "rest":
+                    return False, "Breathing requires rest"
+                if name.startswith("point_") and (self._state not in {"attention", "excited"} or not self._greeted):
+                    return False, "Pointing requires a completed greeting"
                 if name == "notice" and (self._state != "rest" or self._greeted):
                     return False, "Notice requires unengaged rest"
                 if name == "excite" and (self._state != "attention" or not self._greeted):

@@ -82,6 +82,7 @@ def _send_single_joint(
     joint_names: List[str],
     current_cmd_rad: List[float],
     *,
+    joint_limits_rad: List[List[float]],
     smoothing: bool,
     slew_rate_deg_s: float,
     interp_dt_s: float,
@@ -95,6 +96,7 @@ def _send_single_joint(
         servo,
         current_cmd_rad,
         target,
+        joint_limits_rad=joint_limits_rad,
         smoothing=smoothing,
         slew_rate_deg_s=slew_rate_deg_s,
         interp_dt_s=interp_dt_s,
@@ -105,6 +107,7 @@ def _cmd_neutral(
     servo: PCA9685Servo,
     current_cmd_rad: List[float],
     *,
+    joint_limits_rad: List[List[float]],
     smoothing: bool,
     slew_rate_deg_s: float,
     interp_dt_s: float,
@@ -114,10 +117,23 @@ def _cmd_neutral(
         servo,
         current_cmd_rad,
         target,
+        joint_limits_rad=joint_limits_rad,
         smoothing=smoothing,
         slew_rate_deg_s=slew_rate_deg_s,
         interp_dt_s=interp_dt_s,
     )
+
+
+def _validate_target(target: List[float], joint_limits_rad: List[List[float]]) -> None:
+    if len(target) != len(joint_limits_rad):
+        raise ValueError("joint target and limits must have matching lengths")
+    for idx, (value, limits) in enumerate(zip(target, joint_limits_rad)):
+        lo, hi = limits
+        if not math.isfinite(value) or not lo <= value <= hi:
+            raise ValueError(
+                f"joint {idx} target must be finite and within "
+                f"[{math.degrees(lo):.3f}, {math.degrees(hi):.3f}] degrees"
+            )
 
 
 def _apply_command(
@@ -125,10 +141,17 @@ def _apply_command(
     current_cmd_rad: List[float],
     target_cmd_rad: List[float],
     *,
+    joint_limits_rad: List[List[float]],
     smoothing: bool,
     slew_rate_deg_s: float,
     interp_dt_s: float,
 ) -> None:
+    _validate_target(current_cmd_rad, joint_limits_rad)
+    _validate_target(target_cmd_rad, joint_limits_rad)
+    if not math.isfinite(slew_rate_deg_s) or slew_rate_deg_s <= 0:
+        raise ValueError("slew rate must be finite and positive")
+    if not math.isfinite(interp_dt_s) or interp_dt_s <= 0:
+        raise ValueError("interpolation interval must be finite and positive")
     if not smoothing:
         for i in range(len(current_cmd_rad)):
             current_cmd_rad[i] = float(target_cmd_rad[i])
@@ -187,6 +210,7 @@ def _run_repl(
     per_joint: dict,
     current_cmd_rad: List[float],
     *,
+    joint_limits_rad: List[List[float]],
     smoothing: bool,
     slew_rate_deg_s: float,
     interp_dt_s: float,
@@ -207,6 +231,7 @@ def _run_repl(
             _cmd_neutral(
                 servo,
                 current_cmd_rad,
+                joint_limits_rad=joint_limits_rad,
                 smoothing=smoothing,
                 slew_rate_deg_s=slew_rate_deg_s,
                 interp_dt_s=interp_dt_s,
@@ -234,11 +259,19 @@ def _run_repl(
         except ValueError:
             print(f"invalid degree value: {deg_raw}")
             continue
+        target = list(current_cmd_rad)
+        target[joint_names.index(joint)] = math.radians(joint_deg)
+        try:
+            _validate_target(target, joint_limits_rad)
+        except ValueError as exc:
+            print(f"Rejected command: {exc}")
+            continue
         _print_joint_map(joint, joint_deg, per_joint[joint])
         _send_single_joint(
             servo,
             joint_names,
             current_cmd_rad,
+            joint_limits_rad=joint_limits_rad,
             smoothing=smoothing,
             slew_rate_deg_s=slew_rate_deg_s,
             interp_dt_s=interp_dt_s,
@@ -278,6 +311,32 @@ def main() -> int:
     args = parser.parse_args()
 
     cfg = load_config(args.config)
+    joint_limits_rad = cfg.joint_limits_rad
+    # Reject invalid input before constructing a hardware backend or moving any joint.
+    needs_motion = args.neutral or args.repl or args.joint is not None
+    if needs_motion and not args.enable:
+        parser.error("hardware motion requires --enable")
+    if not math.isfinite(args.slew_rate_deg_s) or args.slew_rate_deg_s <= 0:
+        parser.error("slew rate must be finite and positive")
+    if not math.isfinite(args.interp_dt_s) or args.interp_dt_s <= 0:
+        parser.error("interpolation interval must be finite and positive")
+    if not math.isfinite(args.hold_s) or args.hold_s < 0:
+        parser.error("hold time must be finite and nonnegative")
+    try:
+        if needs_motion:
+            _validate_target([0.0 for _ in cfg.joint_names], joint_limits_rad)
+        if args.joint is not None:
+            if args.joint not in cfg.joint_names:
+                raise ValueError(f"Unknown joint: {args.joint}")
+            if (args.deg is None) == (args.rad is None):
+                raise ValueError("Provide exactly one of --deg or --rad with --joint")
+            target = [0.0 for _ in cfg.joint_names]
+            target[cfg.joint_names.index(args.joint)] = (
+                math.radians(args.deg) if args.deg is not None else args.rad
+            )
+            _validate_target(target, joint_limits_rad)
+    except ValueError as exc:
+        parser.error(str(exc))
     servo, joint_names, per_joint = _build_servo(cfg)
     current_cmd_rad = [0.0 for _ in joint_names]
     smoothing = not args.no_smoothing
@@ -300,6 +359,7 @@ def main() -> int:
                 joint_names,
                 per_joint,
                 current_cmd_rad,
+                joint_limits_rad=joint_limits_rad,
                 smoothing=smoothing,
                 slew_rate_deg_s=float(args.slew_rate_deg_s),
                 interp_dt_s=float(args.interp_dt_s),
@@ -309,6 +369,7 @@ def main() -> int:
             _cmd_neutral(
                 servo,
                 current_cmd_rad,
+                joint_limits_rad=joint_limits_rad,
                 smoothing=smoothing,
                 slew_rate_deg_s=float(args.slew_rate_deg_s),
                 interp_dt_s=float(args.interp_dt_s),
@@ -327,6 +388,7 @@ def main() -> int:
                 servo,
                 joint_names,
                 current_cmd_rad,
+                joint_limits_rad=joint_limits_rad,
                 smoothing=smoothing,
                 slew_rate_deg_s=float(args.slew_rate_deg_s),
                 interp_dt_s=float(args.interp_dt_s),
