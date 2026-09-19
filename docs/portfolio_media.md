@@ -1,8 +1,9 @@
 # Portfolio media
 
 The featured film is **PALA V1 Demo** (1:47). Publish it as the GitHub Release asset
-`pala-v1-demo.mp4`; keep the binary out of source history. The README thumbnail is
-an intentionally small tracked JPEG extracted from the approved film.
+`pala-v1-demo.mp4`; keep the binary out of source history. The README embeds a compressed 540p GitHub video attachment (under 10 MB),
+with a link to the full-quality release film. Both video copies stay outside Git
+history. The small tracked JPEG is retained as a reusable poster asset.
 
 ## Local production archive
 

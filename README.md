@@ -4,9 +4,9 @@
 
 PALA turns an IKEA NYMÅNE lamp into a physical desk companion. It notices someone sitting down, acknowledges a look toward its camera, celebrates a thumbs-up, follows a pointing direction, and settles back into a breathing rest pose. This is my first robotics portfolio project: custom printed mechanisms, embedded control, camera perception, and expressive motion brought together in a supervised V1 demo.
 
-[![PALA — physical demo, simulator and commanded motion](docs/assets/pala-demo.jpg)](https://github.com/djduecaster/pala/releases/tag/v0.1.0)
+https://github.com/user-attachments/assets/bdd66a1e-fc92-461a-8403-59784bc540fe
 
-**[Watch the PALA V1 demo](https://github.com/djduecaster/pala/releases/tag/v0.1.0)** · 1 minute 47 seconds · The film is distributed as `pala-v1-demo.mp4` in GitHub Releases. Its simulator and joint charts reconstruct commanded motion; they are not measured servo telemetry.
+**[Download the full-quality PALA V1 demo](https://github.com/djduecaster/pala/releases/tag/v0.1.0)** · 1 minute 47 seconds · The inline player uses a compressed copy; the full-quality film is distributed as `pala-v1-demo.mp4` in GitHub Releases. Its simulator and joint charts reconstruct commanded motion; they are not measured servo telemetry.
 
 ## The interaction
 
